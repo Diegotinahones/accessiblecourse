@@ -1,0 +1,2 @@
+"""AccessibleCourse backend package."""
+

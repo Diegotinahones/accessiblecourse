@@ -2,6 +2,8 @@ import type {
   ChecklistSaveRequest,
   ChecklistSaveResult,
   ChecklistTemplatesResponse,
+  JobStatus,
+  ReportGenerateOptions,
   ReportResponse,
   ResourceDetailResponse,
   ResourceListResponse,
@@ -9,6 +11,20 @@ import type {
 } from './types';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '';
+
+interface JobCreatedResponse {
+  jobId: string;
+}
+
+interface JobStatusResponse {
+  jobId: string;
+  status: 'created' | 'processing' | 'done' | 'error';
+  progress: number;
+  message: string;
+  currentStep: number;
+  totalSteps: number;
+  errorCode?: string | null;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -20,15 +36,29 @@ export class ApiError extends Error {
   }
 }
 
+function getErrorMessage(payload: unknown): string {
+  if (payload && typeof payload === 'object') {
+    if ('message' in payload && typeof payload.message === 'string') {
+      return payload.message;
+    }
+
+    if ('detail' in payload && typeof payload.detail === 'string') {
+      return payload.detail;
+    }
+  }
+
+  return 'Ha ocurrido un error inesperado.';
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  const response = await fetch(resolveApiUrl(path), init);
 
   if (!response.ok) {
     let message = 'Ha ocurrido un error inesperado.';
 
     try {
-      const payload = (await response.json()) as { detail?: string };
-      message = payload.detail ?? message;
+      const payload = (await response.json()) as unknown;
+      message = getErrorMessage(payload);
     } catch {
       message = response.statusText || message;
     }
@@ -39,16 +69,58 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+export function resolveApiUrl(path: string): string {
+  if (/^https?:\/\//.test(path)) {
+    return path;
+  }
+
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+
+  if (!API_BASE_URL) {
+    return normalizedPath;
+  }
+
+  if (normalizedPath === API_BASE_URL || normalizedPath.startsWith(`${API_BASE_URL}/`)) {
+    return normalizedPath;
+  }
+
+  return `${API_BASE_URL}${normalizedPath}`;
+}
+
+export const api = {
+  async createJob(file: File): Promise<JobCreatedResponse> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    return request<JobCreatedResponse>('/jobs', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+
+  async getJobStatus(jobId: string): Promise<JobStatus> {
+    const payload = await request<JobStatusResponse>(`/jobs/${jobId}`);
+
+    return {
+      status: payload.status === 'created' ? 'processing' : payload.status,
+      progress: payload.progress,
+      message: payload.message,
+      currentStep: payload.currentStep,
+      totalSteps: payload.totalSteps,
+    };
+  },
+};
+
 export function fetchResources(jobId: string): Promise<ResourceListResponse> {
-  return request<ResourceListResponse>(`/api/jobs/${jobId}/resources`);
+  return request<ResourceListResponse>(`/jobs/${jobId}/resources`);
 }
 
 export function fetchResourceDetail(jobId: string, resourceId: string): Promise<ResourceDetailResponse> {
-  return request<ResourceDetailResponse>(`/api/jobs/${jobId}/resources/${resourceId}`);
+  return request<ResourceDetailResponse>(`/jobs/${jobId}/resources/${resourceId}`);
 }
 
 export function fetchChecklistTemplates(): Promise<ChecklistTemplatesResponse> {
-  return request<ChecklistTemplatesResponse>('/api/checklists/templates');
+  return request<ChecklistTemplatesResponse>('/checklists/templates');
 }
 
 export function saveChecklist(
@@ -56,7 +128,7 @@ export function saveChecklist(
   resourceId: string,
   payload: ChecklistSaveRequest,
 ): Promise<ChecklistSaveResult> {
-  return request<ChecklistSaveResult>(`/api/jobs/${jobId}/resources/${resourceId}/checklist`, {
+  return request<ChecklistSaveResult>(`/jobs/${jobId}/resources/${resourceId}/checklist`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -66,11 +138,26 @@ export function saveChecklist(
 }
 
 export function fetchSummary(jobId: string): Promise<ReviewSummary> {
-  return request<ReviewSummary>(`/api/jobs/${jobId}/summary`);
+  return request<ReviewSummary>(`/jobs/${jobId}/summary`);
 }
 
-export function exportReport(jobId: string): Promise<ReportResponse> {
-  return request<ReportResponse>(`/api/jobs/${jobId}/report`, {
+export function fetchReport(jobId: string): Promise<ReportResponse> {
+  return request<ReportResponse>(`/jobs/${jobId}/report`);
+}
+
+export function generateReport(jobId: string, options?: ReportGenerateOptions): Promise<ReportResponse> {
+  return request<ReportResponse>(`/jobs/${jobId}/report`, {
     method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      includePending: options?.includePending ?? true,
+      onlyFails: options?.onlyFails ?? false,
+    }),
   });
+}
+
+export function getReportDownloadUrl(path: string): string {
+  return resolveApiUrl(path);
 }

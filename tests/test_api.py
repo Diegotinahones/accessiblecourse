@@ -1,0 +1,325 @@
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+from zipfile import ZipFile
+
+from sqlmodel import Session, select
+
+from app.models import Job as ProcessingJob
+from app.models.entities import ChecklistResponse
+from tests.conftest import build_sample_imscc
+
+
+def write_inventory(test_settings, job_id: str, resources: list[dict[str, object]]) -> None:
+    job_dir = test_settings.storage_root / 'jobs' / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / 'resources.json').write_text(json.dumps(resources), encoding='utf-8')
+
+
+def build_large_imscc(payload_size: int) -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, 'w') as archive:
+        archive.writestr(
+            'imsmanifest.xml',
+            """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imscp_v1p1">
+  <resources>
+    <resource identifier="res-1" type="webcontent" href="module_1/large.bin">
+      <file href="module_1/large.bin" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        )
+        archive.writestr('module_1/large.bin', b'A' * payload_size)
+    return buffer.getvalue()
+
+
+def test_bootstrap_inventory_and_persist_checklist(client, test_settings) -> None:
+    job_id = 'job-thread4-bootstrap'
+    write_inventory(
+        test_settings,
+        job_id,
+        [
+            {
+                'id': 'web-home',
+                'title': 'Portada del curso',
+                'type': 'WEB',
+                'origin': 'imscc:webcontent',
+                'url': 'https://example.edu/course/home',
+                'path': 'course/home.html',
+                'course_path': 'Inicio/Portada',
+                'status': 'OK',
+            },
+            {
+                'id': 'pdf-guide',
+                'title': 'Guia docente',
+                'type': 'PDF',
+                'origin': 'imscc:file',
+                'url': 'https://example.edu/files/guide.pdf',
+                'path': 'docs/guide.pdf',
+                'course_path': 'Documentacion/Guia',
+                'status': 'WARN',
+                'notes': ['PDF pendiente de etiquetado'],
+            },
+        ],
+    )
+
+    resources_response = client.get(f'/api/jobs/{job_id}/resources')
+    assert resources_response.status_code == 200, resources_response.text
+    resources_payload = resources_response.json()
+    assert resources_payload['jobId'] == job_id
+    assert len(resources_payload['resources']) == 2
+    assert resources_payload['reviewSession']['status'] == 'NOT_STARTED'
+
+    detail_response = client.get(f'/api/jobs/{job_id}/resources/pdf-guide')
+    assert detail_response.status_code == 200, detail_response.text
+    detail_payload = detail_response.json()
+    assert detail_payload['resource']['notes'] == 'PDF pendiente de etiquetado'
+    assert all(item['value'] == 'PENDING' for item in detail_payload['checklist']['items'])
+
+    save_response = client.put(
+        f'/api/jobs/{job_id}/resources/pdf-guide/checklist',
+        json={
+            'responses': [
+                {'itemKey': 'tagged', 'value': 'FAIL', 'comment': 'No tiene estructura etiquetada.'},
+                {'itemKey': 'lang', 'value': 'PASS'},
+            ]
+        },
+    )
+    assert save_response.status_code == 200, save_response.text
+    save_payload = save_response.json()
+    assert save_payload['resourceId'] == 'pdf-guide'
+    assert save_payload['reviewState'] == 'NEEDS_FIX'
+    assert save_payload['failCount'] == 1
+
+    persisted_detail_response = client.get(f'/api/jobs/{job_id}/resources/pdf-guide')
+    assert persisted_detail_response.status_code == 200, persisted_detail_response.text
+    persisted_detail = persisted_detail_response.json()
+    tagged_item = next(item for item in persisted_detail['checklist']['items'] if item['itemKey'] == 'tagged')
+    assert tagged_item['value'] == 'FAIL'
+    assert tagged_item['comment'] == 'No tiene estructura etiquetada.'
+    assert persisted_detail['resource']['reviewState'] == 'NEEDS_FIX'
+    assert persisted_detail['reviewSession']['status'] == 'IN_PROGRESS'
+
+    summary_response = client.get(f'/api/jobs/{job_id}/summary')
+    assert summary_response.status_code == 200, summary_response.text
+    summary_payload = summary_response.json()
+    assert summary_payload['totalResources'] == 2
+    assert summary_payload['totalFailItems'] == 1
+    assert summary_payload['resources'][0]['resourceId'] == 'pdf-guide'
+    assert summary_payload['resources'][0]['recommendations'][0]['itemKey'] == 'tagged'
+    assert summary_payload['resources'][0]['recommendations'][0]['recommendation']
+
+    report_response = client.post(f'/api/jobs/{job_id}/report')
+    assert report_response.status_code == 200, report_response.text
+    report_payload = report_response.json()
+    assert report_payload['meta']['jobId'] == job_id
+    assert report_payload['stats'] == {'resources': 2, 'fails': 1, 'pending': 14}
+    assert report_payload['summary']['topResources'][0]['resourceId'] == 'pdf-guide'
+    assert report_payload['routes'][0]['resources']
+    assert report_payload['resources'][0]['pending'] or report_payload['resources'][0]['fails']
+
+    report_dir = test_settings.storage_root / 'jobs' / job_id / 'report'
+    json_path = report_dir / 'report.json'
+    docx_path = report_dir / 'report.docx'
+    pdf_path = report_dir / 'report.pdf'
+    assert json_path.exists()
+    assert docx_path.exists()
+    assert pdf_path.exists()
+    assert docx_path.stat().st_size > 0
+    assert pdf_path.stat().st_size > 0
+
+    stored_payload = json.loads(json_path.read_text(encoding='utf-8'))
+    assert stored_payload['reportId'] == report_payload['reportId']
+    assert stored_payload['summary']['fails'] == 1
+    assert stored_payload['summary']['pending'] == 14
+
+    latest_report_response = client.get(f'/api/jobs/{job_id}/report')
+    assert latest_report_response.status_code == 200, latest_report_response.text
+    latest_report_payload = latest_report_response.json()
+    assert latest_report_payload['reportId'] == report_payload['reportId']
+
+    download_docx_response = client.get(f'/api/jobs/{job_id}/report/download?format=docx')
+    assert download_docx_response.status_code == 200, download_docx_response.text
+    assert (
+        download_docx_response.headers['content-type']
+        == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    )
+    assert 'attachment;' in download_docx_response.headers['content-disposition']
+    assert f'AccessibleCourse_Report_{job_id}_' in download_docx_response.headers['content-disposition']
+    assert len(download_docx_response.content) > 0
+
+    download_pdf_response = client.get(f'/api/jobs/{job_id}/report/download?format=pdf')
+    assert download_pdf_response.status_code == 200, download_pdf_response.text
+    assert download_pdf_response.headers['content-type'] == 'application/pdf'
+    assert len(download_pdf_response.content) > 0
+
+    download_json_response = client.get(f'/api/jobs/{job_id}/report/download?format=json')
+    assert download_json_response.status_code == 200, download_json_response.text
+    assert download_json_response.json()['reportId'] == report_payload['reportId']
+
+
+def test_upload_returns_clear_413_when_limit_is_exceeded(client, test_settings) -> None:
+    oversized_imscc = build_large_imscc(payload_size=(test_settings.max_upload_bytes + 1024))
+
+    response = client.post(
+        '/api/jobs',
+        files={'file': ('oversized-course.imscc', oversized_imscc, 'application/octet-stream')},
+    )
+
+    assert response.status_code == 413, response.text
+    payload = response.json()
+    assert payload['code'] == 'UPLOAD_TOO_LARGE'
+    assert payload['message'] == 'El archivo supera el l\u00edmite configurado'
+    assert payload['maxMB'] == test_settings.max_upload_mb
+    assert payload['actualMB'] > test_settings.max_upload_mb
+
+    with Session(client.app.state.engine) as session:
+        jobs = session.exec(select(ProcessingJob)).all()
+
+    assert jobs == []
+
+
+def test_upload_within_limit_returns_201(client) -> None:
+    response = client.post(
+        '/api/jobs',
+        files={'file': ('course.imscc', build_sample_imscc(), 'application/octet-stream')},
+    )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload['jobId']
+
+    with Session(client.app.state.engine) as session:
+        jobs = session.exec(select(ProcessingJob)).all()
+
+    assert len(jobs) == 1
+
+
+def test_checklist_upsert_is_idempotent(client, test_settings) -> None:
+    job_id = 'job-thread4-upsert'
+    write_inventory(
+        test_settings,
+        job_id,
+        [
+            {
+                'id': 'course-home',
+                'title': 'Inicio',
+                'type': 'WEB',
+                'origin': 'imscc:webcontent',
+                'path': 'course/home.html',
+                'course_path': 'Inicio',
+                'status': 'OK',
+            }
+        ],
+    )
+
+    payload = {
+        'responses': [
+            {'itemKey': 'keyboard', 'value': 'PASS'},
+            {'itemKey': 'focus', 'value': 'FAIL', 'comment': 'El foco apenas se ve.'},
+        ]
+    }
+
+    first_save = client.put(f'/api/jobs/{job_id}/resources/course-home/checklist', json=payload)
+    assert first_save.status_code == 200, first_save.text
+
+    second_save = client.put(f'/api/jobs/{job_id}/resources/course-home/checklist', json=payload)
+    assert second_save.status_code == 200, second_save.text
+    assert second_save.json()['reviewState'] == 'NEEDS_FIX'
+    assert second_save.json()['failCount'] == 1
+
+    with Session(client.app.state.engine) as session:
+        persisted = session.exec(
+            select(ChecklistResponse).where(
+                ChecklistResponse.job_id == job_id,
+                ChecklistResponse.resource_id == 'course-home',
+            )
+        ).all()
+
+    assert len(persisted) == 2
+    assert sorted(response.item_key for response in persisted) == ['focus', 'keyboard']
+
+
+def test_review_state_transitions(client, test_settings) -> None:
+    job_id = 'job-thread4-states'
+    write_inventory(
+        test_settings,
+        job_id,
+        [
+            {
+                'id': 'lesson-video',
+                'title': 'Video de apoyo',
+                'type': 'VIDEO',
+                'origin': 'external',
+                'url': 'https://example.edu/video',
+                'course_path': 'Modulo 1/Video',
+                'status': 'WARN',
+            }
+        ],
+    )
+
+    detail_response = client.get(f'/api/jobs/{job_id}/resources/lesson-video')
+    assert detail_response.status_code == 200, detail_response.text
+    item_keys = [item['itemKey'] for item in detail_response.json()['checklist']['items']]
+
+    in_review_response = client.put(
+        f'/api/jobs/{job_id}/resources/lesson-video/checklist',
+        json={'responses': [{'itemKey': item_keys[0], 'value': 'PASS'}]},
+    )
+    assert in_review_response.status_code == 200, in_review_response.text
+    assert in_review_response.json()['reviewState'] == 'IN_REVIEW'
+    assert in_review_response.json()['failCount'] == 0
+
+    needs_fix_response = client.put(
+        f'/api/jobs/{job_id}/resources/lesson-video/checklist',
+        json={'responses': [{'itemKey': item_keys[1], 'value': 'FAIL'}]},
+    )
+    assert needs_fix_response.status_code == 200, needs_fix_response.text
+    assert needs_fix_response.json()['reviewState'] == 'NEEDS_FIX'
+    assert needs_fix_response.json()['failCount'] == 1
+
+    all_pass_response = client.put(
+        f'/api/jobs/{job_id}/resources/lesson-video/checklist',
+        json={'responses': [{'itemKey': item_key, 'value': 'PASS'} for item_key in item_keys]},
+    )
+    assert all_pass_response.status_code == 200, all_pass_response.text
+    assert all_pass_response.json()['reviewState'] == 'OK'
+    assert all_pass_response.json()['failCount'] == 0
+
+    resources_response = client.get(f'/api/jobs/{job_id}/resources')
+    assert resources_response.status_code == 200, resources_response.text
+    resource = resources_response.json()['resources'][0]
+    assert resource['reviewState'] == 'OK'
+    assert resource['failCount'] == 0
+    assert resources_response.json()['reviewSession']['status'] == 'COMPLETE'
+
+
+def test_report_generation_requires_finished_job(client, test_settings) -> None:
+    job_id = '5e6d779a-5df6-4cc7-b54f-b5fa7af915c9'
+    job_dir = Path(test_settings.storage_root) / 'jobs' / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    with Session(client.app.state.engine) as session:
+        session.add(
+            ProcessingJob(
+                id=job_id,
+                original_filename='course.imscc',
+                stored_filename='course.imscc',
+                size_bytes=1024,
+                storage_dir=str(job_dir),
+                status='processing',
+                progress=50,
+                current_step=2,
+                total_steps=4,
+                message='Procesando curso',
+            )
+        )
+        session.commit()
+
+    response = client.post(f'/api/jobs/{job_id}/report')
+    assert response.status_code == 409, response.text
+    assert response.json()['message'] == 'Job aun en proceso.'

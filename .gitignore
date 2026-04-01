@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+.env
+app/**/__pycache__/
+tests/**/__pycache__/
+data/*
+!data/.gitkeep
+openapi.json
+.vercel

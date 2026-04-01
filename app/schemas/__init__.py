@@ -1,0 +1,337 @@
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.entities import (
+    ChecklistValue as ReviewChecklistValue,
+    ResourceHealthStatus as ReviewResourceHealthStatus,
+    ResourceType as ReviewResourceType,
+    ReviewSessionStatus as ReviewSessionStatusEnum,
+    ReviewState as ReviewStateEnum,
+)
+
+
+class JobLifecycleStatus(str, Enum):
+    CREATED = 'created'
+    PROCESSING = 'processing'
+    DONE = 'done'
+    ERROR = 'error'
+
+
+class ResourceType(str, Enum):
+    PDF = 'PDF'
+    WEB = 'Web'
+    VIDEO = 'Video'
+    NOTEBOOK = 'Notebook'
+    OTHER = 'Other'
+
+
+class ResourceOrigin(str, Enum):
+    INTERNO = 'interno'
+    EXTERNO = 'externo'
+
+
+class ResourceState(str, Enum):
+    OK = 'OK'
+    WARNING = 'AVISO'
+    ERROR = 'ERROR'
+
+
+class ChecklistDecision(str, Enum):
+    PENDING = 'pending'
+    PASS = 'pass'
+    FAIL = 'fail'
+
+
+class ChecklistItem(BaseModel):
+    id: str
+    label: str
+    recommendation: str
+
+
+class ResourceResponse(BaseModel):
+    id: str
+    title: str
+    type: ResourceType
+    origin: ResourceOrigin
+    status: ResourceState
+    href: str | None = None
+
+
+class JobCreatedResponse(BaseModel):
+    jobId: str
+
+
+class JobStatusResponse(BaseModel):
+    jobId: str
+    status: JobLifecycleStatus
+    progress: int
+    message: str
+    currentStep: int
+    totalSteps: int
+    errorCode: str | None = None
+
+
+class ChecklistStateResponse(BaseModel):
+    jobId: str
+    state: dict[str, dict[str, ChecklistDecision]]
+
+
+class ChecklistUpdateRequest(BaseModel):
+    items: dict[str, ChecklistDecision] = Field(default_factory=dict)
+
+
+class ReportFailure(BaseModel):
+    itemId: str
+    label: str
+    recommendation: str
+
+
+class ReportGroup(BaseModel):
+    resource: ResourceResponse
+    failures: list[ReportFailure]
+
+
+class ReportDownloads(BaseModel):
+    pdfUrl: str
+    docxUrl: str
+
+
+class GeneratedReportResponse(BaseModel):
+    jobId: str
+    resourceCount: int
+    failedItemCount: int
+    groups: list[ReportGroup]
+    generatedAt: datetime
+    downloads: ReportDownloads
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    time: datetime
+
+
+class ProblemDetails(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
+    type: str = 'about:blank'
+    title: str
+    status: int
+    code: str
+    message: str
+    details: Any | None = None
+    jobId: str | None = None
+    path: str
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+
+class ReviewSessionRead(StrictModel):
+    jobId: str
+    status: ReviewSessionStatusEnum
+    startedAt: datetime | None = None
+    updatedAt: datetime
+
+
+class ResourceListItemRead(StrictModel):
+    id: str
+    jobId: str
+    title: str
+    type: ReviewResourceType
+    origin: str | None = None
+    url: str | None = None
+    path: str | None = None
+    coursePath: str | None = None
+    status: ReviewResourceHealthStatus
+    notes: str | None = None
+    reviewState: ReviewStateEnum
+    failCount: int
+    updatedAt: datetime
+
+
+class ResourceListPayload(StrictModel):
+    jobId: str
+    resources: list[ResourceListItemRead]
+    reviewSession: ReviewSessionRead
+
+
+class ChecklistTemplateItemRead(StrictModel):
+    itemKey: str
+    label: str
+    description: str | None = None
+    recommendation: str | None = None
+
+
+class ChecklistTemplateRead(StrictModel):
+    templateId: str
+    resourceType: ReviewResourceType
+    items: list[ChecklistTemplateItemRead]
+
+
+class ChecklistItemRead(StrictModel):
+    itemKey: str
+    label: str
+    description: str | None = None
+    recommendation: str | None = None
+    value: ReviewChecklistValue
+    comment: str | None = None
+
+
+class ChecklistDetailRead(StrictModel):
+    templateId: str
+    resourceType: ReviewResourceType
+    items: list[ChecklistItemRead]
+
+
+class ChecklistTemplatesResponse(StrictModel):
+    templates: dict[ReviewResourceType, ChecklistTemplateRead]
+
+
+class ResourceDetailPayload(StrictModel):
+    resource: ResourceListItemRead
+    checklist: ChecklistDetailRead
+    reviewSession: ReviewSessionRead
+
+
+class ChecklistResponseInput(StrictModel):
+    itemKey: str
+    value: ReviewChecklistValue
+    comment: str | None = None
+
+
+class ChecklistSaveRequest(StrictModel):
+    responses: list[ChecklistResponseInput]
+
+
+class ChecklistSaveResult(StrictModel):
+    resourceId: str
+    reviewState: ReviewStateEnum
+    failCount: int
+    updatedAt: datetime
+
+
+class ReviewFailItemRead(StrictModel):
+    itemKey: str
+    label: str
+    recommendation: str | None = None
+    comment: str | None = None
+
+
+class ReviewFailResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    resourceType: ReviewResourceType
+    reviewState: ReviewStateEnum
+    failCount: int
+    recommendations: list[ReviewFailItemRead]
+
+
+class ReviewSummaryPayload(StrictModel):
+    jobId: str
+    totalResources: int
+    totalFailItems: int
+    lastUpdated: datetime
+    reviewSession: ReviewSessionRead
+    resources: list[ReviewFailResourceRead]
+
+
+class ReportPayload(StrictModel):
+    jobId: str
+    generatedAt: datetime
+    summary: ReviewSummaryPayload
+
+
+class ReportGenerateRequest(StrictModel):
+    includePending: bool = True
+    onlyFails: bool = False
+
+
+class ReportFilesRead(StrictModel):
+    pdfUrl: str
+    docxUrl: str
+    jsonUrl: str
+
+
+class ReportStatsRead(StrictModel):
+    resources: int
+    fails: int
+    pending: int
+
+
+class ReportMetaRead(StrictModel):
+    reportId: str
+    createdAt: datetime
+    courseTitle: str | None = None
+    jobId: str
+    includePending: bool
+    onlyFails: bool
+    systemVersion: str
+
+
+class ReportTopResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    coursePath: str
+    failCount: int
+
+
+class ReportSummaryRead(StrictModel):
+    resources: int
+    fails: int
+    pending: int
+    topResources: list[ReportTopResourceRead]
+    recommendations: list[str]
+
+
+class ReportIssueRead(StrictModel):
+    itemKey: str
+    label: str
+    description: str
+    recommendation: str | None = None
+    severity: Literal['HIGH', 'MED', 'LOW']
+    status: Literal['FAIL', 'PENDING']
+    comment: str | None = None
+
+
+class ReportResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    type: str
+    origin: str
+    status: str
+    source: str | None = None
+    coursePath: str
+    stats: ReportStatsRead
+    fails: list[ReportIssueRead]
+    pending: list[ReportIssueRead]
+
+
+class ReportRouteRead(StrictModel):
+    coursePath: str
+    stats: ReportStatsRead
+    resources: list[ReportResourceRead]
+
+
+class ReportAppendixRead(StrictModel):
+    statusDefinitions: dict[str, str]
+    createdAt: datetime
+    systemVersion: str
+
+
+class JobReportRead(StrictModel):
+    reportId: str
+    createdAt: datetime
+    files: ReportFilesRead
+    stats: ReportStatsRead
+    meta: ReportMetaRead
+    summary: ReportSummaryRead
+    routes: list[ReportRouteRead]
+    resources: list[ReportResourceRead]
+    appendix: ReportAppendixRead

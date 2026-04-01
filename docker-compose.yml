@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/app.db}
+      STORAGE_ROOT: ${STORAGE_ROOT:-/app/data}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-13000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REPORT_BRAND_NAME: ${REPORT_BRAND_NAME:-AccessibleCourse}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - '8000:8000'
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: /api
+    depends_on:
+      - backend
+    ports:
+      - '8080:80'
+
+  db:
+    image: postgres:16-alpine
+    profiles: ['postgres']
+    environment:
+      POSTGRES_DB: accessiblecourse
+      POSTGRES_USER: accessiblecourse
+      POSTGRES_PASSWORD: accessiblecourse
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+
+volumes:
+  postgres_data:

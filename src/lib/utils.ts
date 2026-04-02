@@ -1,5 +1,7 @@
 import { ChecklistDecision } from './types';
 
+const COURSE_NAME_PREFIX = 'accessiblecourse.course-name';
+
 export function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(' ');
 }
@@ -34,16 +36,39 @@ export function buildStepMessage(progress: number) {
   }
 
   if (progress >= 75) {
-    return 'Preparando checklist de recursos';
+    return 'Generando inventario';
   }
 
   if (progress >= 50) {
-    return 'Revisando accesibilidad base';
+    return 'Resolviendo recursos';
   }
 
   if (progress >= 25) {
-    return 'Extrayendo recursos del curso';
+    return 'Parseando estructura';
   }
 
-  return 'Validando archivo del curso';
+  return 'Descomprimiendo paquete';
+}
+
+export function getCourseNameFromFilename(filename: string) {
+  return filename.replace(/\.[^/.]+$/, '').trim() || 'Curso sin título';
+}
+
+export function rememberCourseName(jobId: string, filename: string) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.sessionStorage.setItem(
+    `${COURSE_NAME_PREFIX}.${jobId}`,
+    getCourseNameFromFilename(filename),
+  );
+}
+
+export function loadRememberedCourseName(jobId: string) {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  return window.sessionStorage.getItem(`${COURSE_NAME_PREFIX}.${jobId}`);
 }

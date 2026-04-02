@@ -1,89 +1,247 @@
-import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-
-import { InventoryStatusBadge, ReviewStateBadge, SessionStatusBadge } from '../components/StatusBadge';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import {
-  fetchChecklistTemplates,
   fetchResourceDetail,
   fetchResources,
+  generateReport,
   saveChecklist,
 } from '../lib/api';
 import type {
   ResourceDetailResponse,
   ResourceListItem,
   ReviewChecklistItem,
-  ReviewSession,
+  ReviewChecklistValue,
+  ReviewResourceType,
 } from '../lib/types';
-import {
-  formatDate,
-  getReviewResourceTypeLabel,
-  sortResourcesByPriority,
-} from '../lib/types';
+import { sortResourcesByPriority } from '../lib/types';
+import { classNames, loadRememberedCourseName } from '../lib/utils';
 
 type SaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
+type ResourceGroupKey = 'WEB' | 'PDF' | 'VIDEO' | 'OTHER';
+type VisualReviewState = 'SIN_REVISAR' | 'EN_REVISION' | 'OK' | 'REQUIERE_CAMBIOS';
 
-const DEFAULT_JOB_ID = 'demo-accessible-course';
+const GROUP_ORDER: ResourceGroupKey[] = ['WEB', 'PDF', 'VIDEO', 'OTHER'];
 
-const RESPONSE_OPTIONS: Array<{ label: string; value: ReviewChecklistItem['value'] }> = [
-  { label: 'Pendiente', value: 'PENDING' },
+const GROUP_LABELS: Record<ResourceGroupKey, string> = {
+  WEB: 'Web',
+  PDF: 'PDF',
+  VIDEO: 'Vídeo',
+  OTHER: 'Otro',
+};
+
+const EMPTY_EXPANDED_GROUPS: Record<ResourceGroupKey, boolean> = {
+  WEB: false,
+  PDF: false,
+  VIDEO: false,
+  OTHER: false,
+};
+
+const RESPONSE_OPTIONS: Array<{ label: string; value: ReviewChecklistValue }> = [
   { label: 'Cumple', value: 'PASS' },
   { label: 'No cumple', value: 'FAIL' },
+  { label: 'Pendiente', value: 'PENDING' },
 ];
 
-function getSaveMessage(saveState: SaveState): string {
-  switch (saveState) {
-    case 'pending':
-      return 'Cambios pendientes de guardar';
-    case 'saving':
-      return 'Guardando checklist en la API...';
-    case 'saved':
-      return 'Checklist guardado';
-    case 'error':
-      return 'No se pudo guardar el checklist';
+function getGroupKey(type: ReviewResourceType): ResourceGroupKey {
+  if (type === 'WEB') {
+    return 'WEB';
+  }
+
+  if (type === 'PDF') {
+    return 'PDF';
+  }
+
+  if (type === 'VIDEO') {
+    return 'VIDEO';
+  }
+
+  return 'OTHER';
+}
+
+function hasChecklistActivity(items: ReviewChecklistItem[]) {
+  return items.some((item) => item.value !== 'PENDING' || Boolean(item.comment?.trim()));
+}
+
+function parseCommentFields(comment: string | null) {
+  const rawValue = comment?.trim() ?? '';
+  if (!rawValue) {
+    return { commentText: '', reportRecommendation: '' };
+  }
+
+  const recommendationMarker = 'Recomendación para el informe:';
+  const recommendationIndex = rawValue.indexOf(recommendationMarker);
+
+  if (recommendationIndex === -1) {
+    return {
+      commentText: rawValue.replace(/^Comentario:\s*/i, '').trim(),
+      reportRecommendation: '',
+    };
+  }
+
+  const commentText = rawValue
+    .slice(0, recommendationIndex)
+    .replace(/^Comentario:\s*/i, '')
+    .trim();
+
+  const reportRecommendation = rawValue
+    .slice(recommendationIndex + recommendationMarker.length)
+    .trim();
+
+  return { commentText, reportRecommendation };
+}
+
+function serializeCommentFields(commentText: string, reportRecommendation: string) {
+  const nextComment = commentText.trim();
+  const nextRecommendation = reportRecommendation.trim();
+
+  if (nextComment && nextRecommendation) {
+    return `Comentario:\n${nextComment}\n\nRecomendación para el informe:\n${nextRecommendation}`;
+  }
+
+  if (nextRecommendation) {
+    return `Recomendación para el informe:\n${nextRecommendation}`;
+  }
+
+  return nextComment;
+}
+
+function getVisualReviewState(
+  resource: ResourceListItem,
+  hasActivity: boolean | undefined,
+): VisualReviewState {
+  if (resource.reviewState === 'OK') {
+    return 'OK';
+  }
+
+  if (resource.reviewState === 'NEEDS_FIX') {
+    return 'REQUIERE_CAMBIOS';
+  }
+
+  return hasActivity ? 'EN_REVISION' : 'SIN_REVISAR';
+}
+
+function getReviewStateLabel(state: VisualReviewState) {
+  switch (state) {
+    case 'OK':
+      return 'OK';
+    case 'REQUIERE_CAMBIOS':
+      return 'Requiere cambios';
+    case 'EN_REVISION':
+      return 'En revisión';
     default:
-      return 'Sin cambios pendientes';
+      return 'Sin revisar';
   }
 }
 
+function getReviewStateClassName(state: VisualReviewState) {
+  switch (state) {
+    case 'OK':
+      return 'border-emerald-200 bg-emerald-50 text-[#166534]';
+    case 'REQUIERE_CAMBIOS':
+      return 'border-rose-200 bg-rose-50 text-danger';
+    case 'EN_REVISION':
+      return 'border-amber-200 bg-amber-50 text-[#8a5a00]';
+    default:
+      return 'border-slate-200 bg-slate-50 text-slate-700';
+  }
+}
+
+function getFooterMessage(
+  saveState: SaveState,
+  saveError: string | null,
+  generationError: string | null,
+  isGenerating: boolean,
+) {
+  if (generationError) {
+    return generationError;
+  }
+
+  if (isGenerating) {
+    return 'Generando informe…';
+  }
+
+  if (saveState === 'saving') {
+    return 'Guardando cambios…';
+  }
+
+  if (saveState === 'saved') {
+    return 'Cambios guardados.';
+  }
+
+  if (saveState === 'error') {
+    return saveError ?? 'No se pudieron guardar los cambios.';
+  }
+
+  if (saveState === 'pending') {
+    return 'Cambios pendientes. Se guardarán automáticamente.';
+  }
+
+  return 'Puedes generar el informe en cualquier momento.';
+}
+
 export function ResourcesPage() {
-  const params = useParams<{ jobId: string }>();
-  const jobId = params.jobId ?? DEFAULT_JOB_ID;
+  const { jobId } = useParams<{ jobId: string }>();
+  const navigate = useNavigate();
   const [resources, setResources] = useState<ResourceListItem[]>([]);
-  const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
+  const [expandedGroups, setExpandedGroups] =
+    useState<Record<ResourceGroupKey, boolean>>(EMPTY_EXPANDED_GROUPS);
+  const [expandedResourceId, setExpandedResourceId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ResourceDetailResponse | null>(null);
-  const [reviewSession, setReviewSession] = useState<ReviewSession | null>(null);
-  const [templateCount, setTemplateCount] = useState(0);
   const [loadingResources, setLoadingResources] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [screenError, setScreenError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [generationError, setGenerationError] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState('');
   const [isDirty, setIsDirty] = useState(false);
   const [draftVersion, setDraftVersion] = useState(0);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [resourceActivityMap, setResourceActivityMap] = useState<Record<string, boolean>>({});
   const draftVersionRef = useRef(0);
+  const saveQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
 
   useEffect(() => {
+    if (!jobId) {
+      setScreenError('Falta el identificador del curso.');
+      setLoadingResources(false);
+      return;
+    }
+
     let cancelled = false;
     setLoadingResources(true);
     setScreenError(null);
 
-    Promise.all([fetchResources(jobId), fetchChecklistTemplates()])
-      .then(([resourcePayload, templatePayload]) => {
+    fetchResources(jobId)
+      .then((payload) => {
         if (cancelled) {
           return;
         }
 
-        const orderedResources = sortResourcesByPriority(resourcePayload.resources);
+        const orderedResources = sortResourcesByPriority(payload.resources);
         setResources(orderedResources);
-        setTemplateCount(Object.keys(templatePayload.templates).length);
-        setReviewSession(resourcePayload.reviewSession);
-        setSelectedResourceId((current) => {
-          if (current && orderedResources.some((resource) => resource.id === current)) {
+        setExpandedGroups((current) => {
+          if (Object.values(current).some(Boolean)) {
             return current;
           }
 
-          return orderedResources[0]?.id ?? null;
+          const firstOpenGroup = GROUP_ORDER.find((groupKey) =>
+            orderedResources.some((resource) => getGroupKey(resource.type) === groupKey),
+          );
+
+          if (!firstOpenGroup) {
+            return current;
+          }
+
+          return {
+            WEB: false,
+            PDF: false,
+            VIDEO: false,
+            OTHER: false,
+            [firstOpenGroup]: true,
+          };
         });
       })
       .catch((error: Error) => {
@@ -103,31 +261,44 @@ export function ResourcesPage() {
   }, [jobId]);
 
   useEffect(() => {
-    if (!selectedResourceId) {
-      setDetail(null);
+    if (!jobId || !expandedResourceId) {
+      if (!expandedResourceId) {
+        setDetail(null);
+        setDetailError(null);
+        setLoadingDetail(false);
+      }
+
+      return;
+    }
+
+    if (detail?.resource.id === expandedResourceId) {
       return;
     }
 
     let cancelled = false;
     setLoadingDetail(true);
-    setSaveState('idle');
-    setSaveError(null);
+    setDetailError(null);
 
-    fetchResourceDetail(jobId, selectedResourceId)
+    fetchResourceDetail(jobId, expandedResourceId)
       .then((payload) => {
         if (cancelled) {
           return;
         }
 
         setDetail(payload);
-        setReviewSession(payload.reviewSession);
+        setResourceActivityMap((current) => ({
+          ...current,
+          [payload.resource.id]: hasChecklistActivity(payload.checklist.items),
+        }));
+        setSaveState('idle');
+        setSaveError(null);
         setIsDirty(false);
         draftVersionRef.current = 0;
         setDraftVersion(0);
       })
       .catch((error: Error) => {
         if (!cancelled) {
-          setScreenError(error.message);
+          setDetailError(error.message);
         }
       })
       .finally(() => {
@@ -139,58 +310,79 @@ export function ResourcesPage() {
     return () => {
       cancelled = true;
     };
-  }, [jobId, selectedResourceId]);
+  }, [detail?.resource.id, expandedResourceId, jobId]);
 
-  async function persistDraft(versionAtSave: number, draft = detail) {
-    if (!draft) {
-      return;
+  async function persistDraft(
+    versionAtSave: number,
+    snapshot = detail,
+  ): Promise<boolean> {
+    if (!jobId || !snapshot) {
+      return true;
     }
 
+    const hasActivity = hasChecklistActivity(snapshot.checklist.items);
     const payload = {
-      responses: draft.checklist.items.map((item) => ({
+      responses: snapshot.checklist.items.map((item) => ({
         itemKey: item.itemKey,
         value: item.value,
         ...(item.comment?.trim() ? { comment: item.comment.trim() } : {}),
       })),
     };
 
-    setSaveState('saving');
-    setSaveError(null);
+    const saveTask = saveQueueRef.current.then(async () => {
+      setSaveState('saving');
+      setSaveError(null);
 
-    try {
-      const result = await saveChecklist(jobId, draft.resource.id, payload);
-      const refreshedResources = await fetchResources(jobId);
-      const orderedResources = sortResourcesByPriority(refreshedResources.resources);
+      try {
+        const result = await saveChecklist(jobId, snapshot.resource.id, payload);
+        const refreshed = await fetchResources(jobId);
+        const orderedResources = sortResourcesByPriority(refreshed.resources);
 
-      setResources(orderedResources);
-      setReviewSession(refreshedResources.reviewSession);
-      setDetail((current) => {
-        if (!current || current.resource.id !== result.resourceId) {
-          return current;
+        setResources(orderedResources);
+        setResourceActivityMap((current) => ({
+          ...current,
+          [snapshot.resource.id]: hasActivity,
+        }));
+        setDetail((current) => {
+          if (!current || current.resource.id !== result.resourceId) {
+            return current;
+          }
+
+          return {
+            ...current,
+            resource: {
+              ...current.resource,
+              reviewState: result.reviewState,
+              failCount: result.failCount,
+              updatedAt: result.updatedAt,
+            },
+          };
+        });
+
+        if (draftVersionRef.current === versionAtSave) {
+          setIsDirty(false);
+          setSaveState('saved');
+          setAnnouncement('Cambios guardados.');
+        } else {
+          setSaveState('pending');
         }
 
-        return {
-          ...current,
-          reviewSession: refreshedResources.reviewSession,
-          resource: {
-            ...current.resource,
-            reviewState: result.reviewState,
-            failCount: result.failCount,
-            updatedAt: result.updatedAt,
-          },
-        };
-      });
+        return true;
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'No se pudieron guardar los cambios.';
 
-      if (draftVersionRef.current === versionAtSave) {
-        setIsDirty(false);
-        setSaveState('saved');
-      } else {
-        setSaveState('pending');
+        setSaveState('error');
+        setSaveError(message);
+        setAnnouncement('No se pudieron guardar los cambios.');
+        return false;
       }
-    } catch (error) {
-      setSaveState('error');
-      setSaveError(error instanceof Error ? error.message : 'No se pudo guardar el checklist.');
-    }
+    });
+
+    saveQueueRef.current = saveTask.catch(() => false);
+    return saveTask;
   }
 
   useEffect(() => {
@@ -209,7 +401,25 @@ export function ResourcesPage() {
     };
   }, [detail, draftVersion, isDirty]);
 
-  function updateChecklistItem(itemKey: string, updater: (item: ReviewChecklistItem) => ReviewChecklistItem) {
+  const groupedResources = useMemo(() => {
+    return resources.reduce<Record<ResourceGroupKey, ResourceListItem[]>>(
+      (groups, resource) => {
+        groups[getGroupKey(resource.type)].push(resource);
+        return groups;
+      },
+      {
+        WEB: [],
+        PDF: [],
+        VIDEO: [],
+        OTHER: [],
+      },
+    );
+  }, [resources]);
+
+  function updateChecklistItem(
+    itemKey: string,
+    updater: (item: ReviewChecklistItem) => ReviewChecklistItem,
+  ) {
     setDetail((current) => {
       if (!current) {
         return current;
@@ -219,278 +429,406 @@ export function ResourcesPage() {
         ...current,
         checklist: {
           ...current.checklist,
-          items: current.checklist.items.map((item) => (item.itemKey === itemKey ? updater(item) : item)),
+          items: current.checklist.items.map((item) =>
+            item.itemKey === itemKey ? updater(item) : item,
+          ),
         },
       };
     });
 
     setSaveState('pending');
     setSaveError(null);
+    setGenerationError(null);
     setIsDirty(true);
     draftVersionRef.current += 1;
     setDraftVersion(draftVersionRef.current);
   }
 
-  function handleSelectResource(resourceId: string) {
-    if (detail && isDirty && saveState !== 'saving') {
-      void persistDraft(draftVersionRef.current, detail);
+  function handleResponseChange(itemKey: string, value: ReviewChecklistValue) {
+    updateChecklistItem(itemKey, (item) => ({
+      ...item,
+      value,
+    }));
+  }
+
+  function handleTextChange(
+    itemKey: string,
+    commentText: string,
+    reportRecommendation: string,
+  ) {
+    updateChecklistItem(itemKey, (item) => ({
+      ...item,
+      comment: serializeCommentFields(commentText, reportRecommendation) || null,
+    }));
+  }
+
+  async function handleToggleResource(resourceId: string) {
+    if (detail && isDirty) {
+      await persistDraft(draftVersionRef.current, detail);
+    } else {
+      await saveQueueRef.current;
     }
 
-    setSelectedResourceId(resourceId);
+    setDetailError(null);
+    setGenerationError(null);
+    setExpandedResourceId((current) => (current === resourceId ? null : resourceId));
   }
 
-  function handleRetrySave() {
-    draftVersionRef.current += 1;
-    setDraftVersion(draftVersionRef.current);
-    setSaveState('pending');
-    setSaveError(null);
-    setIsDirty(true);
+  async function handleGenerateReport() {
+    if (!jobId) {
+      return;
+    }
+
+    setGenerationError(null);
+    setAnnouncement('');
+
+    const saveSucceeded = detail && isDirty
+      ? await persistDraft(draftVersionRef.current, detail)
+      : await saveQueueRef.current;
+
+    if (!saveSucceeded) {
+      setGenerationError('No se pudo guardar la revisión antes de generar el informe.');
+      return;
+    }
+
+    try {
+      setIsGenerating(true);
+      await generateReport(jobId);
+      navigate(`/report/${jobId}`, {
+        replace: true,
+        state: {
+          announcement: 'Informe generado.',
+          courseName: loadRememberedCourseName(jobId),
+        },
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'No se pudo generar el informe.';
+      setGenerationError(message);
+      setAnnouncement('No se pudo generar el informe.');
+    } finally {
+      setIsGenerating(false);
+    }
   }
 
   return (
     <LayoutSimple
-      title="Recursos y checklist"
-      description="Cada criterio del profesorado se guarda en la API y recalcula el estado del recurso para priorizar la revisión."
-      footer={
-        <div className="card-panel flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Siguiente paso</p>
-            <p className="mt-2 text-sm text-subtle">
-              Abre el informe para ver los incumplimientos agrupados por recurso con sus recomendaciones.
-            </p>
-          </div>
-          <Link className="button-primary" to={`/jobs/${jobId}/report`}>
-            Ir al informe
-          </Link>
-        </div>
-      }
+      description="Revisa recursos y marca la checklist; el informe se genera a partir de esta revisión manual."
+      title="Recursos"
     >
-      <section className="card-panel mb-6 grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr),auto] lg:items-start">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Pantalla 3</p>
-          <h2 className="mt-2 text-2xl font-semibold text-ink">Checklist persistido por recurso</h2>
-          <p className="mt-3 max-w-3xl text-sm leading-7 text-subtle">
-            Al abrir un recurso se lee su detalle desde la base de datos. Cada cambio se guarda con debounce y el badge se
-            actualiza automáticamente a “OK”, “En revisión” o “Requiere cambios”.
-          </p>
-        </div>
-
-        <div className="grid gap-4 rounded-2xl border border-line bg-panel p-4 sm:grid-cols-2">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Plantillas activas</p>
-            <p className="mt-2 text-2xl font-semibold text-ink">{templateCount}</p>
-          </div>
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Sesión</p>
-            <div className="mt-2">
-              {reviewSession ? (
-                <SessionStatusBadge status={reviewSession.status} />
-              ) : (
-                <span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-sm font-semibold text-slate-600">
-                  Cargando
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      </section>
+      <p aria-live="polite" className="sr-only">
+        {announcement}
+      </p>
 
       {screenError ? (
-        <div aria-live="assertive" className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 p-5 text-danger" role="alert">
+        <div
+          aria-live="assertive"
+          className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 p-5 text-danger"
+          role="alert"
+        >
           {screenError}
         </div>
       ) : null}
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(260px,320px),minmax(0,1fr)]">
-        <aside className="card-panel p-5">
-          <div className="mb-4">
-            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Recursos</p>
-            <h2 className="mt-2 text-xl font-semibold text-ink">Prioridad de revisión</h2>
-            <p className="mt-2 text-sm text-subtle">Ordenados por recursos con cambios requeridos, en revisión y resueltos.</p>
-          </div>
-
-          {loadingResources ? (
-            <div className="rounded-2xl border border-line bg-panel p-4 text-sm text-subtle">Cargando inventario real...</div>
-          ) : resources.length === 0 ? (
-            <div className="rounded-2xl border border-line bg-panel p-4 text-sm text-subtle">No hay recursos disponibles.</div>
-          ) : (
-            <div className="space-y-3">
-              {resources.map((resource) => (
-                <button
-                  key={resource.id}
-                  type="button"
-                  onClick={() => handleSelectResource(resource.id)}
-                  className={`w-full rounded-2xl border p-4 text-left transition ${
-                    resource.id === selectedResourceId
-                      ? 'border-slate-900 bg-slate-50 shadow-sm'
-                      : 'border-line bg-white hover:border-slate-300 hover:bg-slate-50'
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">
-                      {getReviewResourceTypeLabel(resource.type)}
-                    </span>
-                    <ReviewStateBadge state={resource.reviewState} />
-                  </div>
-                  <p className="mt-3 text-base font-semibold text-ink">{resource.title}</p>
-                  <p className="mt-2 text-sm leading-6 text-subtle">
-                    {resource.coursePath ?? resource.path ?? 'Ruta no disponible'}
-                  </p>
-                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-subtle">
-                    <span>{resource.failCount} FAIL</span>
-                    <span>{formatDate(resource.updatedAt)}</span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-        </aside>
-
-        <section className="card-panel p-6">
-          {loadingResources || loadingDetail ? (
-            <div className="rounded-2xl border border-line bg-panel p-6 text-sm text-subtle">Cargando detalle del recurso...</div>
-          ) : !detail ? (
-            <div className="rounded-2xl border border-line bg-panel p-6 text-sm text-subtle">
-              Selecciona un recurso para revisar su checklist.
-            </div>
-          ) : (
-            <div className="space-y-6">
-              <header className="flex flex-col gap-4 border-b border-line pb-5 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">
-                    {getReviewResourceTypeLabel(detail.resource.type)}
-                  </p>
-                  <h2 className="mt-2 text-2xl font-semibold text-ink">{detail.resource.title}</h2>
-                  <p className="mt-2 text-sm leading-7 text-subtle">
-                    {detail.resource.coursePath ?? detail.resource.path ?? 'Sin ruta disponible'}
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <ReviewStateBadge state={detail.resource.reviewState} />
-                  <InventoryStatusBadge status={detail.resource.status} />
-                </div>
-              </header>
-
-              <div className="grid gap-4 sm:grid-cols-3">
-                <div className="rounded-2xl border border-line bg-panel p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Origen</p>
-                  <p className="mt-2 text-sm font-semibold text-ink">{detail.resource.origin ?? 'No indicado'}</p>
-                </div>
-                <div className="rounded-2xl border border-line bg-panel p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Sesión</p>
-                  <div className="mt-2">
-                    {reviewSession ? <SessionStatusBadge status={reviewSession.status} /> : <span>Sin sesión</span>}
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-line bg-panel p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Actualizado</p>
-                  <p className="mt-2 text-sm font-semibold text-ink">{formatDate(detail.resource.updatedAt)}</p>
-                </div>
-              </div>
-
-              {detail.resource.url ? (
-                <a
-                  className="inline-flex text-sm font-semibold text-ink underline underline-offset-4"
-                  href={detail.resource.url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Abrir recurso original
-                </a>
-              ) : null}
-
-              {detail.resource.notes ? (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-slate-700">
-                  {detail.resource.notes}
-                </div>
-              ) : null}
-
-              <div className="flex flex-col gap-3 rounded-2xl border border-line bg-panel p-4 sm:flex-row sm:items-center sm:justify-between">
-                <p className="text-sm font-semibold text-ink">{getSaveMessage(saveState)}</p>
-                {saveState === 'error' ? (
-                  <button type="button" className="button-secondary" onClick={handleRetrySave}>
-                    Reintentar guardado
-                  </button>
-                ) : null}
-              </div>
-
-              {saveError ? (
-                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-danger">{saveError}</div>
-              ) : null}
-
-              <div className="space-y-4">
-                {detail.checklist.items.map((item) => (
-                  <article key={item.itemKey} className="rounded-2xl border border-line bg-white p-5">
-                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                      <div>
-                        <h3 className="text-lg font-semibold text-ink">{item.label}</h3>
-                        {item.description ? <p className="mt-2 text-sm leading-7 text-subtle">{item.description}</p> : null}
-                      </div>
-                      <span
-                        className={`inline-flex rounded-full border px-3 py-1 text-sm font-semibold ${
-                          item.value === 'PASS'
-                            ? 'border-emerald-200 bg-emerald-50 text-success'
-                            : item.value === 'FAIL'
-                              ? 'border-rose-200 bg-rose-50 text-danger'
-                              : 'border-slate-200 bg-slate-50 text-slate-600'
-                        }`}
-                      >
-                        {item.value === 'PASS' ? 'Cumple' : item.value === 'FAIL' ? 'No cumple' : 'Pendiente'}
-                      </span>
-                    </div>
-
-                    <div className="mt-4 grid gap-2 sm:grid-cols-3">
-                      {RESPONSE_OPTIONS.map((option) => (
-                        <button
-                          key={option.value}
-                          type="button"
-                          aria-pressed={item.value === option.value}
-                          onClick={() => updateChecklistItem(item.itemKey, (current) => ({ ...current, value: option.value }))}
-                          className={`rounded-xl border px-4 py-3 text-sm font-semibold transition ${
-                            item.value === option.value
-                              ? 'border-slate-900 bg-slate-900 text-white'
-                              : 'border-line bg-white text-ink hover:border-slate-300 hover:bg-slate-50'
-                          }`}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-
-                    <label className="mt-4 block text-sm font-semibold text-ink" htmlFor={`comment-${item.itemKey}`}>
-                      Comentario docente
-                    </label>
-                    <textarea
-                      id={`comment-${item.itemKey}`}
-                      className="mt-2 min-h-24 w-full rounded-2xl border border-line px-4 py-3 text-sm text-ink"
-                      rows={3}
-                      value={item.comment ?? ''}
-                      placeholder="Añade contexto, evidencia o el motivo de la revisión."
-                      onChange={(event) =>
-                        updateChecklistItem(item.itemKey, (current) => ({ ...current, comment: event.target.value }))
-                      }
-                    />
-
-                    <div
-                      className={`mt-4 rounded-2xl border p-4 ${
-                        item.value === 'FAIL'
-                          ? 'border-rose-200 bg-rose-50'
-                          : 'border-slate-200 bg-slate-50'
-                      }`}
-                    >
-                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Recomendación para el informe</p>
-                      <p className="mt-2 text-sm leading-7 text-slate-700">
-                        {item.recommendation ?? 'Sin recomendación registrada para este criterio.'}
-                      </p>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </div>
-          )}
+      {loadingResources ? (
+        <section className="card-panel p-6 text-sm text-subtle">
+          Cargando recursos…
         </section>
-      </div>
+      ) : null}
+
+      {!loadingResources && !screenError && resources.length === 0 ? (
+        <section className="card-panel p-6 text-sm text-subtle">
+          No hay recursos para revisar.
+        </section>
+      ) : null}
+
+      {!loadingResources && !screenError && resources.length > 0 ? (
+        <div className="space-y-4">
+          {GROUP_ORDER.map((groupKey) => {
+            const groupResources = groupedResources[groupKey];
+            if (groupResources.length === 0) {
+              return null;
+            }
+
+            const groupButtonId = `resource-group-button-${groupKey}`;
+            const groupPanelId = `resource-group-panel-${groupKey}`;
+            const isGroupExpanded = expandedGroups[groupKey];
+
+            return (
+              <section className="card-panel overflow-hidden" key={groupKey}>
+                <h2>
+                  <button
+                    aria-controls={groupPanelId}
+                    aria-expanded={isGroupExpanded}
+                    className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
+                    id={groupButtonId}
+                    onClick={() =>
+                      setExpandedGroups((current) => ({
+                        ...current,
+                        [groupKey]: !current[groupKey],
+                      }))
+                    }
+                    type="button"
+                  >
+                    <span>{GROUP_LABELS[groupKey]}</span>
+                    <span className="text-sm font-medium text-subtle">
+                      {groupResources.length}
+                    </span>
+                  </button>
+                </h2>
+
+                <div
+                  aria-labelledby={groupButtonId}
+                  className="border-t border-line"
+                  hidden={!isGroupExpanded}
+                  id={groupPanelId}
+                  role="region"
+                >
+                  <ul className="divide-y divide-line">
+                    {groupResources.map((resource) => {
+                      const resourceButtonId = `resource-button-${resource.id}`;
+                      const resourcePanelId = `resource-panel-${resource.id}`;
+                      const isExpanded = expandedResourceId === resource.id;
+                      const visualState = getVisualReviewState(
+                        resource,
+                        resourceActivityMap[resource.id],
+                      );
+
+                      return (
+                        <li className="px-4 py-2 sm:px-6" key={resource.id}>
+                          <h3>
+                            <button
+                              aria-controls={resourcePanelId}
+                              aria-expanded={isExpanded}
+                              className="flex w-full items-center justify-between gap-4 rounded-2xl px-3 py-3 text-left transition hover:bg-[#f6f7f2]"
+                              id={resourceButtonId}
+                              onClick={() => {
+                                void handleToggleResource(resource.id);
+                              }}
+                              type="button"
+                            >
+                              <span className="min-w-0 text-base font-semibold text-ink">
+                                <span className="block truncate">{resource.title}</span>
+                              </span>
+                              <span
+                                className={classNames(
+                                  'inline-flex shrink-0 rounded-full border px-3 py-1 text-sm font-semibold',
+                                  getReviewStateClassName(visualState),
+                                )}
+                              >
+                                {getReviewStateLabel(visualState)}
+                              </span>
+                            </button>
+                          </h3>
+
+                          {isExpanded ? (
+                            <div
+                              aria-labelledby={resourceButtonId}
+                              className="pb-4 pt-2"
+                              id={resourcePanelId}
+                              role="region"
+                            >
+                              {loadingDetail ? (
+                                <div className="rounded-2xl border border-line bg-[#f6f7f2] p-4 text-sm text-subtle">
+                                  Cargando checklist…
+                                </div>
+                              ) : null}
+
+                              {detailError ? (
+                                <div
+                                  aria-live="assertive"
+                                  className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-danger"
+                                  role="alert"
+                                >
+                                  {detailError}
+                                </div>
+                              ) : null}
+
+                              {!loadingDetail &&
+                              !detailError &&
+                              detail &&
+                              detail.resource.id === resource.id ? (
+                                <div className="space-y-5">
+                                  {resource.coursePath || resource.url || resource.path ? (
+                                    <div className="space-y-2 rounded-2xl border border-line bg-[#f9faf7] p-4 text-sm text-subtle">
+                                      {resource.coursePath ? (
+                                        <p>
+                                          <span className="font-semibold text-ink">Ruta:</span>{' '}
+                                          {resource.coursePath}
+                                        </p>
+                                      ) : null}
+                                      {resource.url ? (
+                                        <p>
+                                          <span className="font-semibold text-ink">URL:</span>{' '}
+                                          <a
+                                            className="underline"
+                                            href={resource.url}
+                                            rel="noreferrer"
+                                            target="_blank"
+                                          >
+                                            Abrir recurso
+                                          </a>
+                                        </p>
+                                      ) : null}
+                                      {!resource.url && resource.path ? (
+                                        <p>
+                                          <span className="font-semibold text-ink">Archivo:</span>{' '}
+                                          {resource.path}
+                                        </p>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
+
+                                  <ul className="space-y-4">
+                                    {detail.checklist.items.map((item) => {
+                                      const commentFields = parseCommentFields(item.comment);
+                                      const radiosName = `criterion-${resource.id}-${item.itemKey}`;
+                                      const commentId = `criterion-comment-${resource.id}-${item.itemKey}`;
+                                      const recommendationId = `criterion-recommendation-${resource.id}-${item.itemKey}`;
+
+                                      return (
+                                        <li
+                                          className="rounded-2xl border border-line p-4"
+                                          key={item.itemKey}
+                                        >
+                                          <div>
+                                            <p className="text-base font-semibold text-ink">
+                                              {item.label}
+                                            </p>
+                                            {item.description ? (
+                                              <p className="mt-1 text-sm text-subtle">
+                                                {item.description}
+                                              </p>
+                                            ) : null}
+                                          </div>
+
+                                          <fieldset className="mt-4">
+                                            <legend className="sr-only">
+                                              Estado del criterio {item.label}
+                                            </legend>
+                                            <div className="grid gap-2 sm:grid-cols-3">
+                                              {RESPONSE_OPTIONS.map((option) => (
+                                                <label
+                                                  className={classNames(
+                                                    'flex cursor-pointer items-center justify-center rounded-xl border px-3 py-3 text-sm font-semibold transition',
+                                                    item.value === option.value
+                                                      ? 'border-ink bg-[#edf2ea] text-ink'
+                                                      : 'border-line bg-white text-subtle hover:bg-[#f6f7f2]',
+                                                  )}
+                                                  key={option.value}
+                                                >
+                                                  <input
+                                                    checked={item.value === option.value}
+                                                    className="sr-only"
+                                                    name={radiosName}
+                                                    onChange={() =>
+                                                      handleResponseChange(
+                                                        item.itemKey,
+                                                        option.value,
+                                                      )
+                                                    }
+                                                    type="radio"
+                                                  />
+                                                  <span>{option.label}</span>
+                                                </label>
+                                              ))}
+                                            </div>
+                                          </fieldset>
+
+                                          <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                                            <div>
+                                              <label
+                                                className="block text-sm font-semibold text-ink"
+                                                htmlFor={commentId}
+                                              >
+                                                Comentario
+                                              </label>
+                                              <textarea
+                                                className="field-textarea mt-2 min-h-28"
+                                                id={commentId}
+                                                onChange={(event) =>
+                                                  handleTextChange(
+                                                    item.itemKey,
+                                                    event.target.value,
+                                                    commentFields.reportRecommendation,
+                                                  )
+                                                }
+                                                rows={4}
+                                                value={commentFields.commentText}
+                                              />
+                                            </div>
+
+                                            <div>
+                                              <label
+                                                className="block text-sm font-semibold text-ink"
+                                                htmlFor={recommendationId}
+                                              >
+                                                Recomendación para el informe
+                                              </label>
+                                              <textarea
+                                                className="field-textarea mt-2 min-h-28"
+                                                id={recommendationId}
+                                                onChange={(event) =>
+                                                  handleTextChange(
+                                                    item.itemKey,
+                                                    commentFields.commentText,
+                                                    event.target.value,
+                                                  )
+                                                }
+                                                rows={4}
+                                                value={commentFields.reportRecommendation}
+                                              />
+                                            </div>
+                                          </div>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              </section>
+            );
+          })}
+
+          <div className="sticky bottom-4 z-10 pt-2">
+            <section className="card-panel border-[#dce4d8] bg-[rgba(255,255,255,0.96)] p-4 backdrop-blur">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-ink">Generar informe</p>
+                  <p className="mt-1 text-sm text-subtle">
+                    {getFooterMessage(
+                      saveState,
+                      saveError,
+                      generationError,
+                      isGenerating,
+                    )}
+                  </p>
+                </div>
+
+                <button
+                  className="button-primary w-full sm:w-auto"
+                  disabled={isGenerating}
+                  onClick={() => {
+                    void handleGenerateReport();
+                  }}
+                  type="button"
+                >
+                  {isGenerating ? 'Generando informe…' : 'Generar informe'}
+                </button>
+              </div>
+            </section>
+          </div>
+        </div>
+      ) : null}
     </LayoutSimple>
   );
 }

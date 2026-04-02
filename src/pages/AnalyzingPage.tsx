@@ -1,19 +1,20 @@
-import { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import { ProgressBar } from '../components/ProgressBar';
 import { api } from '../lib/api';
-import { JobStatus } from '../lib/types';
+import type { JobStatus } from '../lib/types';
 
 export function AnalyzingPage() {
   const navigate = useNavigate();
   const { jobId } = useParams<{ jobId: string }>();
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const hasNavigatedRef = useRef(false);
 
   useEffect(() => {
     if (!jobId) {
-      setError('Falta el identificador del analisis.');
+      setError('Falta el identificador del análisis.');
       return;
     }
 
@@ -30,6 +31,16 @@ export function AnalyzingPage() {
         setJobStatus(nextStatus);
         setError(nextStatus.status === 'error' ? nextStatus.message : null);
 
+        if (
+          !hasNavigatedRef.current &&
+          (nextStatus.status === 'done' || nextStatus.progress >= 100)
+        ) {
+          hasNavigatedRef.current = true;
+          window.clearInterval(intervalId);
+          navigate(`/resources/${jobId}`, { replace: true });
+          return;
+        }
+
         if (nextStatus.status !== 'processing') {
           window.clearInterval(intervalId);
         }
@@ -38,7 +49,11 @@ export function AnalyzingPage() {
           return;
         }
 
-        setError(caughtError instanceof Error ? caughtError.message : 'Ha ocurrido un error inesperado.');
+        setError(
+          caughtError instanceof Error
+            ? caughtError.message
+            : 'Ha ocurrido un error inesperado.',
+        );
         window.clearInterval(intervalId);
       }
     };
@@ -46,60 +61,43 @@ export function AnalyzingPage() {
     void loadStatus();
     intervalId = window.setInterval(() => {
       void loadStatus();
-    }, 1000);
+    }, 1200);
 
     return () => {
       active = false;
       window.clearInterval(intervalId);
     };
-  }, [jobId]);
+  }, [jobId, navigate]);
 
   const progress = jobStatus?.progress ?? 0;
-  const isDone = jobStatus?.status === 'done';
-  const isError = jobStatus?.status === 'error' || Boolean(error);
+  const statusMessage = jobStatus?.message ?? 'Preparando análisis…';
+  const liveMessage = `Analizando… ${progress}%`;
 
   return (
     <LayoutSimple
       backLabel="Volver a subir"
       backTo="/"
-      description="Estamos recorriendo el curso y preparando un checklist inicial por recurso."
+      description="Analizando el curso y preparando el inventario real."
       title="Analizando curso"
     >
-      <section aria-labelledby="estado-analisis" className="card-panel p-8 sm:p-10">
-        <h2 id="estado-analisis" className="text-2xl font-semibold text-ink">
-          Estado del analisis
-        </h2>
-
-        {isError ? (
-          <div aria-live="assertive" className="mt-6 space-y-5">
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-danger" role="alert">
-              <p className="text-base font-semibold">No hemos podido completar el analisis.</p>
-              <p className="mt-2 text-sm">{error}</p>
-            </div>
-
-            <button className="button-primary" onClick={() => navigate('/')} type="button">
-              Volver a subir
-            </button>
+      <section className="card-panel mx-auto max-w-2xl space-y-6 p-6 sm:p-8">
+        {error ? (
+          <div
+            aria-live="assertive"
+            className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-danger"
+            role="alert"
+          >
+            <p className="text-base font-semibold">No hemos podido completar el análisis.</p>
+            <p className="mt-2 text-sm">{error}</p>
           </div>
         ) : (
-          <div className="mt-6 space-y-6">
-            <ProgressBar label="Progreso del analisis" value={progress} />
-            <div aria-live="polite" className="space-y-2">
-              <p className="text-base font-semibold text-ink">
-                Paso {jobStatus?.currentStep ?? 1} de {jobStatus?.totalSteps ?? 4}
-              </p>
-              <p className="text-sm text-subtle">{jobStatus?.message ?? 'Preparando analisis...'}</p>
-            </div>
-
-            {isDone ? (
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
-                <p className="text-base font-semibold text-success">El curso ya esta listo para revisar.</p>
-                <Link className="button-primary mt-5" to={`/resources/${jobId}`}>
-                  Ver recursos
-                </Link>
-              </div>
-            ) : null}
-          </div>
+          <>
+            <ProgressBar label="Progreso del análisis" value={progress} />
+            <p aria-live="polite" className="text-base font-medium text-ink">
+              {liveMessage}
+            </p>
+            <p className="text-sm text-subtle">{statusMessage}</p>
+          </>
         )}
       </section>
     </LayoutSimple>

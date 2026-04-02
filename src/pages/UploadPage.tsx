@@ -1,8 +1,8 @@
-import { ChangeEvent, useState } from 'react';
+import { ChangeEvent, FormEvent, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import { api } from '../lib/api';
-import { formatFileSize } from '../lib/utils';
+import { formatFileSize, rememberCourseName } from '../lib/utils';
 
 export function UploadPage() {
   const navigate = useNavigate();
@@ -11,85 +11,80 @@ export function UploadPage() {
   const [error, setError] = useState<string | null>(null);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0] ?? null;
-    setSelectedFile(file);
+    setSelectedFile(event.target.files?.[0] ?? null);
     setError(null);
   };
 
-  const handleContinue = async () => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
     if (!selectedFile) {
+      setError('Selecciona un archivo IMSCC o ZIP para continuar.');
       return;
     }
 
     try {
       setIsSubmitting(true);
+      setError(null);
       const { jobId } = await api.createJob(selectedFile);
+      rememberCourseName(jobId, selectedFile.name);
       navigate(`/analyzing/${jobId}`);
     } catch (caughtError) {
-      const message =
-        caughtError instanceof Error ? caughtError.message : 'No hemos podido iniciar el analisis.';
-      setError(message);
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : 'No hemos podido subir el curso.',
+      );
     } finally {
       setIsSubmitting(false);
     }
   };
 
   return (
-    <LayoutSimple align="center" description="Haz tu asignatura accesible para todos." title="AccessibleCourse">
-      <div className="mx-auto max-w-2xl">
-        <section aria-labelledby="subir-curso" className="card-panel p-8 sm:p-10">
-          <h2 id="subir-curso" className="text-2xl font-semibold text-ink">
-            Subir curso
-          </h2>
-          <p className="mt-3 text-base leading-7 text-subtle">
-            Selecciona un archivo `.imscc` o `.zip` para comenzar el analisis.
+    <LayoutSimple
+      align="center"
+      description="Haz tu curso accesible para todos"
+      title="AccessibleCourse"
+    >
+      <form
+        className="card-panel mx-auto max-w-xl space-y-5 p-6 sm:p-8"
+        onSubmit={handleSubmit}
+      >
+        <div className="space-y-2">
+          <label className="block text-sm font-semibold text-ink" htmlFor="course-file">
+            Selecciona archivo IMSCC o ZIP
+          </label>
+          <input
+            accept=".imscc,.zip"
+            className="field-input"
+            id="course-file"
+            onChange={handleFileChange}
+            type="file"
+          />
+        </div>
+
+        <p aria-live="polite" className="min-h-[1.5rem] text-sm text-subtle">
+          {selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : ' '}
+        </p>
+
+        {error ? (
+          <p
+            aria-live="assertive"
+            className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-danger"
+            role="alert"
+          >
+            {error}
           </p>
+        ) : null}
 
-          <div className="mt-8 space-y-5">
-            <div>
-              <label className="button-primary w-full cursor-pointer sm:w-auto" htmlFor="course-file">
-                Subir curso
-              </label>
-              <input
-                accept=".imscc,.zip"
-                className="sr-only"
-                id="course-file"
-                onChange={handleFileChange}
-                type="file"
-              />
-            </div>
-
-            <div
-              aria-live="polite"
-              className="min-h-[4.5rem] rounded-2xl border border-dashed border-line bg-panel p-4"
-            >
-              {selectedFile ? (
-                <div className="space-y-1">
-                  <p className="text-base font-semibold text-ink">{selectedFile.name}</p>
-                  <p className="text-sm text-subtle">{formatFileSize(selectedFile.size)}</p>
-                </div>
-              ) : (
-                <p className="text-sm text-subtle">Aun no has seleccionado ningun archivo.</p>
-              )}
-            </div>
-
-            {error ? (
-              <div aria-live="assertive" className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-danger">
-                {error}
-              </div>
-            ) : null}
-
-            <button
-              className="button-secondary w-full sm:w-auto"
-              disabled={!selectedFile || isSubmitting}
-              onClick={handleContinue}
-              type="button"
-            >
-              {isSubmitting ? 'Creando analisis...' : 'Continuar'}
-            </button>
-          </div>
-        </section>
-      </div>
+        <button
+          className="button-primary w-full"
+          disabled={!selectedFile || isSubmitting}
+          type="submit"
+        >
+          {isSubmitting ? 'Subiendo curso…' : 'Subir curso'}
+        </button>
+      </form>
     </LayoutSimple>
   );
 }

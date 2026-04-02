@@ -1,104 +1,149 @@
-import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-
+import { useEffect, useMemo, useState } from 'react';
+import { useLocation, useParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
-import { ApiError, fetchReport, generateReport, getReportDownloadUrl } from '../lib/api';
-import type { ReportIssue, ReportResponse } from '../lib/types';
 import {
-  formatDate,
-  getReportIssueStatusLabel,
-  getReportSeverityLabel,
-} from '../lib/types';
+  ApiError,
+  fetchReport,
+  generateReport,
+  getDirectReportDownloadUrls,
+} from '../lib/api';
+import type { GeneratedReport } from '../lib/types';
+import { formatDate } from '../lib/types';
+import { loadRememberedCourseName } from '../lib/utils';
 
-const DEFAULT_JOB_ID = 'demo-accessible-course';
-
-function issueAccent(issue: ReportIssue): string {
-  if (issue.status === 'FAIL' && issue.severity === 'HIGH') {
-    return 'border-rose-300 bg-rose-50';
-  }
-  if (issue.status === 'FAIL') {
-    return 'border-amber-300 bg-amber-50';
-  }
-  return 'border-slate-200 bg-slate-50';
+interface ReportLocationState {
+  announcement?: string;
+  courseName?: string | null;
 }
 
-function issueBadge(issue: ReportIssue): string {
-  if (issue.status === 'FAIL' && issue.severity === 'HIGH') {
-    return 'border-rose-200 bg-rose-100 text-danger';
-  }
-  if (issue.status === 'FAIL') {
-    return 'border-amber-200 bg-amber-100 text-warning';
-  }
-  return 'border-slate-200 bg-white text-slate-600';
+function getLoadMessage(isGenerating: boolean) {
+  return isGenerating ? 'Generando informe…' : 'Cargando informe…';
 }
 
 export function ReportPage() {
-  const params = useParams<{ jobId: string }>();
-  const jobId = params.jobId ?? DEFAULT_JOB_ID;
-  const [report, setReport] = useState<ReportResponse | null>(null);
+  const { jobId } = useParams<{ jobId: string }>();
+  const location = useLocation();
+  const navigationState = (location.state as ReportLocationState | null) ?? null;
+  const [report, setReport] = useState<GeneratedReport | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [generating, setGenerating] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [announcement, setAnnouncement] = useState(navigationState?.announcement ?? '');
 
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
+    const reportJobId = jobId;
 
-    fetchReport(jobId)
-      .then((payload) => {
+    if (!reportJobId) {
+      setError('Falta el identificador del informe.');
+      setLoading(false);
+      return;
+    }
+
+    const resolvedJobId: string = reportJobId;
+    let cancelled = false;
+
+    async function loadOrGenerateReport() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const payload = await fetchReport(resolvedJobId);
         if (!cancelled) {
           setReport(payload);
         }
-      })
-      .catch((loadError) => {
+      } catch (loadError) {
         if (cancelled) {
           return;
         }
 
         if (loadError instanceof ApiError && loadError.status === 404) {
-          setReport(null);
+          try {
+            setIsGenerating(true);
+            const payload = await generateReport(resolvedJobId);
+            if (!cancelled) {
+              setReport(payload);
+              setAnnouncement((current) => current || 'Informe generado.');
+            }
+          } catch (generationError) {
+            if (!cancelled) {
+              setError(
+                generationError instanceof Error
+                  ? generationError.message
+                  : 'No se pudo generar el informe.',
+              );
+            }
+          } finally {
+            if (!cancelled) {
+              setIsGenerating(false);
+            }
+          }
+
           return;
         }
 
-        setError(loadError instanceof Error ? loadError.message : 'No se pudo cargar el informe.');
-      })
-      .finally(() => {
+        setError(
+          loadError instanceof Error ? loadError.message : 'No se pudo cargar el informe.',
+        );
+      } finally {
         if (!cancelled) {
           setLoading(false);
         }
-      });
+      }
+    }
+
+    void loadOrGenerateReport();
 
     return () => {
       cancelled = true;
     };
   }, [jobId]);
 
-  async function handleGenerateReport() {
-    setGenerating(true);
-    setError(null);
+  const courseName = jobId
+    ? navigationState?.courseName ?? loadRememberedCourseName(jobId) ?? `Curso ${jobId}`
+    : 'Curso';
 
-    try {
-      const payload = await generateReport(jobId, { includePending: true, onlyFails: false });
-      setReport(payload);
-    } catch (generationError) {
-      setError(generationError instanceof Error ? generationError.message : 'No se pudo generar el informe.');
-    } finally {
-      setGenerating(false);
+  const downloadUrls = jobId ? getDirectReportDownloadUrls(jobId) : null;
+
+  const sortedGroups = useMemo(() => {
+    if (!report) {
+      return [];
     }
-  }
+
+    return [...report.groups].sort((left, right) => {
+      const failureDifference = right.failures.length - left.failures.length;
+      if (failureDifference !== 0) {
+        return failureDifference;
+      }
+
+      return left.resource.title.localeCompare(right.resource.title, 'es');
+    });
+  }, [report]);
 
   return (
     <LayoutSimple
-      title="Informe generado"
-      description="Genera un informe accionable a partir de la checklist persistida y descárgalo en PDF o Word."
-      backTo={`/jobs/${jobId}/review`}
-      backLabel="Volver a revisión"
+      backLabel="Volver a recursos"
+      backTo={jobId ? `/resources/${jobId}` : '/'}
+      description="Este informe se ha generado a partir de una checklist revisada manualmente."
+      title="Informe"
     >
+      <p aria-live="polite" className="sr-only">
+        {announcement}
+      </p>
+
+      {announcement ? (
+        <div
+          className="mb-6 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-success"
+          role="status"
+        >
+          {announcement}
+        </div>
+      ) : null}
+
       {error ? (
         <div
           aria-live="assertive"
-          className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 p-5 text-danger"
+          className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-danger"
           role="alert"
         >
           {error}
@@ -106,221 +151,112 @@ export function ReportPage() {
       ) : null}
 
       {loading ? (
-        <div aria-live="polite" className="card-panel p-8 text-subtle">
-          Cargando último informe generado...
-        </div>
-      ) : null}
-
-      {!loading && !report ? (
-        <section className="card-panel space-y-5 p-6">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Pantalla 4</p>
-            <h2 className="mt-2 text-2xl font-semibold text-ink">Todavía no hay informe</h2>
-            <p className="mt-3 max-w-3xl text-sm leading-7 text-subtle">
-              Cuando pulses generar, el backend leerá la checklist guardada en base de datos, construirá el informe
-              agrupado por ruta y dejará lista la descarga en PDF, Word y JSON.
-            </p>
-          </div>
-
-          <button
-            type="button"
-            className="button-primary"
-            onClick={handleGenerateReport}
-            disabled={generating}
-          >
-            {generating ? 'Generando informe...' : 'Generar informe'}
-          </button>
+        <section className="card-panel p-6 text-sm text-subtle">
+          {getLoadMessage(isGenerating)}
         </section>
       ) : null}
 
-      {report ? (
+      {!loading && report && downloadUrls ? (
         <div className="space-y-6">
-          <section className="card-panel grid gap-5 p-6 lg:grid-cols-[minmax(0,1fr),auto] lg:items-start">
-            <div>
-              <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Pantalla 4</p>
-              <h2 className="mt-2 text-2xl font-semibold text-ink">AccessibleCourse - Informe de accesibilidad</h2>
-              <p className="mt-3 max-w-3xl text-sm leading-7 text-subtle">
-                {report.meta.courseTitle ? `Curso: ${report.meta.courseTitle}. ` : ''}
-                Generado el {formatDate(report.createdAt)} para el job <span className="font-semibold">{report.meta.jobId}</span>.
+          <section className="card-panel space-y-5 p-6">
+            <div className="space-y-2">
+              <p className="text-sm text-subtle">{courseName}</p>
+              <p className="text-sm text-subtle">
+                Generado el {formatDate(report.generatedAt)}
               </p>
-              <p className="mt-2 text-sm text-subtle">Versión del sistema: {report.meta.systemVersion}</p>
             </div>
 
-            <div className="flex flex-col gap-3 sm:flex-row lg:flex-col">
-              <button
-                type="button"
-                className="button-primary"
-                onClick={handleGenerateReport}
-                disabled={generating}
-              >
-                {generating ? 'Regenerando...' : 'Generar informe'}
-              </button>
-              <a className="button-secondary" href={getReportDownloadUrl(report.files.pdfUrl)}>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <article className="rounded-2xl border border-line bg-[#f9faf7] p-4">
+                <p className="text-sm text-subtle">Recursos analizados</p>
+                <p className="mt-2 text-3xl font-semibold text-ink">
+                  {report.resourceCount}
+                </p>
+              </article>
+
+              <article className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                <p className="text-sm text-subtle">Ítems FAIL</p>
+                <p className="mt-2 text-3xl font-semibold text-ink">
+                  {report.failedItemCount}
+                </p>
+              </article>
+            </div>
+
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+              <a className="button-primary" href={downloadUrls.pdf}>
                 Descargar PDF
               </a>
-              <a className="button-secondary" href={getReportDownloadUrl(report.files.docxUrl)}>
+              <a className="button-secondary" href={downloadUrls.docx}>
                 Descargar Word
               </a>
-            </div>
-          </section>
-
-          <section aria-live="polite" className="grid gap-4 md:grid-cols-3">
-            <article className="card-panel p-6">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Recursos analizados</p>
-              <p className="mt-3 text-4xl font-semibold text-ink">{report.stats.resources}</p>
-            </article>
-            <article className="card-panel border-rose-200 bg-rose-50 p-6">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Ítems FAIL</p>
-              <p className="mt-3 text-4xl font-semibold text-ink">{report.stats.fails}</p>
-            </article>
-            <article className="card-panel border-amber-200 bg-amber-50 p-6">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Ítems PENDING</p>
-              <p className="mt-3 text-4xl font-semibold text-ink">{report.stats.pending}</p>
-            </article>
-          </section>
-
-          <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr),minmax(280px,340px)]">
-            <article className="card-panel p-6">
-              <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Resumen ejecutivo</p>
-              <h3 className="mt-2 text-xl font-semibold text-ink">Top recursos con más FAIL</h3>
-
-              {report.summary.topResources.length === 0 ? (
-                <p className="mt-4 text-sm text-subtle">No hay recursos con FAIL registrados.</p>
-              ) : (
-                <ol className="mt-4 space-y-3">
-                  {report.summary.topResources.map((resource, index) => (
-                    <li key={resource.resourceId} className="rounded-2xl border border-line bg-white p-4">
-                      <p className="text-sm font-semibold text-ink">
-                        {index + 1}. {resource.title}
-                      </p>
-                      <p className="mt-2 text-sm text-subtle">{resource.coursePath}</p>
-                      <p className="mt-2 text-sm font-semibold text-danger">{resource.failCount} FAIL</p>
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </article>
-
-            <article className="card-panel p-6">
-              <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Recomendaciones</p>
-              <h3 className="mt-2 text-xl font-semibold text-ink">Acciones generales</h3>
-              <ul className="mt-4 space-y-3">
-                {report.summary.recommendations.map((recommendation) => (
-                  <li key={recommendation} className="rounded-2xl border border-line bg-panel p-4 text-sm leading-7 text-slate-700">
-                    {recommendation}
-                  </li>
-                ))}
-              </ul>
-            </article>
-          </section>
-
-          <section className="card-panel p-6">
-            <div className="flex flex-col gap-3 border-b border-line pb-5 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Detalle principal</p>
-                <h3 className="mt-2 text-xl font-semibold text-ink">Hallazgos agrupados por ruta y recurso</h3>
-              </div>
-              <a className="button-secondary" href={getReportDownloadUrl(report.files.jsonUrl)}>
+              <a className="button-secondary" href={downloadUrls.json}>
                 Descargar JSON
               </a>
             </div>
-
-            {report.routes.length === 0 ? (
-              <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-success">
-                No hay ítems FAIL o PENDING en la checklist actual.
-              </div>
-            ) : (
-              <div className="mt-6 space-y-6">
-                {report.routes.map((route) => (
-                  <article key={route.coursePath} className="rounded-3xl border border-line bg-white p-5">
-                    <div className="flex flex-col gap-3 border-b border-line pb-4 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Ruta</p>
-                        <h4 className="mt-2 text-xl font-semibold text-ink">{route.coursePath}</h4>
-                      </div>
-                      <div className="grid gap-2 text-sm text-subtle sm:text-right">
-                        <span>{route.stats.resources} recurso(s)</span>
-                        <span>{route.stats.fails} FAIL</span>
-                        <span>{route.stats.pending} PENDING</span>
-                      </div>
-                    </div>
-
-                    <div className="mt-5 space-y-5">
-                      {route.resources.map((resource) => (
-                        <section key={resource.resourceId} className="rounded-2xl border border-line bg-panel p-5">
-                          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                            <div>
-                              <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">
-                                {resource.type} · {resource.origin}
-                              </p>
-                              <h5 className="mt-2 text-lg font-semibold text-ink">{resource.title}</h5>
-                              <p className="mt-2 text-sm text-subtle">
-                                {resource.coursePath}
-                                {resource.source ? ` · ${resource.source}` : ''}
-                              </p>
-                            </div>
-                            <div className="grid gap-2 text-sm text-subtle lg:text-right">
-                              <span>{resource.stats.fails} FAIL</span>
-                              <span>{resource.stats.pending} PENDING</span>
-                            </div>
-                          </div>
-
-                          <ul className="mt-4 space-y-3">
-                            {[...resource.fails, ...resource.pending].map((issue) => (
-                              <li key={`${resource.resourceId}-${issue.itemKey}-${issue.status}`} className={`rounded-2xl border p-4 ${issueAccent(issue)}`}>
-                                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                                  <div>
-                                    <p className="font-semibold text-ink">{issue.label}</p>
-                                    <p className="mt-2 text-sm leading-7 text-slate-700">{issue.description}</p>
-                                  </div>
-                                  <span className={`inline-flex rounded-full border px-3 py-1 text-sm font-semibold ${issueBadge(issue)}`}>
-                                    {getReportIssueStatusLabel(issue.status)} · {getReportSeverityLabel(issue.severity)}
-                                  </span>
-                                </div>
-
-                                <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
-                                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Cómo arreglarlo</p>
-                                  <p className="mt-2 text-sm leading-7 text-slate-700">
-                                    {issue.recommendation ?? 'Sin recomendación registrada para este criterio.'}
-                                  </p>
-                                </div>
-
-                                {issue.comment ? (
-                                  <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
-                                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-subtle">Notas del revisor</p>
-                                    <p className="mt-2 text-sm leading-7 text-slate-700">{issue.comment}</p>
-                                  </div>
-                                ) : null}
-                              </li>
-                            ))}
-                          </ul>
-                        </section>
-                      ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
           </section>
 
-          <section className="card-panel p-6">
-            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">Apéndice</p>
-            <h3 className="mt-2 text-xl font-semibold text-ink">Definición de estados</h3>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              {Object.entries(report.appendix.statusDefinitions).map(([status, description]) => (
-                <article key={status} className="rounded-2xl border border-line bg-panel p-4">
-                  <p className="text-sm font-semibold text-ink">{status}</p>
-                  <p className="mt-2 text-sm leading-7 text-subtle">{description}</p>
-                </article>
-              ))}
+          <section className="card-panel overflow-hidden">
+            <h2>
+              <button
+                aria-controls="report-detail-panel"
+                aria-expanded={detailsOpen}
+                className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
+                id="report-detail-button"
+                onClick={() => setDetailsOpen((current) => !current)}
+                type="button"
+              >
+                <span>{detailsOpen ? 'Ocultar detalle' : 'Ver detalle'}</span>
+                <span className="text-sm font-medium text-subtle">
+                  {sortedGroups.length}
+                </span>
+              </button>
+            </h2>
+
+            <div
+              aria-labelledby="report-detail-button"
+              className="border-t border-line"
+              hidden={!detailsOpen}
+              id="report-detail-panel"
+              role="region"
+            >
+              {sortedGroups.length === 0 ? (
+                <div className="p-6 text-sm text-subtle">
+                  No hay incidencias FAIL registradas en este informe.
+                </div>
+              ) : (
+                <div className="space-y-4 p-4 sm:p-6">
+                  {sortedGroups.map((group) => (
+                    <article
+                      className="rounded-2xl border border-line p-4"
+                      key={group.resource.id}
+                    >
+                      <div className="space-y-1">
+                        <h3 className="text-base font-semibold text-ink">
+                          {group.resource.title}
+                        </h3>
+                      </div>
+
+                      <ul className="mt-4 space-y-3">
+                        {group.failures.map((failure) => (
+                          <li
+                            className="rounded-2xl border border-rose-200 bg-rose-50 p-4"
+                            key={`${group.resource.id}-${failure.itemId}`}
+                          >
+                            <p className="text-sm font-semibold text-ink">
+                              {failure.label}
+                            </p>
+                            <p className="mt-2 text-sm text-subtle">
+                              {failure.recommendation}
+                            </p>
+                          </li>
+                        ))}
+                      </ul>
+                    </article>
+                  ))}
+                </div>
+              )}
             </div>
           </section>
-
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <Link className="button-secondary" to={`/jobs/${jobId}/review`}>
-              Volver a recursos
-            </Link>
-          </div>
         </div>
       ) : null}
     </LayoutSimple>

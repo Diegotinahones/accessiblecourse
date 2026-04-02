@@ -1,7 +1,7 @@
 export type ResourceType = 'PDF' | 'Web' | 'Video' | 'Notebook' | 'Other';
 export type ResourceOrigin = 'interno' | 'externo';
 export type ResourceState = 'OK' | 'AVISO' | 'ERROR';
-export type JobLifecycleStatus = 'processing' | 'done' | 'error';
+export type JobLifecycleStatus = 'pending' | 'running' | 'processing' | 'done' | 'error';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
 
 export interface Resource {
@@ -40,12 +40,18 @@ export interface ReportGroup {
   failures: ReportFailure[];
 }
 
+export interface ReportDownloads {
+  pdfUrl: string;
+  docxUrl: string;
+}
+
 export interface GeneratedReport {
   jobId: string;
   resourceCount: number;
   failedItemCount: number;
   groups: ReportGroup[];
   generatedAt: string;
+  downloads: ReportDownloads;
 }
 
 export type ReviewResourceType = 'WEB' | 'PDF' | 'VIDEO' | 'NOTEBOOK' | 'IMAGE' | 'OTHER';
@@ -159,98 +165,6 @@ export interface ReviewSummary {
   resources: ReviewFailResource[];
 }
 
-export type ReportSeverity = 'HIGH' | 'MED' | 'LOW';
-export type ReportIssueStatus = 'FAIL' | 'PENDING';
-
-export interface ReportFiles {
-  pdfUrl: string;
-  docxUrl: string;
-  jsonUrl: string;
-}
-
-export interface ReportStats {
-  resources: number;
-  fails: number;
-  pending: number;
-}
-
-export interface ReportMeta {
-  reportId: string;
-  createdAt: string;
-  courseTitle: string | null;
-  jobId: string;
-  includePending: boolean;
-  onlyFails: boolean;
-  systemVersion: string;
-}
-
-export interface ReportTopResource {
-  resourceId: string;
-  title: string;
-  coursePath: string;
-  failCount: number;
-}
-
-export interface ReportSummaryData {
-  resources: number;
-  fails: number;
-  pending: number;
-  topResources: ReportTopResource[];
-  recommendations: string[];
-}
-
-export interface ReportIssue {
-  itemKey: string;
-  label: string;
-  description: string;
-  recommendation: string | null;
-  severity: ReportSeverity;
-  status: ReportIssueStatus;
-  comment: string | null;
-}
-
-export interface ReportResource {
-  resourceId: string;
-  title: string;
-  type: string;
-  origin: string;
-  status: string;
-  source: string | null;
-  coursePath: string;
-  stats: ReportStats;
-  fails: ReportIssue[];
-  pending: ReportIssue[];
-}
-
-export interface ReportRoute {
-  coursePath: string;
-  stats: ReportStats;
-  resources: ReportResource[];
-}
-
-export interface ReportAppendix {
-  statusDefinitions: Record<string, string>;
-  createdAt: string;
-  systemVersion: string;
-}
-
-export interface ReportResponse {
-  reportId: string;
-  createdAt: string;
-  files: ReportFiles;
-  stats: ReportStats;
-  meta: ReportMeta;
-  summary: ReportSummaryData;
-  routes: ReportRoute[];
-  resources: ReportResource[];
-  appendix: ReportAppendix;
-}
-
-export interface ReportGenerateOptions {
-  includePending?: boolean;
-  onlyFails?: boolean;
-}
-
 const reviewPriority: Record<ReviewState, number> = {
   NEEDS_FIX: 0,
   IN_REVIEW: 1,
@@ -294,21 +208,6 @@ export function getReviewResourceTypeLabel(type: ReviewResourceType): string {
     default:
       return 'Otro';
   }
-}
-
-export function getReportSeverityLabel(severity: ReportSeverity): string {
-  switch (severity) {
-    case 'HIGH':
-      return 'Alta';
-    case 'MED':
-      return 'Media';
-    default:
-      return 'Baja';
-  }
-}
-
-export function getReportIssueStatusLabel(status: ReportIssueStatus): string {
-  return status === 'FAIL' ? 'No cumple' : 'Pendiente';
 }
 
 export function getSessionStatusLabel(status: ReviewSessionStatus): string {

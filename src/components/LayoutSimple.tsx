@@ -28,45 +28,48 @@ export function LayoutSimple({
   }, [title]);
 
   return (
-    <div className="min-h-screen bg-white text-ink">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(32,94,60,0.08),_transparent_42%),_#f6f7f2] text-ink">
       <a
-        href="#contenido"
-        className="absolute left-4 top-4 -translate-y-16 rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white focus:translate-y-0"
+        href="#page-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-xl focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
       >
         Saltar al contenido
       </a>
 
       <main
-        id="contenido"
-        className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-8 sm:px-10 sm:py-12"
+        id="page-content"
+        className="mx-auto flex min-h-screen w-full max-w-5xl flex-col px-4 py-6 sm:px-6 sm:py-8"
       >
-        <div className="mx-auto w-full max-w-4xl flex-1">
-          <header className={classNames('mb-10', align === 'center' && 'text-center')}>
-            {backTo ? (
-              <Link className="button-secondary mb-8 text-sm" to={backTo}>
-                {backLabel ?? 'Volver'}
-              </Link>
-            ) : null}
+        {backTo ? (
+          <nav aria-label="Navegación de página" className="mb-6">
+            <Link className="button-secondary text-sm" to={backTo}>
+              {backLabel ?? 'Volver'}
+            </Link>
+          </nav>
+        ) : null}
 
-            <p className="mb-4 text-sm font-semibold uppercase tracking-[0.18em] text-subtle">
-              AccessibleCourse
-            </p>
-            <h1
-              ref={headingRef}
-              tabIndex={-1}
-              className="text-display-sm font-semibold text-ink outline-none sm:text-5xl sm:leading-[1.1]"
+        <header className={classNames('mb-8', align === 'center' && 'text-center')}>
+          <h1
+            ref={headingRef}
+            tabIndex={-1}
+            className="text-4xl font-semibold tracking-[-0.04em] text-ink outline-none sm:text-5xl"
+          >
+            {title}
+          </h1>
+          {description ? (
+            <p
+              className={classNames(
+                'mt-3 max-w-2xl text-base leading-7 text-subtle',
+                align === 'center' && 'mx-auto',
+              )}
             >
-              {title}
-            </h1>
-            {description ? (
-              <p className="mt-4 max-w-2xl text-lg leading-8 text-subtle">{description}</p>
-            ) : null}
-          </header>
+              {description}
+            </p>
+          ) : null}
+        </header>
 
-          {children}
-        </div>
-
-        {footer ? <div className="mx-auto mt-8 w-full max-w-4xl">{footer}</div> : null}
+        <div className="flex-1">{children}</div>
+        {footer ? <div className="mt-8">{footer}</div> : null}
       </main>
     </div>
   );

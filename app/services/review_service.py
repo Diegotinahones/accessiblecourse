@@ -136,7 +136,9 @@ def ensure_review_rollups(session: Session, job_id: str, *, touch: bool = False)
         select(func.count()).select_from(ChecklistResponse).where(ChecklistResponse.job_id == job_id)
     ).one()
     ok_resources = session.exec(
-        select(func.count()).select_from(Resource).where(Resource.job_id == job_id, Resource.review_state == ReviewState.OK)
+        select(func.count())
+        .select_from(Resource)
+        .where(Resource.job_id == job_id, Resource.review_state == ReviewState.OK)
     ).one()
 
     now = _utc_now()
@@ -203,10 +205,14 @@ def list_resources_with_fail_counts(session: Session, job_id: str) -> list[tuple
     return [(resource, fail_count_by_resource.get(resource.id, 0)) for resource in resources]
 
 
-def get_checklist_snapshot(session: Session, resource: Resource) -> tuple[ChecklistTemplateBundle, dict[str, ChecklistResponse]]:
+def get_checklist_snapshot(
+    session: Session, resource: Resource
+) -> tuple[ChecklistTemplateBundle, dict[str, ChecklistResponse]]:
     template_bundle = get_template_bundle(session, resource.type)
     responses = session.exec(
-        select(ChecklistResponse).where(ChecklistResponse.job_id == resource.job_id, ChecklistResponse.resource_id == resource.id)
+        select(ChecklistResponse).where(
+            ChecklistResponse.job_id == resource.job_id, ChecklistResponse.resource_id == resource.id
+        )
     ).all()
     return template_bundle, {response.item_key: response for response in responses}
 
@@ -262,11 +268,15 @@ def upsert_checklist(
     return resource.review_state, fail_count, resource.updated_at
 
 
-def build_summary_payload(session: Session, job_id: str) -> tuple[ReviewSession, ReviewSummary, list[dict[str, object]]]:
+def build_summary_payload(
+    session: Session, job_id: str
+) -> tuple[ReviewSession, ReviewSummary, list[dict[str, object]]]:
     review_session, summary = ensure_review_rollups(session, job_id)
     template_map = get_templates_by_type(session)
     fail_responses = session.exec(
-        select(ChecklistResponse).where(ChecklistResponse.job_id == job_id, ChecklistResponse.value == ChecklistValue.FAIL)
+        select(ChecklistResponse).where(
+            ChecklistResponse.job_id == job_id, ChecklistResponse.value == ChecklistValue.FAIL
+        )
     ).all()
     grouped_failures: dict[str, list[ChecklistResponse]] = defaultdict(list)
     for response in fail_responses:
@@ -292,8 +302,12 @@ def build_summary_payload(session: Session, job_id: str) -> tuple[ReviewSession,
                 "recommendations": [
                     {
                         "itemKey": response.item_key,
-                        "label": template_items.get(response.item_key).label if template_items.get(response.item_key) else response.item_key,
-                        "recommendation": template_items.get(response.item_key).recommendation if template_items.get(response.item_key) else None,
+                        "label": template_items.get(response.item_key).label
+                        if template_items.get(response.item_key)
+                        else response.item_key,
+                        "recommendation": template_items.get(response.item_key).recommendation
+                        if template_items.get(response.item_key)
+                        else None,
                         "comment": response.comment,
                     }
                     for response in failures

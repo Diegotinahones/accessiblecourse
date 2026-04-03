@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List
 
 
 class ResourceType(str, Enum):
@@ -24,7 +23,7 @@ class ResourceState(str, Enum):
     ERROR = "ERROR"
 
 
-CHECKLIST_TEMPLATES: Dict[str, List[dict[str, str]]] = {
+CHECKLIST_TEMPLATES: dict[str, list[dict[str, str]]] = {
     "Web": [
         {
             "id": "keyboard",
@@ -157,7 +156,7 @@ CHECKLIST_TEMPLATES: Dict[str, List[dict[str, str]]] = {
     ],
 }
 
-ITEM_SEVERITY: Dict[str, str] = {
+ITEM_SEVERITY: dict[str, str] = {
     "keyboard": "HIGH",
     "focus": "HIGH",
     "labels": "HIGH",

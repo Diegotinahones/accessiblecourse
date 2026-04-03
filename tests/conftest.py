@@ -8,9 +8,9 @@ from zipfile import ZipFile
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault('CORS_ORIGINS', 'http://127.0.0.1:5173')
-os.environ.setdefault('STORAGE_ROOT', str(Path.cwd() / 'data'))
-os.environ.setdefault('DATABASE_URL', f"sqlite:///{Path.cwd() / 'data' / 'app-test-import.db'}")
+os.environ.setdefault("CORS_ORIGINS", "http://127.0.0.1:5173")
+os.environ.setdefault("STORAGE_ROOT", str(Path.cwd() / "data"))
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{Path.cwd() / 'data' / 'app-test-import.db'}")
 
 from app.core.config import Settings
 from app.main import create_app
@@ -41,24 +41,24 @@ def build_sample_imscc() -> bytes:
 """
 
     buffer = io.BytesIO()
-    with ZipFile(buffer, 'w') as archive:
-        archive.writestr('imsmanifest.xml', manifest)
-        archive.writestr('module_1/guide.pdf', b'%PDF-1.4\n%test pdf\n')
-        archive.writestr('module_1/plan.html', '<html><body>Plan semanal</body></html>')
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr("imsmanifest.xml", manifest)
+        archive.writestr("module_1/guide.pdf", b"%PDF-1.4\n%test pdf\n")
+        archive.writestr("module_1/plan.html", "<html><body>Plan semanal</body></html>")
     return buffer.getvalue()
 
 
 @pytest.fixture()
 def test_settings(tmp_path: Path) -> Settings:
     return Settings(
-        environment='test',
-        database_url=f'sqlite:///{tmp_path / "test.db"}',
-        storage_root=tmp_path / 'data',
-        cors_origins=['http://localhost:5173'],
+        environment="test",
+        database_url=f"sqlite:///{tmp_path / 'test.db'}",
+        storage_root=tmp_path / "data",
+        cors_origins=["http://localhost:5173"],
         max_upload_mb=10,
         max_extracted_files=50,
         max_extracted_mb=20,
-        log_level='DEBUG',
+        log_level="DEBUG",
     )
 
 

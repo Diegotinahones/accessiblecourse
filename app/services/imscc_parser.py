@@ -216,8 +216,7 @@ class IMSCCParser:
                 [
                     normalized
                     for normalized in (
-                        self._normalize_reference(reference)
-                        for reference in [resource.href, *resource.files]
+                        self._normalize_reference(reference) for reference in [resource.href, *resource.files]
                     )
                     if normalized and not self._is_external_url(normalized)
                 ]
@@ -225,8 +224,7 @@ class IMSCCParser:
             resolved_files = [
                 resolved_path
                 for resolved_path in (
-                    self._resolve_reference(reference, manifest_dir, extracted_root)
-                    for reference in declared_files
+                    self._resolve_reference(reference, manifest_dir, extracted_root) for reference in declared_files
                 )
                 if resolved_path is not None
             ]
@@ -322,7 +320,9 @@ class IMSCCParser:
             "title": title,
             "path": " > ".join(current_path),
             "resourceIdentifier": resource_identifier,
-            "children": [self._parse_item(child, current_path, item_map) for child in self._find_children(item, "item")],
+            "children": [
+                self._parse_item(child, current_path, item_map) for child in self._find_children(item, "item")
+            ],
         }
 
     def _extract_course_title(self, root: ET.Element) -> str | None:

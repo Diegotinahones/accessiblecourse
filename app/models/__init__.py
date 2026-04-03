@@ -17,11 +17,11 @@ class Job(SQLModel, table=True):
     stored_filename: str
     size_bytes: int
     storage_dir: str
-    status: str = Field(default='created', index=True)
+    status: str = Field(default="created", index=True)
     progress: int = Field(default=0)
     current_step: int = Field(default=1)
     total_steps: int = Field(default=4)
-    message: str = Field(default='Analisis en cola.')
+    message: str = Field(default="Analisis en cola.")
     error_code: str | None = Field(default=None)
     error_message: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=utcnow)
@@ -31,7 +31,7 @@ class Job(SQLModel, table=True):
 
 class ResourceRecord(SQLModel, table=True):
     id: str = Field(primary_key=True, index=True)
-    job_id: str = Field(index=True, foreign_key='job.id')
+    job_id: str = Field(index=True, foreign_key="job.id")
     title: str
     type: str
     origin: str
@@ -42,17 +42,17 @@ class ResourceRecord(SQLModel, table=True):
 
 class ChecklistEntry(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    job_id: str = Field(index=True, foreign_key='job.id')
-    resource_id: str = Field(index=True, foreign_key='resourcerecord.id')
+    job_id: str = Field(index=True, foreign_key="job.id")
+    resource_id: str = Field(index=True, foreign_key="resourcerecord.id")
     item_id: str = Field(index=True)
     label: str
     recommendation: str
-    decision: str = Field(default='pending')
+    decision: str = Field(default="pending")
 
 
 class JobEvent(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    job_id: str = Field(index=True, foreign_key='job.id')
+    job_id: str = Field(index=True, foreign_key="job.id")
     event: str = Field(index=True)
     message: str
     progress: int | None = None
@@ -62,7 +62,7 @@ class JobEvent(SQLModel, table=True):
 
 class ReportRecord(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    job_id: str = Field(index=True, foreign_key='job.id', unique=True)
+    job_id: str = Field(index=True, foreign_key="job.id", unique=True)
     resource_count: int
     failed_item_count: int
     generated_at: datetime = Field(default_factory=utcnow)

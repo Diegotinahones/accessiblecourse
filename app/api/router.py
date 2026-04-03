@@ -8,4 +8,3 @@ from app.api.routes.jobs import router as jobs_router
 api_router = APIRouter(prefix="/api")
 api_router.include_router(checklists_router)
 api_router.include_router(jobs_router)
-

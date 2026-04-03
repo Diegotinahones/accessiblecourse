@@ -8,43 +8,51 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.entities import (
     ChecklistValue as ReviewChecklistValue,
+)
+from app.models.entities import (
     ResourceHealthStatus as ReviewResourceHealthStatus,
+)
+from app.models.entities import (
     ResourceType as ReviewResourceType,
+)
+from app.models.entities import (
     ReviewSessionStatus as ReviewSessionStatusEnum,
+)
+from app.models.entities import (
     ReviewState as ReviewStateEnum,
 )
 
 
 class JobLifecycleStatus(str, Enum):
-    CREATED = 'created'
-    PROCESSING = 'processing'
-    DONE = 'done'
-    ERROR = 'error'
+    CREATED = "created"
+    PROCESSING = "processing"
+    DONE = "done"
+    ERROR = "error"
 
 
 class ResourceType(str, Enum):
-    PDF = 'PDF'
-    WEB = 'Web'
-    VIDEO = 'Video'
-    NOTEBOOK = 'Notebook'
-    OTHER = 'Other'
+    PDF = "PDF"
+    WEB = "Web"
+    VIDEO = "Video"
+    NOTEBOOK = "Notebook"
+    OTHER = "Other"
 
 
 class ResourceOrigin(str, Enum):
-    INTERNO = 'interno'
-    EXTERNO = 'externo'
+    INTERNO = "interno"
+    EXTERNO = "externo"
 
 
 class ResourceState(str, Enum):
-    OK = 'OK'
-    WARNING = 'AVISO'
-    ERROR = 'ERROR'
+    OK = "OK"
+    WARNING = "AVISO"
+    ERROR = "ERROR"
 
 
 class ChecklistDecision(str, Enum):
-    PENDING = 'pending'
-    PASS = 'pass'
-    FAIL = 'fail'
+    PENDING = "pending"
+    PASS = "pass"
+    FAIL = "fail"
 
 
 class ChecklistItem(BaseModel):
@@ -117,9 +125,9 @@ class HealthResponse(BaseModel):
 
 
 class ProblemDetails(BaseModel):
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(extra="allow")
 
-    type: str = 'about:blank'
+    type: str = "about:blank"
     title: str
     status: int
     code: str
@@ -130,7 +138,7 @@ class ProblemDetails(BaseModel):
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra="forbid")
 
 
 class ReviewSessionRead(StrictModel):
@@ -295,8 +303,8 @@ class ReportIssueRead(StrictModel):
     label: str
     description: str
     recommendation: str | None = None
-    severity: Literal['HIGH', 'MED', 'LOW']
-    status: Literal['FAIL', 'PENDING']
+    severity: Literal["HIGH", "MED", "LOW"]
+    status: Literal["FAIL", "PENDING"]
     comment: str | None = None
 
 

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from sqlmodel import SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import Settings
 from app.services.template_seed import seed_templates
-from sqlmodel import Session
 
 
 def build_engine(settings: Settings):

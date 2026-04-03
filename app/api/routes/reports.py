@@ -10,10 +10,10 @@ from app.core.rate_limit import MemoryRateLimiter, get_client_ip
 from app.schemas import GeneratedReportResponse
 from app.services.reports import generate_report, get_report_file_info, load_report
 
-router = APIRouter(prefix='/reports', tags=['reports'])
+router = APIRouter(prefix="/reports", tags=["reports"])
 
 
-@router.post('/{job_id}', response_model=GeneratedReportResponse)
+@router.post("/{job_id}", response_model=GeneratedReportResponse)
 def create_report(
     job_id: str,
     request: Request,
@@ -22,19 +22,19 @@ def create_report(
     rate_limiter: MemoryRateLimiter = Depends(get_rate_limiter),
 ) -> GeneratedReportResponse:
     rate_limiter.hit(
-        bucket='reports:create',
+        bucket="reports:create",
         key=get_client_ip(request),
         limit=settings.reports_rate_limit_per_minute,
     )
     return generate_report(session, settings, job_id)
 
 
-@router.get('/{job_id}', response_model=GeneratedReportResponse)
+@router.get("/{job_id}", response_model=GeneratedReportResponse)
 def get_report(job_id: str, session: Session = Depends(get_session)) -> GeneratedReportResponse:
     return load_report(session, job_id)
 
 
-@router.get('/{job_id}/download/{fmt}')
+@router.get("/{job_id}/download/{fmt}")
 def download_report(
     job_id: str,
     fmt: str,
@@ -46,5 +46,5 @@ def download_report(
         path=file_path,
         media_type=media_type,
         filename=filename,
-        headers={'Cache-Control': 'no-store, max-age=0', 'Pragma': 'no-cache', 'Expires': '0'},
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache", "Expires": "0"},
     )

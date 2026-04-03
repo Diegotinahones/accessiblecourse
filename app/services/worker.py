@@ -33,20 +33,32 @@ class JobProcessor:
                 shutil.rmtree(extracted_dir)
             extracted_dir.mkdir(parents=True, exist_ok=True)
 
-            self.store.update_job(job_id, status=JobStatus.RUNNING.value, progress=10, message="Descomprimiendo paquete IMSCC…", error_detail=None)
+            self.store.update_job(
+                job_id,
+                status=JobStatus.RUNNING.value,
+                progress=10,
+                message="Descomprimiendo paquete IMSCC…",
+                error_detail=None,
+            )
             self.store.append_log(job_id, event="started", message="Procesamiento del job iniciado.")
             self.parser.safe_extract_archive(archive_path, extracted_dir)
 
             self.store.update_job(job_id, progress=30, message="Localizando imsmanifest.xml…")
-            self.store.append_log(job_id, event="progress", message="Localizando imsmanifest.xml…", details={"progress": 30})
+            self.store.append_log(
+                job_id, event="progress", message="Localizando imsmanifest.xml…", details={"progress": 30}
+            )
             manifest_path = self.parser.find_manifest(extracted_dir)
 
             self.store.update_job(job_id, progress=55, message="Parseando manifest y estructura…")
-            self.store.append_log(job_id, event="progress", message="Parseando manifest y estructura…", details={"progress": 55})
+            self.store.append_log(
+                job_id, event="progress", message="Parseando manifest y estructura…", details={"progress": 55}
+            )
             parsed_manifest = self.parser.parse_manifest(manifest_path, extracted_dir)
 
             self.store.update_job(job_id, progress=75, message="Resolviendo recursos internos/externos…")
-            self.store.append_log(job_id, event="progress", message="Resolviendo recursos internos/externos…", details={"progress": 75})
+            self.store.append_log(
+                job_id, event="progress", message="Resolviendo recursos internos/externos…", details={"progress": 75}
+            )
             resources = self.parser.build_resource_inventory(parsed_manifest, manifest_path, extracted_dir)
 
             self.store.update_job(job_id, progress=90, message="Generando inventario…")
@@ -64,7 +76,9 @@ class JobProcessor:
                 manifest_path=manifest_path.relative_to(job_dir).as_posix(),
                 error_detail=None,
             )
-            self.store.append_log(job_id, event="finished", message="Inventario generado.", details={"resourceCount": len(resources)})
+            self.store.append_log(
+                job_id, event="finished", message="Inventario generado.", details={"resourceCount": len(resources)}
+            )
         except (ParserError, FileNotFoundError) as exc:
             self.store.update_job(
                 job_id,
@@ -72,7 +86,9 @@ class JobProcessor:
                 message="No se pudo procesar el paquete IMSCC.",
                 error_detail=str(exc),
             )
-            self.store.append_log(job_id, event="error", message="No se pudo procesar el paquete IMSCC.", details={"error": str(exc)})
+            self.store.append_log(
+                job_id, event="error", message="No se pudo procesar el paquete IMSCC.", details={"error": str(exc)}
+            )
         except Exception as exc:
             self.store.update_job(
                 job_id,
@@ -80,4 +96,9 @@ class JobProcessor:
                 message="Error inesperado procesando el paquete IMSCC.",
                 error_detail=str(exc),
             )
-            self.store.append_log(job_id, event="error", message="Error inesperado procesando el paquete IMSCC.", details={"error": str(exc)})
+            self.store.append_log(
+                job_id,
+                event="error",
+                message="Error inesperado procesando el paquete IMSCC.",
+                details={"error": str(exc)},
+            )

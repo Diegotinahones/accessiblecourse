@@ -7,7 +7,6 @@ from zipfile import ZipFile
 
 from app.services.imscc_parser import IMSCCParser, ParserError, classify_resource
 
-
 MANIFEST_WITH_NAMESPACE = """<?xml version="1.0" encoding="UTF-8"?>
 <manifest
     xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1"

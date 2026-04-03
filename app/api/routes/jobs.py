@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Request, UploadFile, status
@@ -18,8 +18,8 @@ from app.schemas import (
     ChecklistItemRead,
     ChecklistSaveRequest,
     ChecklistSaveResult,
-    JobReportRead,
     JobCreatedResponse,
+    JobReportRead,
     JobStatusResponse,
     ReportGenerateRequest,
     ResourceDetailPayload,
@@ -32,10 +32,12 @@ from app.schemas import (
 )
 from app.services.jobs import (
     create_job_record,
-    get_job_or_404 as get_processing_job_or_404,
     prepare_retry_job,
     process_job,
     serialize_job,
+)
+from app.services.jobs import (
+    get_job_or_404 as get_processing_job_or_404,
 )
 from app.services.reports import generate_job_report, get_report_file_info, load_job_report
 from app.services.review_service import (
@@ -47,14 +49,19 @@ from app.services.review_service import (
     list_resources_with_fail_counts,
     upsert_checklist,
 )
-from app.services.storage import get_upload_path, sanitize_filename, save_upload_file, validate_extension
+from app.services.storage import (
+    get_upload_path,
+    sanitize_filename,
+    save_upload_file,
+    validate_extension,
+)
 
-router = APIRouter(prefix='/jobs', tags=['jobs'])
-logger = logging.getLogger('accessiblecourse.review')
+router = APIRouter(prefix="/jobs", tags=["jobs"])
+logger = logging.getLogger("accessiblecourse.review")
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _review_session_read(review_session: ReviewSession) -> ReviewSessionRead:
@@ -89,18 +96,18 @@ def _ensure_review_inventory(session: Session, settings: Settings, job_id: str) 
         ensure_job_inventory(session, settings, job_id)
     except FileNotFoundError as exc:
         raise AppError(
-            code='inventory_not_found',
-            message='No hemos encontrado el inventario del curso para este job.',
+            code="inventory_not_found",
+            message="No hemos encontrado el inventario del curso para este job.",
             status_code=status.HTTP_404_NOT_FOUND,
-            details={'reason': str(exc)},
+            details={"reason": str(exc)},
             job_id=job_id,
         ) from exc
     except ValueError as exc:
         raise AppError(
-            code='invalid_inventory',
-            message='El inventario del curso no tiene un formato valido.',
+            code="invalid_inventory",
+            message="El inventario del curso no tiene un formato valido.",
             status_code=status.HTTP_409_CONFLICT,
-            details={'reason': str(exc)},
+            details={"reason": str(exc)},
             job_id=job_id,
         ) from exc
 
@@ -110,10 +117,10 @@ def _get_review_resource(session: Session, job_id: str, resource_id: str) -> Res
         return get_resource_or_404(session, job_id, resource_id)
     except LookupError as exc:
         raise AppError(
-            code='resource_not_found',
-            message='No hemos encontrado ese recurso.',
+            code="resource_not_found",
+            message="No hemos encontrado ese recurso.",
             status_code=status.HTTP_404_NOT_FOUND,
-            details={'reason': str(exc)},
+            details={"reason": str(exc)},
             job_id=job_id,
         ) from exc
 
@@ -124,10 +131,10 @@ def _build_summary_response(session: Session, settings: Settings, job_id: str) -
         review_session, review_summary, rows = build_summary_payload(session, job_id)
     except LookupError as exc:
         raise AppError(
-            code='checklist_template_not_found',
-            message='No hay plantillas de checklist disponibles para construir el informe.',
+            code="checklist_template_not_found",
+            message="No hay plantillas de checklist disponibles para construir el informe.",
             status_code=status.HTTP_409_CONFLICT,
-            details={'reason': str(exc)},
+            details={"reason": str(exc)},
             job_id=job_id,
         ) from exc
 
@@ -139,19 +146,19 @@ def _build_summary_response(session: Session, settings: Settings, job_id: str) -
         reviewSession=_review_session_read(review_session),
         resources=[
             ReviewFailResourceRead(
-                resourceId=str(row['resourceId']),
-                title=str(row['title']),
-                resourceType=row['resourceType'],
-                reviewState=row['reviewState'],
-                failCount=int(row['failCount']),
+                resourceId=str(row["resourceId"]),
+                title=str(row["title"]),
+                resourceType=row["resourceType"],
+                reviewState=row["reviewState"],
+                failCount=int(row["failCount"]),
                 recommendations=[
                     ReviewFailItemRead(
-                        itemKey=str(recommendation['itemKey']),
-                        label=str(recommendation['label']),
-                        recommendation=recommendation['recommendation'],
-                        comment=recommendation['comment'],
+                        itemKey=str(recommendation["itemKey"]),
+                        label=str(recommendation["label"]),
+                        recommendation=recommendation["recommendation"],
+                        comment=recommendation["comment"],
                     )
-                    for recommendation in row['recommendations']
+                    for recommendation in row["recommendations"]
                 ],
             )
             for row in rows
@@ -159,7 +166,7 @@ def _build_summary_response(session: Session, settings: Settings, job_id: str) -
     )
 
 
-@router.post('', response_model=JobCreatedResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=JobCreatedResponse, status_code=status.HTTP_201_CREATED)
 async def create_job(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -169,13 +176,13 @@ async def create_job(
     rate_limiter: MemoryRateLimiter = Depends(get_rate_limiter),
 ) -> JobCreatedResponse:
     rate_limiter.hit(
-        bucket='jobs:create',
+        bucket="jobs:create",
         key=get_client_ip(request),
         limit=settings.jobs_rate_limit_per_minute,
     )
-    validate_extension(file.filename or '')
+    validate_extension(file.filename or "")
     job_id = str(uuid4())
-    upload_path = get_upload_path(settings, job_id, file.filename or 'course.imscc')
+    upload_path = get_upload_path(settings, job_id, file.filename or "course.imscc")
     uploaded_size = await save_upload_file(
         upload=file,
         destination=upload_path,
@@ -187,20 +194,20 @@ async def create_job(
         session,
         settings,
         job_id=job_id,
-        original_filename=file.filename or 'course.imscc',
-        stored_filename=sanitize_filename(file.filename or 'course.imscc'),
+        original_filename=file.filename or "course.imscc",
+        stored_filename=sanitize_filename(file.filename or "course.imscc"),
         size_bytes=uploaded_size,
     )
     background_tasks.add_task(process_job, request.app.state.engine, settings, response.jobId)
     return response
 
 
-@router.get('/{job_id}', response_model=JobStatusResponse)
+@router.get("/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str, session: Session = Depends(get_session)) -> JobStatusResponse:
     return serialize_job(get_processing_job_or_404(session, job_id))
 
 
-@router.post('/{job_id}/retry', response_model=JobStatusResponse)
+@router.post("/{job_id}/retry", response_model=JobStatusResponse)
 def retry_existing_job(
     job_id: str,
     background_tasks: BackgroundTasks,
@@ -213,7 +220,7 @@ def retry_existing_job(
     return response
 
 
-@router.get('/{job_id}/resources', response_model=ResourceListPayload)
+@router.get("/{job_id}/resources", response_model=ResourceListPayload)
 def get_resources(
     job_id: str,
     session: Session = Depends(get_session),
@@ -225,7 +232,7 @@ def get_resources(
         _resource_read(resource, fail_count)
         for resource, fail_count in list_resources_with_fail_counts(session, job_id)
     ]
-    logger.info('Inventario de revision cargado', extra={'job_id': job_id, 'resource_count': len(resources)})
+    logger.info("Inventario de revision cargado", extra={"job_id": job_id, "resource_count": len(resources)})
     return ResourceListPayload(
         jobId=job_id,
         resources=resources,
@@ -233,7 +240,7 @@ def get_resources(
     )
 
 
-@router.get('/{job_id}/resources/{resource_id}', response_model=ResourceDetailPayload)
+@router.get("/{job_id}/resources/{resource_id}", response_model=ResourceDetailPayload)
 def get_resource_detail(
     job_id: str,
     resource_id: str,
@@ -246,10 +253,10 @@ def get_resource_detail(
         template_bundle, responses = get_checklist_snapshot(session, resource)
     except LookupError as exc:
         raise AppError(
-            code='checklist_template_not_found',
-            message='No hay una plantilla de checklist disponible para este tipo de recurso.',
+            code="checklist_template_not_found",
+            message="No hay una plantilla de checklist disponible para este tipo de recurso.",
             status_code=status.HTTP_409_CONFLICT,
-            details={'reason': str(exc)},
+            details={"reason": str(exc)},
             job_id=job_id,
         ) from exc
 
@@ -277,7 +284,7 @@ def get_resource_detail(
     )
 
 
-@router.put('/{job_id}/resources/{resource_id}/checklist', response_model=ChecklistSaveResult)
+@router.put("/{job_id}/resources/{resource_id}/checklist", response_model=ChecklistSaveResult)
 def put_resource_checklist(
     job_id: str,
     resource_id: str,
@@ -292,32 +299,32 @@ def put_resource_checklist(
             session,
             job_id,
             resource,
-            [item.model_dump(mode='python') for item in payload.responses],
+            [item.model_dump(mode="python") for item in payload.responses],
         )
     except LookupError as exc:
         raise AppError(
-            code='checklist_template_not_found',
-            message='No hay una plantilla de checklist disponible para este tipo de recurso.',
+            code="checklist_template_not_found",
+            message="No hay una plantilla de checklist disponible para este tipo de recurso.",
             status_code=status.HTTP_409_CONFLICT,
-            details={'reason': str(exc)},
+            details={"reason": str(exc)},
             job_id=job_id,
         ) from exc
     except RuntimeError as exc:
         raise AppError(
-            code='invalid_checklist_payload',
-            message='El checklist no se ha podido guardar con los datos recibidos.',
+            code="invalid_checklist_payload",
+            message="El checklist no se ha podido guardar con los datos recibidos.",
             status_code=status.HTTP_409_CONFLICT,
-            details={'reason': str(exc)},
+            details={"reason": str(exc)},
             job_id=job_id,
         ) from exc
 
     logger.info(
-        'Checklist persistido',
+        "Checklist persistido",
         extra={
-            'job_id': job_id,
-            'resource_id': resource_id,
-            'review_state': review_state.value,
-            'fail_count': fail_count,
+            "job_id": job_id,
+            "resource_id": resource_id,
+            "review_state": review_state.value,
+            "fail_count": fail_count,
         },
     )
     return ChecklistSaveResult(
@@ -328,7 +335,7 @@ def put_resource_checklist(
     )
 
 
-@router.get('/{job_id}/summary', response_model=ReviewSummaryPayload)
+@router.get("/{job_id}/summary", response_model=ReviewSummaryPayload)
 def get_review_summary(
     job_id: str,
     session: Session = Depends(get_session),
@@ -337,7 +344,7 @@ def get_review_summary(
     return _build_summary_response(session, settings, job_id)
 
 
-@router.post('/{job_id}/report', response_model=JobReportRead)
+@router.post("/{job_id}/report", response_model=JobReportRead)
 def create_job_report(
     job_id: str,
     request: Request,
@@ -347,7 +354,7 @@ def create_job_report(
     rate_limiter: MemoryRateLimiter = Depends(get_rate_limiter),
 ) -> dict:
     rate_limiter.hit(
-        bucket='reports:create',
+        bucket="reports:create",
         key=get_client_ip(request),
         limit=settings.reports_rate_limit_per_minute,
     )
@@ -359,23 +366,23 @@ def create_job_report(
         only_fails=payload.onlyFails if payload else False,
     )
     logger.info(
-        'Informe generado',
+        "Informe generado",
         extra={
-            'job_id': job_id,
-            'failed_item_count': report_payload['stats']['fails'],
-            'pending_count': report_payload['stats']['pending'],
-            'resource_count': report_payload['stats']['resources'],
+            "job_id": job_id,
+            "failed_item_count": report_payload["stats"]["fails"],
+            "pending_count": report_payload["stats"]["pending"],
+            "resource_count": report_payload["stats"]["resources"],
         },
     )
     return report_payload
 
 
-@router.get('/{job_id}/report', response_model=JobReportRead)
+@router.get("/{job_id}/report", response_model=JobReportRead)
 def get_job_report(job_id: str, session: Session = Depends(get_session)) -> dict:
     return load_job_report(session, job_id)
 
 
-@router.get('/{job_id}/report/download')
+@router.get("/{job_id}/report/download")
 def download_job_report(
     job_id: str,
     format: str,
@@ -388,8 +395,8 @@ def download_job_report(
         media_type=media_type,
         filename=filename,
         headers={
-            'Cache-Control': 'no-store, max-age=0',
-            'Pragma': 'no-cache',
-            'Expires': '0',
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
         },
     )

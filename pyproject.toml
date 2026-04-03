@@ -2,26 +2,10 @@
 testpaths = ["tests"]
 addopts = "--ignore=tests/test_imscc_parser.py"
 
+
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py311"
-exclude = [
-  "app/api/routes/checklists.py",
-  "app/core/constants.py",
-  "app/core/db.py",
-  "app/core/settings.py",
-  "app/models/entities.py",
-  "app/models/job.py",
-  "app/services/job_store.py",
-  "app/services/review_service.py",
-  "app/services/template_seed.py",
-  "app/services/worker.py",
-  "app/services/imscc_parser.py",
-]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
-
-[tool.ruff.format]
-quote-style = "single"
-indent-style = "space"
+ignore = ["B008", "UP042"]

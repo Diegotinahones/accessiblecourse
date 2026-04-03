@@ -9,7 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.api.routes import api_router
 from app.core.config import Settings, get_settings
-from app.core.errors import AppError, app_error_handler, unhandled_error_handler, validation_error_handler
+from app.core.errors import (
+    AppError,
+    app_error_handler,
+    unhandled_error_handler,
+    validation_error_handler,
+)
 from app.core.logging import configure_logging
 from app.core.rate_limit import MemoryRateLimiter
 from app.core.security import SecurityHeadersMiddleware
@@ -48,8 +53,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=resolved_settings.cors_origins,
         allow_credentials=False,
-        allow_methods=['GET', 'POST', 'PUT', 'OPTIONS'],
-        allow_headers=['*'],
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        allow_headers=["*"],
     )
     app.include_router(api_router, prefix=resolved_settings.api_prefix)
     return app

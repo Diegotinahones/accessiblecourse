@@ -12,3 +12,4 @@ data/*
 !data/.gitkeep
 openapi.json
 .vercel
+.env*.local

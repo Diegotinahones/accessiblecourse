@@ -1,9 +1,11 @@
 import type {
+  CanvasAuth,
   ChecklistSaveRequest,
   ChecklistSaveResult,
   ChecklistTemplatesResponse,
   GeneratedReport,
   JobStatus,
+  OnlineCourse,
   ResourceDetailResponse,
   ResourceListItem,
   ResourceListResponse,
@@ -30,6 +32,14 @@ interface RawJobStatusResponse {
   currentStep?: number;
   totalSteps?: number;
   errorCode?: string | null;
+}
+
+interface RawOnlineCourse {
+  id: string;
+  name: string;
+  term?: string | null;
+  start_at?: string | null;
+  end_at?: string | null;
 }
 
 type RawResourcesResponse = ResourceListResponse | ResourceListItem[];
@@ -75,6 +85,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+function buildCanvasHeaders(auth: CanvasAuth): HeadersInit {
+  return {
+    'X-Canvas-Base-Url': auth.baseUrl,
+    'X-Canvas-Token': auth.token,
+  };
+}
+
+function normalizeOnlineCourse(course: RawOnlineCourse): OnlineCourse {
+  return {
+    id: course.id,
+    name: course.name,
+    term: course.term ?? null,
+    startAt: course.start_at ?? null,
+    endAt: course.end_at ?? null,
+  };
 }
 
 function normalizeReviewType(type: string | null | undefined): ReviewResourceType {
@@ -130,6 +157,7 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
     origin: item.origin ?? null,
     url: item.url ?? null,
     path: item.path ?? null,
+    localPath: item.localPath ?? item.path ?? null,
     coursePath: item.coursePath ?? null,
     notes: item.notes ?? null,
     failCount: item.failCount ?? 0,
@@ -221,6 +249,27 @@ export const api = {
       currentStep,
       totalSteps,
     };
+  },
+
+  async listOnlineCourses(auth: CanvasAuth): Promise<OnlineCourse[]> {
+    const payload = await request<RawOnlineCourse[]>('/online/courses', {
+      headers: buildCanvasHeaders(auth),
+    });
+    return payload.map(normalizeOnlineCourse);
+  },
+
+  async createOnlineJob(
+    payload: { courseId: string; courseName?: string | null },
+    auth: CanvasAuth,
+  ): Promise<JobCreatedResponse> {
+    return request<JobCreatedResponse>('/online/jobs', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildCanvasHeaders(auth),
+      },
+      body: JSON.stringify(payload),
+    });
   },
 };
 

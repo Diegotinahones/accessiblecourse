@@ -141,6 +141,20 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class OnlineCourseRead(StrictModel):
+    id: str
+    name: str
+    term: str | None = None
+    startAt: datetime | None = None
+    endAt: datetime | None = None
+
+
+class OnlineJobCreateRequest(StrictModel):
+    courseId: str
+    courseName: str | None = None
+    courseName: str | None = None
+
+
 class ReviewSessionRead(StrictModel):
     jobId: str
     status: ReviewSessionStatusEnum
@@ -156,6 +170,7 @@ class ResourceListItemRead(StrictModel):
     origin: str | None = None
     url: str | None = None
     path: str | None = None
+    localPath: str | None = None
     coursePath: str | None = None
     status: ReviewResourceHealthStatus
     notes: str | None = None

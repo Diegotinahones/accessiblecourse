@@ -111,7 +111,11 @@ def _stable_filename(job_id: str, created_at: str | datetime, extension: str) ->
 
 def _resolve_course_title(session: Session, job_id: str) -> str | None:
     processing_job = session.get(ProcessingJob, job_id)
-    if processing_job and getattr(processing_job, "original_filename", None):
+    if (
+        processing_job
+        and getattr(processing_job, "size_bytes", 0) > 0
+        and getattr(processing_job, "original_filename", None)
+    ):
         stem = Path(processing_job.original_filename).stem.strip()
         if stem:
             return stem

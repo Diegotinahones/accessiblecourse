@@ -19,6 +19,7 @@ from app.core.logging import configure_logging
 from app.core.rate_limit import MemoryRateLimiter
 from app.core.security import SecurityHeadersMiddleware
 from app.db import build_engine, init_db
+from app.services.canvas_client import OnlineJobContextStore
 from app.services.storage import ensure_storage_layout
 
 
@@ -34,6 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = resolved_settings
         app.state.engine = engine
         app.state.rate_limiter = MemoryRateLimiter()
+        app.state.online_job_contexts = OnlineJobContextStore()
         yield
 
     app = FastAPI(
@@ -44,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.engine = engine
     app.state.rate_limiter = MemoryRateLimiter()
+    app.state.online_job_contexts = OnlineJobContextStore()
 
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)

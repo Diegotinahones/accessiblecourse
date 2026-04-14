@@ -1,16 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import { ProgressBar } from '../components/ProgressBar';
 import { api } from '../lib/api';
-import type { JobStatus } from '../lib/types';
+import type { AppMode, JobStatus } from '../lib/types';
+import { getModeSearch, isAppMode, loadRememberedAppMode, rememberAppMode } from '../lib/utils';
 
 export function AnalyzingPage() {
   const navigate = useNavigate();
   const { jobId } = useParams<{ jobId: string }>();
+  const [searchParams] = useSearchParams();
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const hasNavigatedRef = useRef(false);
+  const modeParam = searchParams.get('mode');
+  const appMode: AppMode = isAppMode(modeParam) ? modeParam : loadRememberedAppMode() ?? 'offline';
+
+  useEffect(() => {
+    rememberAppMode(appMode);
+  }, [appMode]);
 
   useEffect(() => {
     if (!jobId) {
@@ -37,7 +45,7 @@ export function AnalyzingPage() {
         ) {
           hasNavigatedRef.current = true;
           window.clearInterval(intervalId);
-          navigate(`/resources/${jobId}`, { replace: true });
+          navigate(`/resources/${jobId}${getModeSearch(appMode)}`, { replace: true });
           return;
         }
 
@@ -67,16 +75,18 @@ export function AnalyzingPage() {
       active = false;
       window.clearInterval(intervalId);
     };
-  }, [jobId, navigate]);
+  }, [appMode, jobId, navigate]);
 
   const progress = jobStatus?.progress ?? 0;
   const statusMessage = jobStatus?.message ?? 'Preparando análisis…';
+  const currentStep = jobStatus?.currentStep ?? 1;
+  const totalSteps = jobStatus?.totalSteps ?? 1;
   const liveMessage = `Analizando… ${progress}%`;
 
   return (
     <LayoutSimple
       backLabel="Volver a subir"
-      backTo="/"
+      backTo={`/${appMode}${getModeSearch(appMode)}`}
       description="Analizando el curso y preparando el inventario real."
       title="Analizando curso"
     >
@@ -95,6 +105,9 @@ export function AnalyzingPage() {
             <ProgressBar label="Progreso del análisis" value={progress} />
             <p aria-live="polite" className="text-base font-medium text-ink">
               {liveMessage}
+            </p>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-subtle">
+              Paso {currentStep} de {totalSteps}
             </p>
             <p className="text-sm text-subtle">{statusMessage}</p>
           </>

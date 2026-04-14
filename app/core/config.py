@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     report_brand_name: str = "AccessibleCourse"
     jobs_rate_limit_per_minute: int = 12
     reports_rate_limit_per_minute: int = 30
+    canvas_request_timeout_seconds: float = 10.0
+    url_check_timeout_seconds: float = 5.0
+    url_check_max_urls: int = 200
+    online_rate_limit_per_minute: int = 20
+    url_check_timeout_seconds: float = 8.0
+    url_check_max_urls: int = 250
 
     @field_validator("cors_origins", mode="before")
     @classmethod

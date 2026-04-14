@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from sqlmodel import Session, delete, select
 
@@ -11,6 +13,7 @@ from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.logging import append_job_log, job_logging_context
 from app.models import ChecklistEntry, Job, JobEvent, ReportRecord, ResourceRecord, utcnow
+from app.models.entities import Job as ReviewJob
 from app.schemas import (
     ChecklistDecision,
     ChecklistStateResponse,
@@ -20,6 +23,8 @@ from app.schemas import (
     JobStatusResponse,
     ResourceResponse,
 )
+from app.services.canvas_client import CanvasClient, OnlineJobContextStore
+from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
 from app.services.imscc import build_resources_from_extracted
 from app.services.storage import (
@@ -29,6 +34,7 @@ from app.services.storage import (
     get_reports_dir,
     get_upload_path,
 )
+from app.services.url_check import URLCheckService
 
 logger = logging.getLogger("accessiblecourse.jobs")
 
@@ -43,6 +49,21 @@ RESOURCE_TYPE_TO_REVIEW_TYPE = {
 RESOURCE_STATUS_TO_REVIEW_STATUS = {
     "OK": "OK",
     "AVISO": "WARN",
+    "ERROR": "ERROR",
+}
+
+REVIEW_TYPE_TO_LEGACY_TYPE = {
+    "WEB": "Web",
+    "PDF": "PDF",
+    "VIDEO": "Video",
+    "NOTEBOOK": "Notebook",
+    "IMAGE": "Other",
+    "OTHER": "Other",
+}
+
+REVIEW_STATUS_TO_LEGACY_STATUS = {
+    "OK": "OK",
+    "WARN": "AVISO",
     "ERROR": "ERROR",
 }
 
@@ -143,13 +164,47 @@ def _build_review_inventory(resources) -> list[dict[str, str | None]]:
     return inventory
 
 
-def _write_review_inventory(settings: Settings, job_id: str, resources) -> None:
+def _write_review_inventory_payload(settings: Settings, job_id: str, inventory: list[dict]) -> None:
     inventory_path = get_job_dir(settings, job_id) / "resources.json"
     inventory_path.parent.mkdir(parents=True, exist_ok=True)
     inventory_path.write_text(
-        json.dumps(_build_review_inventory(resources), ensure_ascii=False, indent=2),
+        json.dumps(inventory, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _write_review_inventory(settings: Settings, job_id: str, resources) -> None:
+    _write_review_inventory_payload(settings, job_id, _build_review_inventory(resources))
+
+
+def _persist_legacy_inventory(session: Session, job_id: str, inventory: list[dict]) -> None:
+    session.exec(delete(ChecklistEntry).where(ChecklistEntry.job_id == job_id))
+    session.exec(delete(ResourceRecord).where(ResourceRecord.job_id == job_id))
+
+    for resource in inventory:
+        legacy_type = REVIEW_TYPE_TO_LEGACY_TYPE.get(str(resource.get("type")), "Other")
+        resource_record = ResourceRecord(
+            id=str(resource["id"]),
+            job_id=job_id,
+            title=str(resource.get("title") or "Recurso sin titulo"),
+            type=legacy_type,
+            origin=str(resource.get("origin") or "interno"),
+            status=REVIEW_STATUS_TO_LEGACY_STATUS.get(str(resource.get("status") or "WARN"), "AVISO"),
+            href=resource.get("url"),
+            extracted_path=resource.get("path"),
+        )
+        session.add(resource_record)
+        for item in get_checklist_template(legacy_type):
+            session.add(
+                ChecklistEntry(
+                    job_id=job_id,
+                    resource_id=resource_record.id,
+                    item_id=str(item["id"]),
+                    label=str(item["label"]),
+                    recommendation=str(item["recommendation"]),
+                    decision=ChecklistDecision.PENDING.value,
+                )
+            )
 
 
 def create_job_record(
@@ -160,6 +215,9 @@ def create_job_record(
     original_filename: str,
     stored_filename: str,
     size_bytes: int,
+    total_steps: int = 4,
+    initial_message: str = "Analisis en cola.",
+    event_details: dict | None = None,
 ) -> JobCreatedResponse:
     job_dir = get_job_dir(settings, job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -173,10 +231,13 @@ def create_job_record(
         status=JobLifecycleStatus.CREATED.value,
         progress=0,
         current_step=1,
-        total_steps=4,
-        message="Analisis en cola.",
+        total_steps=total_steps,
+        message=initial_message,
     )
     session.add(job)
+    details = {"filename": original_filename, "sizeBytes": size_bytes}
+    if event_details:
+        details.update(event_details)
     record_job_event(
         session,
         settings,
@@ -184,10 +245,41 @@ def create_job_record(
         event="created",
         message="Job creado y pendiente de procesamiento.",
         progress=0,
-        details={"filename": original_filename, "sizeBytes": size_bytes},
+        details=details,
     )
     session.commit()
     return JobCreatedResponse(jobId=job_id)
+
+
+def create_online_job_record(
+    session: Session,
+    settings: Settings,
+    *,
+    job_id: str,
+    course_id: str,
+    course_name: str | None,
+) -> JobCreatedResponse:
+    resolved_course_name = course_name or f"Canvas course {course_id}"
+    review_job = session.get(ReviewJob, job_id)
+    if review_job is None:
+        session.add(ReviewJob(id=job_id, name=resolved_course_name))
+    else:
+        review_job.name = resolved_course_name
+        review_job.updated_at = utcnow()
+        session.add(review_job)
+    session.flush()
+
+    return create_job_record(
+        session,
+        settings,
+        job_id=job_id,
+        original_filename=resolved_course_name,
+        stored_filename=resolved_course_name,
+        size_bytes=0,
+        total_steps=6,
+        initial_message="Analisis online en cola.",
+        event_details={"source": "canvas", "courseId": course_id},
+    )
 
 
 def _update_job(
@@ -225,6 +317,110 @@ def _reset_job_related_data(session: Session, settings: Settings, job_id: str) -
     shutil.rmtree(get_extracted_dir(settings, job_id), ignore_errors=True)
     shutil.rmtree(get_reports_dir(settings, job_id), ignore_errors=True)
     session.commit()
+
+
+def _update_job_progress(
+    session: Session,
+    settings: Settings,
+    job: Job,
+    *,
+    current_step: int,
+    progress: int,
+    message: str,
+    event: str = "progress",
+    details: dict[str, Any] | None = None,
+) -> None:
+    _update_job(
+        session,
+        job,
+        status=JobLifecycleStatus.PROCESSING,
+        progress=progress,
+        current_step=current_step,
+        message=message,
+    )
+    record_job_event(
+        session,
+        settings,
+        job_id=job.id,
+        event=event,
+        message=message,
+        progress=progress,
+        details=details,
+    )
+    session.commit()
+
+
+def _append_note(resource: dict[str, Any], note: str) -> None:
+    existing = resource.get("notes")
+    if existing is None:
+        resource["notes"] = [note]
+        return
+    if isinstance(existing, list):
+        if note not in existing:
+            existing.append(note)
+        return
+    if isinstance(existing, str):
+        cleaned = existing.strip()
+        resource["notes"] = [cleaned, note] if cleaned and cleaned != note else [note]
+
+
+def _apply_url_validation(
+    resources: list[dict[str, Any]],
+    url_results: dict[str, Any],
+) -> dict[str, Any]:
+    broken_links: list[dict[str, Any]] = []
+    checked_urls = 0
+    skipped_urls = 0
+
+    for resource in resources:
+        resource_id = str(resource["id"])
+        result = url_results.get(resource_id)
+        if result is None:
+            continue
+
+        details = dict(resource.get("details") or {})
+        if not result.checked:
+            skipped_urls += 1
+            details["urlCheck"] = {"checked": False, "reason": result.reason}
+            resource["details"] = details
+            continue
+
+        checked_urls += 1
+        url_check_details = {"checked": True}
+        if result.status_code is not None:
+            url_check_details["statusCode"] = result.status_code
+        if result.reason:
+            url_check_details["reason"] = result.reason
+        details["urlCheck"] = url_check_details
+
+        if result.broken_link:
+            resource["status"] = "ERROR"
+            details["broken_link"] = {
+                "url": resource.get("url"),
+                "reason": result.reason,
+                "statusCode": result.status_code,
+            }
+            if result.reason == "404_not_found":
+                _append_note(resource, "broken_link: URL devuelve 404.")
+            elif result.reason == "timeout":
+                _append_note(resource, "broken_link: la URL ha excedido el tiempo de espera.")
+            broken_links.append(
+                {
+                    "resourceId": resource_id,
+                    "title": resource.get("title"),
+                    "url": resource.get("url"),
+                    "reason": result.reason,
+                    "statusCode": result.status_code,
+                }
+            )
+
+        resource["details"] = details
+
+    return {
+        "brokenLinks": broken_links,
+        "checkedUrls": checked_urls,
+        "skippedUrls": skipped_urls,
+    }
 
 
 def load_checklist_state(session: Session, job_id: str) -> ChecklistStateResponse:
@@ -469,6 +665,193 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 level=logging.ERROR,
             )
             logger.exception("Unhandled job processing error", extra={"event": "error", "job_id": job_id})
+            session.commit()
+
+
+def process_online_job(
+    engine,
+    settings: Settings,
+    job_contexts: OnlineJobContextStore,
+    job_id: str,
+    canvas_client_factory: Callable[[Any, Settings], CanvasClient],
+    url_check_factory: Callable[[Settings], URLCheckService],
+) -> None:
+    with Session(engine) as session:
+        job = get_job_or_404(session, job_id)
+        context = job_contexts.pop(job_id)
+        if context is None:
+            _update_job(
+                session,
+                job,
+                status=JobLifecycleStatus.ERROR,
+                progress=job.progress or 0,
+                current_step=min(job.current_step, job.total_steps),
+                message="La sesion temporal de Canvas ha caducado antes de empezar el analisis.",
+                error_code="canvas_session_missing",
+                error_message="Missing online job context",
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="error",
+                message="La sesion temporal de Canvas ha caducado antes de empezar el analisis.",
+                progress=job.progress,
+                details={"reason": "missing_online_job_context"},
+                level=logging.ERROR,
+            )
+            session.commit()
+            return
+
+        client = canvas_client_factory(context.credentials, settings)
+        url_checker = url_check_factory(settings)
+        try:
+            client.verify_auth()
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=1,
+                progress=10,
+                message="Autenticacion Canvas validada.",
+                event="started",
+                details={"source": "canvas", "courseId": context.course_id},
+            )
+
+            course = client.get_course(context.course_id)
+            job.original_filename = course.name
+            job.stored_filename = course.name
+            review_job = session.get(ReviewJob, job_id)
+            if review_job is None:
+                review_job = ReviewJob(id=job_id, name=course.name)
+            else:
+                review_job.name = course.name
+                review_job.updated_at = utcnow()
+            session.add(review_job)
+            session.add(job)
+            session.commit()
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=2,
+                progress=25,
+                message=f"Curso cargado: {course.name}",
+                details={"courseId": course.id, "courseName": course.name},
+            )
+
+            modules = client.list_modules(course.id)
+            if not modules:
+                raise AppError(
+                    code="canvas_no_modules",
+                    message="El curso no tiene modulos visibles para construir el inventario online.",
+                    status_code=409,
+                    job_id=job_id,
+                )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=3,
+                progress=45,
+                message=f"Modulos leidos: {len(modules)}",
+                details={"moduleCount": len(modules)},
+            )
+
+            inventory_build = build_canvas_inventory(client, course_id=course.id, modules=modules)
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=4,
+                progress=65,
+                message=f"Items leidos: {inventory_build.items_read}",
+                details={"itemsRead": inventory_build.items_read, "resourceCount": len(inventory_build.resources)},
+            )
+
+            url_results = url_checker.check(inventory_build.resources, credentials=context.credentials)
+            url_validation_summary = _apply_url_validation(inventory_build.resources, url_results)
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=5,
+                progress=82,
+                message="Validacion de URLs completada.",
+                details=url_validation_summary,
+            )
+
+            _write_review_inventory_payload(settings, job_id, inventory_build.resources)
+            _persist_legacy_inventory(session, job_id, inventory_build.resources)
+
+            _update_job(
+                session,
+                job,
+                status=JobLifecycleStatus.DONE,
+                progress=100,
+                current_step=6,
+                message="Analisis online completado.",
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="finished",
+                message="Inventario online persistido correctamente.",
+                progress=100,
+                details={
+                    "courseId": course.id,
+                    "courseName": course.name,
+                    "resourceCount": len(inventory_build.resources),
+                    "brokenLinkCount": len(url_validation_summary["brokenLinks"]),
+                },
+            )
+            session.commit()
+        except AppError as exc:
+            _update_job(
+                session,
+                job,
+                status=JobLifecycleStatus.ERROR,
+                progress=job.progress or 0,
+                current_step=min(job.current_step, job.total_steps),
+                message=exc.message,
+                error_code=exc.code,
+                error_message=exc.message,
+            )
+            details = exc.details if isinstance(exc.details, dict) else {"details": exc.details}
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="error",
+                message=exc.message,
+                progress=job.progress,
+                details=details,
+                level=logging.ERROR,
+            )
+            session.commit()
+        except Exception as exc:  # pragma: no cover
+            _update_job(
+                session,
+                job,
+                status=JobLifecycleStatus.ERROR,
+                progress=job.progress or 0,
+                current_step=min(job.current_step, job.total_steps),
+                message="No hemos podido procesar el curso online. Intentalo de nuevo en unos instantes.",
+                error_code="unexpected_online_processing_error",
+                error_message=str(exc),
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="error",
+                message="Error no controlado durante el procesamiento online.",
+                progress=job.progress,
+                details={"exception": exc.__class__.__name__},
+                level=logging.ERROR,
+            )
+            logger.exception("Unhandled online job processing error", extra={"event": "error", "job_id": job_id})
             session.commit()
 
 

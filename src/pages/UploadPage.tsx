@@ -1,14 +1,23 @@
-import { ChangeEvent, FormEvent, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { ChangeEvent, FormEvent, useEffect, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import { api } from '../lib/api';
-import { formatFileSize, rememberCourseName } from '../lib/utils';
+import { formatFileSize, getModeSearch, rememberAppMode, rememberCourseName } from '../lib/utils';
 
 export function UploadPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    rememberAppMode('offline');
+
+    if (searchParams.get('mode') !== 'offline') {
+      setSearchParams({ mode: 'offline' }, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSelectedFile(event.target.files?.[0] ?? null);
@@ -28,12 +37,10 @@ export function UploadPage() {
       setError(null);
       const { jobId } = await api.createJob(selectedFile);
       rememberCourseName(jobId, selectedFile.name);
-      navigate(`/analyzing/${jobId}`);
+      navigate(`/analyzing/${jobId}${getModeSearch('offline')}`);
     } catch (caughtError) {
       setError(
-        caughtError instanceof Error
-          ? caughtError.message
-          : 'No hemos podido subir el curso.',
+        caughtError instanceof Error ? caughtError.message : 'No hemos podido subir el curso.',
       );
     } finally {
       setIsSubmitting(false);
@@ -43,8 +50,10 @@ export function UploadPage() {
   return (
     <LayoutSimple
       align="center"
-      description="Haz tu curso accesible para todos"
-      title="AccessibleCourse"
+      backLabel="Cambiar modo"
+      backTo="/?mode=offline"
+      description="Sube un paquete IMSCC o ZIP y generaremos el inventario para revisar la accesibilidad del curso."
+      title="Offline (IMSCC)"
     >
       <form
         className="card-panel mx-auto max-w-xl space-y-5 p-6 sm:p-8"

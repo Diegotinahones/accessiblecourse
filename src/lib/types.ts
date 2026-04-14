@@ -3,6 +3,8 @@ export type ResourceOrigin = 'interno' | 'externo';
 export type ResourceState = 'OK' | 'AVISO' | 'ERROR';
 export type JobLifecycleStatus = 'pending' | 'running' | 'processing' | 'done' | 'error';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
+export type AnalysisMode = 'offline' | 'online';
+export type AppMode = 'online' | 'offline';
 
 export interface Resource {
   id: string;
@@ -27,6 +29,20 @@ export interface JobStatus {
   message: string;
   currentStep: number;
   totalSteps: number;
+}
+
+export interface CanvasAuth {
+  baseUrl: string;
+  token: string;
+  authMode?: 'token';
+}
+
+export interface OnlineCourse {
+  id: string;
+  name: string;
+  term: string | null;
+  startAt: string | null;
+  endAt: string | null;
 }
 
 export interface ReportFailure {
@@ -59,7 +75,6 @@ export type ReviewResourceHealthStatus = 'OK' | 'WARN' | 'ERROR';
 export type ReviewState = 'OK' | 'IN_REVIEW' | 'NEEDS_FIX';
 export type ReviewChecklistValue = 'PENDING' | 'PASS' | 'FAIL';
 export type ReviewSessionStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETE';
-
 export interface ReviewSession {
   jobId: string;
   status: ReviewSessionStatus;
@@ -75,6 +90,7 @@ export interface ResourceListItem {
   origin: string | null;
   url: string | null;
   path: string | null;
+  localPath: string | null;
   coursePath: string | null;
   status: ReviewResourceHealthStatus;
   notes: string | null;

@@ -1,6 +1,7 @@
-import { ChecklistDecision } from './types';
+import { AppMode, ChecklistDecision } from './types';
 
 const COURSE_NAME_PREFIX = 'accessiblecourse.course-name';
+const APP_MODE_KEY = 'accessiblecourse.app-mode';
 
 export function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(' ');
@@ -71,4 +72,38 @@ export function loadRememberedCourseName(jobId: string) {
   }
 
   return window.sessionStorage.getItem(`${COURSE_NAME_PREFIX}.${jobId}`);
+}
+
+export function isAppMode(value: string | null | undefined): value is AppMode {
+  return value === 'online' || value === 'offline';
+}
+
+export function rememberAppMode(mode: AppMode) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(APP_MODE_KEY, mode);
+}
+
+export function loadRememberedAppMode() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const storedMode = window.localStorage.getItem(APP_MODE_KEY);
+  return isAppMode(storedMode) ? storedMode : null;
+}
+
+export function resolveAppMode(mode: string | null | undefined): AppMode {
+  return isAppMode(mode) ? mode : loadRememberedAppMode() ?? 'offline';
+}
+
+export function getModeSearch(mode: AppMode) {
+  return `?mode=${mode}`;
+}
+
+export function getModeRoute(mode: AppMode) {
+  const pathname = mode === 'online' ? '/online' : '/offline';
+  return `${pathname}${getModeSearch(mode)}`;
 }

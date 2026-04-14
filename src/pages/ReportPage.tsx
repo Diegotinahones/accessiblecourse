@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useLocation, useParams } from 'react-router-dom';
+import { useLocation, useParams, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import {
   ApiError,
@@ -7,9 +7,15 @@ import {
   generateReport,
   getDirectReportDownloadUrls,
 } from '../lib/api';
-import type { GeneratedReport } from '../lib/types';
+import type { AppMode, GeneratedReport } from '../lib/types';
 import { formatDate } from '../lib/types';
-import { loadRememberedCourseName } from '../lib/utils';
+import {
+  getModeSearch,
+  isAppMode,
+  loadRememberedAppMode,
+  loadRememberedCourseName,
+  rememberAppMode,
+} from '../lib/utils';
 
 interface ReportLocationState {
   announcement?: string;
@@ -23,6 +29,7 @@ function getLoadMessage(isGenerating: boolean) {
 export function ReportPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const navigationState = (location.state as ReportLocationState | null) ?? null;
   const [report, setReport] = useState<GeneratedReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -30,6 +37,12 @@ export function ReportPage() {
   const [error, setError] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [announcement, setAnnouncement] = useState(navigationState?.announcement ?? '');
+  const modeParam = searchParams.get('mode');
+  const appMode: AppMode = isAppMode(modeParam) ? modeParam : loadRememberedAppMode() ?? 'offline';
+
+  useEffect(() => {
+    rememberAppMode(appMode);
+  }, [appMode]);
 
   useEffect(() => {
     const reportJobId = jobId;
@@ -123,7 +136,7 @@ export function ReportPage() {
   return (
     <LayoutSimple
       backLabel="Volver a recursos"
-      backTo={jobId ? `/resources/${jobId}` : '/'}
+      backTo={jobId ? `/resources/${jobId}${getModeSearch(appMode)}` : '/'}
       description="Este informe se ha generado a partir de una checklist revisada manualmente."
       title="Informe"
     >

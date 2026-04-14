@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import {
   fetchResourceDetail,
@@ -8,34 +8,25 @@ import {
   saveChecklist,
 } from '../lib/api';
 import type {
+  AppMode,
   ResourceDetailResponse,
   ResourceListItem,
   ReviewChecklistItem,
   ReviewChecklistValue,
-  ReviewResourceType,
 } from '../lib/types';
 import { sortResourcesByPriority } from '../lib/types';
-import { classNames, loadRememberedCourseName } from '../lib/utils';
+import {
+  classNames,
+  getModeSearch,
+  isAppMode,
+  loadRememberedAppMode,
+  loadRememberedCourseName,
+  rememberAppMode,
+} from '../lib/utils';
 
 type SaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
-type ResourceGroupKey = 'WEB' | 'PDF' | 'VIDEO' | 'OTHER';
 type VisualReviewState = 'SIN_REVISAR' | 'EN_REVISION' | 'OK' | 'REQUIERE_CAMBIOS';
-
-const GROUP_ORDER: ResourceGroupKey[] = ['WEB', 'PDF', 'VIDEO', 'OTHER'];
-
-const GROUP_LABELS: Record<ResourceGroupKey, string> = {
-  WEB: 'Web',
-  PDF: 'PDF',
-  VIDEO: 'Vídeo',
-  OTHER: 'Otro',
-};
-
-const EMPTY_EXPANDED_GROUPS: Record<ResourceGroupKey, boolean> = {
-  WEB: false,
-  PDF: false,
-  VIDEO: false,
-  OTHER: false,
-};
+const DEFAULT_MODULE_LABEL = 'Contenido sin módulo';
 
 const RESPONSE_OPTIONS: Array<{ label: string; value: ReviewChecklistValue }> = [
   { label: 'Cumple', value: 'PASS' },
@@ -43,20 +34,8 @@ const RESPONSE_OPTIONS: Array<{ label: string; value: ReviewChecklistValue }> = 
   { label: 'Pendiente', value: 'PENDING' },
 ];
 
-function getGroupKey(type: ReviewResourceType): ResourceGroupKey {
-  if (type === 'WEB') {
-    return 'WEB';
-  }
-
-  if (type === 'PDF') {
-    return 'PDF';
-  }
-
-  if (type === 'VIDEO') {
-    return 'VIDEO';
-  }
-
-  return 'OTHER';
+function getGroupKey(resource: ResourceListItem): string {
+  return resource.coursePath?.trim() || DEFAULT_MODULE_LABEL;
 }
 
 function hasChecklistActivity(items: ReviewChecklistItem[]) {
@@ -147,6 +126,16 @@ function getReviewStateClassName(state: VisualReviewState) {
   }
 }
 
+function getHealthLabel(resource: ResourceListItem) {
+  if (resource.status === 'ERROR') {
+    return 'Enlace roto';
+  }
+  if (resource.status === 'WARN') {
+    return 'Revisar enlace';
+  }
+  return null;
+}
+
 function getFooterMessage(
   saveState: SaveState,
   saveError: string | null,
@@ -183,9 +172,9 @@ function getFooterMessage(
 export function ResourcesPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [resources, setResources] = useState<ResourceListItem[]>([]);
-  const [expandedGroups, setExpandedGroups] =
-    useState<Record<ResourceGroupKey, boolean>>(EMPTY_EXPANDED_GROUPS);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [expandedResourceId, setExpandedResourceId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ResourceDetailResponse | null>(null);
   const [loadingResources, setLoadingResources] = useState(true);
@@ -202,6 +191,12 @@ export function ResourcesPage() {
   const [resourceActivityMap, setResourceActivityMap] = useState<Record<string, boolean>>({});
   const draftVersionRef = useRef(0);
   const saveQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
+  const modeParam = searchParams.get('mode');
+  const appMode: AppMode = isAppMode(modeParam) ? modeParam : loadRememberedAppMode() ?? 'offline';
+
+  useEffect(() => {
+    rememberAppMode(appMode);
+  }, [appMode]);
 
   useEffect(() => {
     if (!jobId) {
@@ -227,21 +222,13 @@ export function ResourcesPage() {
             return current;
           }
 
-          const firstOpenGroup = GROUP_ORDER.find((groupKey) =>
-            orderedResources.some((resource) => getGroupKey(resource.type) === groupKey),
-          );
+          const firstOpenGroup = orderedResources[0] ? getGroupKey(orderedResources[0]) : null;
 
           if (!firstOpenGroup) {
             return current;
           }
 
-          return {
-            WEB: false,
-            PDF: false,
-            VIDEO: false,
-            OTHER: false,
-            [firstOpenGroup]: true,
-          };
+          return { [firstOpenGroup]: true };
         });
       })
       .catch((error: Error) => {
@@ -312,10 +299,10 @@ export function ResourcesPage() {
     };
   }, [detail?.resource.id, expandedResourceId, jobId]);
 
-  async function persistDraft(
+  const persistDraft = useCallback(async (
     versionAtSave: number,
     snapshot = detail,
-  ): Promise<boolean> {
+  ): Promise<boolean> => {
     if (!jobId || !snapshot) {
       return true;
     }
@@ -383,7 +370,7 @@ export function ResourcesPage() {
 
     saveQueueRef.current = saveTask.catch(() => false);
     return saveTask;
-  }
+  }, [detail, jobId]);
 
   useEffect(() => {
     if (!detail || !isDirty) {
@@ -399,21 +386,26 @@ export function ResourcesPage() {
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [detail, draftVersion, isDirty]);
+  }, [detail, draftVersion, isDirty, persistDraft]);
 
   const groupedResources = useMemo(() => {
-    return resources.reduce<Record<ResourceGroupKey, ResourceListItem[]>>(
-      (groups, resource) => {
-        groups[getGroupKey(resource.type)].push(resource);
-        return groups;
-      },
-      {
-        WEB: [],
-        PDF: [],
-        VIDEO: [],
-        OTHER: [],
-      },
-    );
+    const groups = new Map<string, ResourceListItem[]>();
+
+    resources.forEach((resource) => {
+      const groupKey = getGroupKey(resource);
+      const items = groups.get(groupKey);
+      if (items) {
+        items.push(resource);
+        return;
+      }
+
+      groups.set(groupKey, [resource]);
+    });
+
+    return Array.from(groups.entries()).map(([groupKey, items]) => ({
+      groupKey,
+      groupResources: items,
+    }));
   }, [resources]);
 
   function updateChecklistItem(
@@ -494,7 +486,7 @@ export function ResourcesPage() {
     try {
       setIsGenerating(true);
       await generateReport(jobId);
-      navigate(`/report/${jobId}`, {
+      navigate(`/report/${jobId}${getModeSearch(appMode)}`, {
         replace: true,
         state: {
           announcement: 'Informe generado.',
@@ -515,6 +507,8 @@ export function ResourcesPage() {
 
   return (
     <LayoutSimple
+      backLabel="Volver"
+      backTo={`/${appMode}${getModeSearch(appMode)}`}
       description="Revisa recursos y marca la checklist; el informe se genera a partir de esta revisión manual."
       title="Recursos"
     >
@@ -546,15 +540,11 @@ export function ResourcesPage() {
 
       {!loadingResources && !screenError && resources.length > 0 ? (
         <div className="space-y-4">
-          {GROUP_ORDER.map((groupKey) => {
-            const groupResources = groupedResources[groupKey];
-            if (groupResources.length === 0) {
-              return null;
-            }
-
-            const groupButtonId = `resource-group-button-${groupKey}`;
-            const groupPanelId = `resource-group-panel-${groupKey}`;
-            const isGroupExpanded = expandedGroups[groupKey];
+          {groupedResources.map(({ groupKey, groupResources }) => {
+            const groupDomKey = encodeURIComponent(groupKey);
+            const groupButtonId = `resource-group-button-${groupDomKey}`;
+            const groupPanelId = `resource-group-panel-${groupDomKey}`;
+            const isGroupExpanded = expandedGroups[groupKey] ?? false;
 
             return (
               <section className="card-panel overflow-hidden" key={groupKey}>
@@ -572,7 +562,7 @@ export function ResourcesPage() {
                     }
                     type="button"
                   >
-                    <span>{GROUP_LABELS[groupKey]}</span>
+                    <span>{groupKey}</span>
                     <span className="text-sm font-medium text-subtle">
                       {groupResources.length}
                     </span>
@@ -611,6 +601,12 @@ export function ResourcesPage() {
                             >
                               <span className="min-w-0 text-base font-semibold text-ink">
                                 <span className="block truncate">{resource.title}</span>
+                                <span className="mt-1 block text-sm font-normal text-subtle">
+                                  {resource.type}
+                                  {getHealthLabel(resource)
+                                    ? ` · ${getHealthLabel(resource)}`
+                                    : ''}
+                                </span>
                               </span>
                               <span
                                 className={classNames(
@@ -651,7 +647,7 @@ export function ResourcesPage() {
                               detail &&
                               detail.resource.id === resource.id ? (
                                 <div className="space-y-5">
-                                  {resource.coursePath || resource.url || resource.path ? (
+                                  {resource.coursePath || resource.url || resource.localPath || resource.path ? (
                                     <div className="space-y-2 rounded-2xl border border-line bg-[#f9faf7] p-4 text-sm text-subtle">
                                       {resource.coursePath ? (
                                         <p>
@@ -672,10 +668,22 @@ export function ResourcesPage() {
                                           </a>
                                         </p>
                                       ) : null}
-                                      {!resource.url && resource.path ? (
+                                      {resource.localPath ? (
                                         <p>
                                           <span className="font-semibold text-ink">Archivo:</span>{' '}
-                                          {resource.path}
+                                          {resource.localPath}
+                                        </p>
+                                      ) : null}
+                                      {getHealthLabel(resource) ? (
+                                        <p>
+                                          <span className="font-semibold text-ink">Estado técnico:</span>{' '}
+                                          {getHealthLabel(resource)}
+                                        </p>
+                                      ) : null}
+                                      {resource.notes ? (
+                                        <p>
+                                          <span className="font-semibold text-ink">Detalle:</span>{' '}
+                                          {resource.notes}
                                         </p>
                                       ) : null}
                                     </div>

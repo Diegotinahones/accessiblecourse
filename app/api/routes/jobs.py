@@ -82,6 +82,7 @@ def _resource_read(resource: Resource, fail_count: int) -> ResourceListItemRead:
         origin=resource.origin,
         url=resource.url,
         path=resource.path,
+        localPath=resource.path,
         coursePath=resource.course_path,
         status=resource.status,
         notes=resource.notes,

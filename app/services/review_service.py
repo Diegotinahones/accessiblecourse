@@ -195,7 +195,11 @@ def get_resource_or_404(session: Session, job_id: str, resource_id: str) -> Reso
 
 
 def list_resources_with_fail_counts(session: Session, job_id: str) -> list[tuple[Resource, int]]:
-    resources = session.exec(select(Resource).where(Resource.job_id == job_id).order_by(col(Resource.title))).all()
+    resources = session.exec(
+        select(Resource)
+        .where(Resource.job_id == job_id)
+        .order_by(col(Resource.course_path), col(Resource.title))
+    ).all()
     fail_rows = session.exec(
         select(ChecklistResponse.resource_id, func.count(ChecklistResponse.id))
         .where(ChecklistResponse.job_id == job_id, ChecklistResponse.value == ChecklistValue.FAIL)

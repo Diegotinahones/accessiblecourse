@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+from app.services.canvas_client import CanvasCourse, CanvasFile, CanvasModule, CanvasModuleItem
+from app.services.url_check import UrlCheckResult
+
+
+def canvas_headers() -> dict[str, str]:
+    return {
+        "X-Canvas-Base-Url": "https://canvas.example.edu",
+        "X-Canvas-Token": "secret-token",
+    }
+
+
+class StubCanvasClient:
+    def __init__(self, credentials) -> None:
+        self.credentials = credentials
+
+    def verify_auth(self) -> None:
+        return None
+
+    def list_courses(self) -> list[CanvasCourse]:
+        return [
+            CanvasCourse(
+                id="77",
+                name="Accesibilidad Digital",
+                term="2025/26",
+                start_at=None,
+                end_at=None,
+            )
+        ]
+
+    def get_course(self, course_id: str) -> CanvasCourse:
+        return CanvasCourse(
+            id=course_id,
+            name="Accesibilidad Digital",
+            term="2025/26",
+            start_at=None,
+            end_at=None,
+        )
+
+    def list_modules(self, course_id: str) -> list[CanvasModule]:
+        return [
+            CanvasModule(id="m-1", name="Modulo 1", position=1),
+            CanvasModule(id="m-2", name="Modulo 2", position=2),
+        ]
+
+    def list_module_items(self, course_id: str, module_id: str) -> list[CanvasModuleItem]:
+        if module_id == "m-1":
+            return [
+                CanvasModuleItem(
+                    id="sub-1",
+                    title="Recursos principales",
+                    type="SubHeader",
+                    position=1,
+                    content_id=None,
+                    html_url=None,
+                    external_url=None,
+                    page_url=None,
+                    url=None,
+                ),
+                CanvasModuleItem(
+                    id="file-1",
+                    title="Guia docente",
+                    type="File",
+                    position=2,
+                    content_id="f-1",
+                    html_url="https://canvas.example.edu/files/1",
+                    external_url=None,
+                    page_url=None,
+                    url=None,
+                ),
+                CanvasModuleItem(
+                    id="external-1",
+                    title="Video externo",
+                    type="ExternalUrl",
+                    position=3,
+                    content_id=None,
+                    html_url=None,
+                    external_url="https://broken.example.com/video",
+                    page_url=None,
+                    url=None,
+                ),
+            ]
+        return [
+            CanvasModuleItem(
+                id="page-1",
+                title="Bienvenida",
+                type="Page",
+                position=1,
+                content_id=None,
+                html_url="https://canvas.example.edu/courses/77/pages/bienvenida",
+                external_url=None,
+                page_url="bienvenida",
+                url=None,
+            )
+        ]
+
+    def get_file(self, course_id: str, file_id: str) -> CanvasFile:
+        return CanvasFile(
+            id=file_id,
+            display_name="Guia docente.pdf",
+            filename="guia-docente.pdf",
+            content_type="application/pdf",
+            folder_full_name="course files/modulo-1",
+            url="https://canvas.example.edu/files/1/download",
+            html_url="https://canvas.example.edu/files/1",
+            preview_url=None,
+        )
+
+
+class StubUrlChecker:
+    def check(self, resources, *, credentials):
+        results = {}
+        for resource in resources:
+            if resource["title"] == "Video externo":
+                results[str(resource["id"])] = UrlCheckResult(
+                    url=str(resource["url"]),
+                    checked=True,
+                    broken_link=True,
+                    reason="404_not_found",
+                    status_code=404,
+                )
+            else:
+                results[str(resource["id"])] = UrlCheckResult(
+                    url=str(resource["url"]) if resource.get("url") else "",
+                    checked=bool(resource.get("url")),
+                    broken_link=False,
+                    status_code=200 if resource.get("url") else None,
+                )
+        return results
+
+
+def test_online_courses_and_job_flow(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.routes.online.build_canvas_client",
+        lambda credentials, settings: StubCanvasClient(credentials),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.online.build_url_checker",
+        lambda settings: StubUrlChecker(),
+    )
+
+    courses_response = client.get("/api/online/courses", headers=canvas_headers())
+    assert courses_response.status_code == 200, courses_response.text
+    assert courses_response.json()[0]["name"] == "Accesibilidad Digital"
+
+    create_response = client.post(
+        "/api/online/jobs",
+        headers=canvas_headers(),
+        json={"courseId": "77", "courseName": "Accesibilidad Digital"},
+    )
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    status_response = client.get(f"/api/jobs/{job_id}")
+    assert status_response.status_code == 200, status_response.text
+    status_payload = status_response.json()
+    assert status_payload["status"] == "done"
+    assert status_payload["totalSteps"] == 6
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    resources_payload = resources_response.json()
+    assert len(resources_payload["resources"]) == 3
+
+    pdf_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Guia docente.pdf")
+    assert pdf_resource["coursePath"] == "Modulo 1 > Recursos principales"
+    assert pdf_resource["localPath"] == "course files/modulo-1/guia-docente.pdf"
+    assert pdf_resource["type"] == "PDF"
+
+    broken_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Video externo")
+    assert broken_resource["status"] == "ERROR"
+    assert "broken_link" in broken_resource["notes"]
+
+    detail_response = client.get(f"/api/jobs/{job_id}/resources/{pdf_resource['id']}")
+    assert detail_response.status_code == 200, detail_response.text
+    assert detail_response.json()["resource"]["type"] == "PDF"
+
+    save_response = client.put(
+        f"/api/jobs/{job_id}/resources/{pdf_resource['id']}/checklist",
+        json={
+            "responses": [
+                {"itemKey": "tagged", "value": "FAIL", "comment": "Falta etiquetado PDF."},
+                {"itemKey": "lang", "value": "PASS"},
+            ]
+        },
+    )
+    assert save_response.status_code == 200, save_response.text
+    assert save_response.json()["reviewState"] == "NEEDS_FIX"
+
+    report_response = client.post(f"/api/jobs/{job_id}/report")
+    assert report_response.status_code == 200, report_response.text
+    assert report_response.json()["stats"]["resources"] == 3

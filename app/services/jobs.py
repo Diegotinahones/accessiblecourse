@@ -27,6 +27,7 @@ from app.services.canvas_client import CanvasClient, OnlineJobContextStore
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
 from app.services.imscc import build_resources_from_extracted
+from app.services.imscc_parser import IMSCCParser, ParserError
 from app.services.storage import (
     get_extracted_dir,
     get_job_dir,
@@ -65,6 +66,14 @@ REVIEW_STATUS_TO_LEGACY_STATUS = {
     "OK": "OK",
     "WARN": "AVISO",
     "ERROR": "ERROR",
+}
+
+EXCLUDED_METADATA_EXTENSIONS = {
+    ".xml",
+    ".xsd",
+    ".dtd",
+    ".qti",
+    ".imsmanifest",
 }
 
 
@@ -147,16 +156,27 @@ def _build_review_inventory(resources) -> list[dict[str, str | None]]:
     for parsed_resource in resources:
         href = parsed_resource.href or parsed_resource.extracted_path
         is_external = bool(href and href.startswith(("http://", "https://")))
-        path = parsed_resource.extracted_path or (None if is_external else href)
+        file_path = parsed_resource.extracted_path or (None if is_external else href)
+        source_url = href if is_external else None
+        if _should_skip_metadata_resource(file_path=file_path, source_url=source_url):
+            continue
+
+        module_path = _derive_course_path(file_path or source_url)
         inventory.append(
             {
                 "id": parsed_resource.resource_id,
                 "title": parsed_resource.title,
                 "type": RESOURCE_TYPE_TO_REVIEW_TYPE.get(parsed_resource.resource_type, "OTHER"),
-                "origin": parsed_resource.origin,
-                "url": href if is_external else None,
-                "path": path,
-                "course_path": _derive_course_path(path or href),
+                "origin": _normalize_origin(parsed_resource.origin, source_url=source_url),
+                "url": source_url,
+                "sourceUrl": source_url,
+                "path": file_path,
+                "filePath": file_path,
+                "localPath": file_path,
+                "course_path": module_path,
+                "coursePath": module_path,
+                "module_path": module_path,
+                "modulePath": module_path,
                 "status": RESOURCE_STATUS_TO_REVIEW_STATUS.get(parsed_resource.status, "WARN"),
                 "notes": None,
             }
@@ -175,6 +195,96 @@ def _write_review_inventory_payload(settings: Settings, job_id: str, inventory: 
 
 def _write_review_inventory(settings: Settings, job_id: str, resources) -> None:
     _write_review_inventory_payload(settings, job_id, _build_review_inventory(resources))
+
+
+def build_url_checker(settings: Settings) -> URLCheckService:
+    return URLCheckService(
+        timeout_seconds=settings.url_check_timeout_seconds,
+        max_urls=settings.url_check_max_urls,
+    )
+
+
+def _should_skip_metadata_resource(*, file_path: str | None, source_url: str | None) -> bool:
+    if source_url:
+        return False
+    if not file_path:
+        return False
+    normalized_name = Path(file_path.split("#", 1)[0].split("?", 1)[0]).name.lower()
+    if normalized_name == "imsmanifest.xml":
+        return True
+    return Path(normalized_name).suffix.lower() in EXCLUDED_METADATA_EXTENSIONS
+
+
+def _normalize_origin(origin: str | None, *, source_url: str | None) -> str:
+    normalized = (origin or "").strip().lower()
+    if normalized in {"external", "externo"} or source_url:
+        return "externo"
+    return "interno"
+
+
+def _normalize_offline_inventory(inventory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized_resources: list[dict[str, Any]] = []
+    for resource in inventory:
+        source_url = resource.get("sourceUrl") or resource.get("url")
+        file_path = resource.get("filePath") or resource.get("localPath") or resource.get("path")
+        if isinstance(source_url, str):
+            source_url = source_url.strip() or None
+        else:
+            source_url = None
+        if isinstance(file_path, str):
+            file_path = file_path.strip() or None
+        else:
+            file_path = None
+
+        if _should_skip_metadata_resource(file_path=file_path, source_url=source_url):
+            continue
+
+        module_path = resource.get("modulePath") or resource.get("module_path") or resource.get("coursePath")
+        if not isinstance(module_path, str) or not module_path.strip():
+            module_path = _derive_course_path(file_path or source_url)
+        else:
+            module_path = module_path.strip()
+
+        normalized = dict(resource)
+        normalized["origin"] = _normalize_origin(
+            resource.get("origin") if isinstance(resource.get("origin"), str) else None,
+            source_url=source_url,
+        )
+        normalized["url"] = source_url
+        normalized["sourceUrl"] = source_url
+        normalized["path"] = file_path
+        normalized["filePath"] = file_path
+        normalized["localPath"] = file_path
+        normalized["course_path"] = module_path
+        normalized["coursePath"] = module_path
+        normalized["module_path"] = module_path
+        normalized["modulePath"] = module_path
+        normalized.setdefault("details", {})
+        normalized_resources.append(normalized)
+
+    return normalized_resources
+
+
+def _build_manifest_review_inventory(extracted_dir: Path) -> list[dict[str, Any]]:
+    parser = IMSCCParser()
+    manifest_path = parser.find_manifest(extracted_dir)
+    parsed_manifest = parser.parse_manifest(manifest_path, extracted_dir)
+    inventory = parser.build_resource_inventory(parsed_manifest, manifest_path, extracted_dir)
+    return _normalize_offline_inventory(inventory)
+
+
+def _build_offline_review_inventory(extracted_dir: Path) -> list[dict[str, Any]]:
+    try:
+        manifest_inventory = _build_manifest_review_inventory(extracted_dir)
+        if manifest_inventory:
+            return manifest_inventory
+    except ParserError:
+        logger.info(
+            "manifest_inventory_fallback",
+            extra={"event": "manifest_inventory_fallback", "details": {"reason": "parser_error"}},
+        )
+
+    return _normalize_offline_inventory(_build_review_inventory(build_resources_from_extracted(extracted_dir)))
 
 
 def _persist_legacy_inventory(session: Session, job_id: str, inventory: list[dict]) -> None:
@@ -389,6 +499,16 @@ def _apply_url_validation(
         url_check_details = {"checked": True}
         if result.status_code is not None:
             url_check_details["statusCode"] = result.status_code
+        if result.url_status is not None:
+            url_check_details["urlStatus"] = result.url_status
+            resource["urlStatus"] = result.url_status
+        if result.final_url:
+            url_check_details["finalUrl"] = result.final_url
+            resource["finalUrl"] = result.final_url
+        if result.checked_at is not None:
+            checked_at_iso = result.checked_at.isoformat()
+            url_check_details["checkedAt"] = checked_at_iso
+            resource["checkedAt"] = checked_at_iso
         if result.reason:
             url_check_details["reason"] = result.reason
         details["urlCheck"] = url_check_details
@@ -404,13 +524,16 @@ def _apply_url_validation(
                 _append_note(resource, "broken_link: URL devuelve 404.")
             elif result.reason == "timeout":
                 _append_note(resource, "broken_link: la URL ha excedido el tiempo de espera.")
+            elif result.status_code is not None and result.status_code >= 400:
+                _append_note(resource, f"broken_link: URL devuelve {result.status_code}.")
             broken_links.append(
                 {
                     "resourceId": resource_id,
                     "title": resource.get("title"),
-                    "url": resource.get("url"),
+                    "url": resource.get("sourceUrl") or resource.get("url"),
                     "reason": result.reason,
                     "statusCode": result.status_code,
+                    "urlStatus": result.url_status,
                 }
             )
 
@@ -569,38 +692,18 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
 
             session.exec(delete(ChecklistEntry).where(ChecklistEntry.job_id == job_id))
             session.exec(delete(ResourceRecord).where(ResourceRecord.job_id == job_id))
-            resources = build_resources_from_extracted(extracted_dir)
-            if not resources:
+            inventory = _build_offline_review_inventory(extracted_dir)
+            if not inventory:
                 raise AppError(
                     code="no_resources_found",
                     message="No se han encontrado recursos procesables dentro del paquete.",
                     job_id=job_id,
                 )
-            _write_review_inventory(settings, job_id, resources)
+            url_checker = build_url_checker(settings)
+            url_validation_summary = _apply_url_validation(inventory, url_checker.check(inventory))
 
-            for parsed_resource in resources:
-                resource_record = ResourceRecord(
-                    id=parsed_resource.resource_id,
-                    job_id=job_id,
-                    title=parsed_resource.title,
-                    type=parsed_resource.resource_type,
-                    origin=parsed_resource.origin,
-                    status=parsed_resource.status,
-                    href=parsed_resource.href,
-                    extracted_path=parsed_resource.extracted_path,
-                )
-                session.add(resource_record)
-                for item in get_checklist_template(resource_record.type):
-                    session.add(
-                        ChecklistEntry(
-                            job_id=job_id,
-                            resource_id=resource_record.id,
-                            item_id=str(item["id"]),
-                            label=str(item["label"]),
-                            recommendation=str(item["recommendation"]),
-                            decision=ChecklistDecision.PENDING.value,
-                        )
-                    )
+            _write_review_inventory_payload(settings, job_id, inventory)
+            _persist_legacy_inventory(session, job_id, inventory)
 
             _update_job(
                 session,
@@ -617,7 +720,10 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 event="finished",
                 message="Analisis completado correctamente.",
                 progress=100,
-                details={"resourceCount": len(resources)},
+                details={
+                    "resourceCount": len(inventory),
+                    "brokenLinkCount": len(url_validation_summary["brokenLinks"]),
+                },
             )
             session.commit()
         except AppError as exc:

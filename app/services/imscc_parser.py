@@ -8,11 +8,17 @@ from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 
-from app.core.config import (
-    MAX_ARCHIVE_MEMBER_SIZE,
-    MAX_ARCHIVE_MEMBERS,
-    MAX_ARCHIVE_TOTAL_SIZE,
-)
+DEFAULT_MAX_ARCHIVE_MEMBERS = 2000
+DEFAULT_MAX_ARCHIVE_MEMBER_SIZE = 256 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_TOTAL_SIZE = 1024 * 1024 * 1024
+
+EXCLUDED_METADATA_EXTENSIONS = {
+    ".xml",
+    ".xsd",
+    ".dtd",
+    ".qti",
+    ".imsmanifest",
+}
 
 
 class ParserError(Exception):
@@ -33,6 +39,7 @@ class ItemReference:
     item_identifier: str
     title: str | None
     course_path: str | None
+    module_path: str | None
 
 
 @dataclass(slots=True)
@@ -71,9 +78,9 @@ class IMSCCParser:
     def __init__(
         self,
         *,
-        max_members: int = MAX_ARCHIVE_MEMBERS,
-        max_member_size: int = MAX_ARCHIVE_MEMBER_SIZE,
-        max_total_size: int = MAX_ARCHIVE_TOTAL_SIZE,
+        max_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
+        max_member_size: int = DEFAULT_MAX_ARCHIVE_MEMBER_SIZE,
+        max_total_size: int = DEFAULT_MAX_ARCHIVE_TOTAL_SIZE,
     ) -> None:
         self.max_members = max_members
         self.max_member_size = max_member_size
@@ -291,28 +298,43 @@ class IMSCCParser:
                     "type": classify_resource(url if origin == "external" else path, is_external=origin == "external"),
                     "origin": origin,
                     "url": url,
+                    "sourceUrl": url,
                     "path": path if origin == "internal" else None,
+                    "filePath": path if origin == "internal" else None,
                     "href": resource.href,
                     "files": resolved_file_refs or declared_files,
                     "dependencies": resource.dependencies,
-                    "coursePath": item_ref.course_path if item_ref else None,
-                    "course_path": item_ref.course_path if item_ref else None,
+                    "coursePath": item_ref.module_path if item_ref else None,
+                    "course_path": item_ref.module_path if item_ref else None,
+                    "modulePath": item_ref.module_path if item_ref else None,
+                    "module_path": item_ref.module_path if item_ref else None,
+                    "itemPath": item_ref.course_path if item_ref else None,
+                    "item_path": item_ref.course_path if item_ref else None,
                     "status": status,
                     "notes": notes,
                 }
             )
 
-        return inventory
+        return [
+            resource
+            for resource in inventory
+            if not _should_skip_metadata_resource(
+                resource.get("filePath") if isinstance(resource.get("filePath"), str) else None,
+                resource.get("sourceUrl") if isinstance(resource.get("sourceUrl"), str) else None,
+            )
+        ]
 
     def _parse_item(self, item: ET.Element, ancestors: list[str], item_map: dict[str, ItemReference]) -> dict[str, Any]:
         title = self._direct_child_text(item, "title") or "Untitled item"
         current_path = [*ancestors, title]
         resource_identifier = item.attrib.get("identifierref")
         if resource_identifier and resource_identifier not in item_map:
+            module_path = " > ".join(ancestors) if ancestors else title
             item_map[resource_identifier] = ItemReference(
                 item_identifier=item.attrib.get("identifier", ""),
                 title=title,
                 course_path=" > ".join(current_path),
+                module_path=module_path,
             )
 
         return {
@@ -462,3 +484,14 @@ def _unique_preserving_order(values: list[str]) -> list[str]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+def _should_skip_metadata_resource(file_path: str | None, source_url: str | None) -> bool:
+    if source_url:
+        return False
+    if not file_path:
+        return False
+    normalized_name = Path(_strip_query_and_fragment(file_path)).name.lower()
+    if normalized_name == "imsmanifest.xml":
+        return True
+    return Path(normalized_name).suffix.lower() in EXCLUDED_METADATA_EXTENSIONS

@@ -149,16 +149,26 @@ function normalizeReviewState(state: string | null | undefined): ReviewState {
 }
 
 function normalizeResource(item: ResourceListItem): ResourceListItem {
+  const sourceUrl = item.sourceUrl ?? item.url ?? null;
+  const filePath = item.filePath ?? item.localPath ?? item.path ?? null;
+  const modulePath = item.modulePath ?? item.coursePath ?? null;
+
   return {
     ...item,
     type: normalizeReviewType(item.type),
     status: normalizeHealthStatus(item.status),
     reviewState: normalizeReviewState(item.reviewState),
     origin: item.origin ?? null,
-    url: item.url ?? null,
-    path: item.path ?? null,
-    localPath: item.localPath ?? item.path ?? null,
-    coursePath: item.coursePath ?? null,
+    url: sourceUrl,
+    sourceUrl,
+    path: filePath,
+    localPath: filePath,
+    filePath,
+    coursePath: modulePath,
+    modulePath,
+    urlStatus: item.urlStatus ?? null,
+    finalUrl: item.finalUrl ?? sourceUrl,
+    checkedAt: item.checkedAt ?? null,
     notes: item.notes ?? null,
     failCount: item.failCount ?? 0,
   };
@@ -273,8 +283,12 @@ export const api = {
   },
 };
 
-export async function fetchResources(jobId: string): Promise<ResourceListResponse> {
-  const payload = await request<RawResourcesResponse>(`/jobs/${jobId}/resources`);
+export async function fetchResources(
+  jobId: string,
+  options?: { onlyBroken?: boolean },
+): Promise<ResourceListResponse> {
+  const query = options?.onlyBroken ? '?onlyBroken=true' : '';
+  const payload = await request<RawResourcesResponse>(`/jobs/${jobId}/resources${query}`);
   return normalizeResourcesResponse(jobId, payload);
 }
 

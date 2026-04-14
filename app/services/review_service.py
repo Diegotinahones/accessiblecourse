@@ -4,6 +4,7 @@ import json
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func
@@ -33,11 +34,19 @@ class InventoryResourceSeed(BaseModel):
     title: str
     type: ResourceType
     origin: str | None = None
-    url: str | None = None
-    path: str | None = None
-    course_path: str | None = Field(default=None, validation_alias=AliasChoices("course_path", "coursePath"))
+    source_url: str | None = Field(default=None, validation_alias=AliasChoices("source_url", "sourceUrl", "url"))
+    file_path: str | None = Field(default=None, validation_alias=AliasChoices("file_path", "filePath", "localPath", "path"))
+    course_path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("course_path", "coursePath", "module_path", "modulePath"),
+    )
     status: ResourceHealthStatus = ResourceHealthStatus.OK
     notes: str | list[str] | None = None
+    item_path: str | None = Field(default=None, validation_alias=AliasChoices("item_path", "itemPath"))
+    url_status: str | None = Field(default=None, validation_alias=AliasChoices("url_status", "urlStatus"))
+    final_url: str | None = Field(default=None, validation_alias=AliasChoices("final_url", "finalUrl"))
+    checked_at: datetime | None = Field(default=None, validation_alias=AliasChoices("checked_at", "checkedAt"))
+    details: dict[str, Any] | None = None
 
     @field_validator("notes")
     @classmethod
@@ -73,6 +82,14 @@ def _load_inventory_file(settings: Settings, job_id: str) -> list[InventoryResou
     return [InventoryResourceSeed.model_validate(item) for item in payload]
 
 
+def load_inventory_file(settings: Settings, job_id: str) -> list[InventoryResourceSeed]:
+    return _load_inventory_file(settings, job_id)
+
+
+def load_inventory_index(settings: Settings, job_id: str) -> dict[str, InventoryResourceSeed]:
+    return {item.id: item for item in _load_inventory_file(settings, job_id)}
+
+
 def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> None:
     count = session.exec(select(func.count()).select_from(Resource).where(Resource.job_id == job_id)).one()
     if count:
@@ -94,8 +111,8 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
                 title=item.title,
                 type=item.type,
                 origin=item.origin,
-                url=item.url,
-                path=item.path,
+                url=item.source_url,
+                path=item.file_path,
                 course_path=item.course_path,
                 status=item.status,
                 notes=item.notes,

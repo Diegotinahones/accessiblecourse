@@ -35,7 +35,7 @@ const RESPONSE_OPTIONS: Array<{ label: string; value: ReviewChecklistValue }> = 
 ];
 
 function getGroupKey(resource: ResourceListItem): string {
-  return resource.coursePath?.trim() || DEFAULT_MODULE_LABEL;
+  return resource.modulePath?.trim() || resource.coursePath?.trim() || DEFAULT_MODULE_LABEL;
 }
 
 function hasChecklistActivity(items: ReviewChecklistItem[]) {
@@ -188,6 +188,7 @@ export function ResourcesPage() {
   const [isDirty, setIsDirty] = useState(false);
   const [draftVersion, setDraftVersion] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [showOnlyBroken, setShowOnlyBroken] = useState(false);
   const [resourceActivityMap, setResourceActivityMap] = useState<Record<string, boolean>>({});
   const draftVersionRef = useRef(0);
   const saveQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
@@ -209,7 +210,7 @@ export function ResourcesPage() {
     setLoadingResources(true);
     setScreenError(null);
 
-    fetchResources(jobId)
+    fetchResources(jobId, { onlyBroken: showOnlyBroken })
       .then((payload) => {
         if (cancelled) {
           return;
@@ -245,7 +246,7 @@ export function ResourcesPage() {
     return () => {
       cancelled = true;
     };
-  }, [jobId]);
+  }, [jobId, showOnlyBroken]);
 
   useEffect(() => {
     if (!jobId || !expandedResourceId) {
@@ -322,7 +323,7 @@ export function ResourcesPage() {
 
       try {
         const result = await saveChecklist(jobId, snapshot.resource.id, payload);
-        const refreshed = await fetchResources(jobId);
+        const refreshed = await fetchResources(jobId, { onlyBroken: showOnlyBroken });
         const orderedResources = sortResourcesByPriority(refreshed.resources);
 
         setResources(orderedResources);
@@ -370,7 +371,7 @@ export function ResourcesPage() {
 
     saveQueueRef.current = saveTask.catch(() => false);
     return saveTask;
-  }, [detail, jobId]);
+  }, [detail, jobId, showOnlyBroken]);
 
   useEffect(() => {
     if (!detail || !isDirty) {
@@ -532,9 +533,28 @@ export function ResourcesPage() {
         </section>
       ) : null}
 
+      {!loadingResources && !screenError ? (
+        <section className="card-panel mb-4 p-4 sm:p-5">
+          <label className="flex cursor-pointer items-start gap-3 text-sm text-ink">
+            <input
+              checked={showOnlyBroken}
+              className="mt-1 h-4 w-4 rounded border-line text-ink focus:ring-ink"
+              onChange={(event) => setShowOnlyBroken(event.target.checked)}
+              type="checkbox"
+            />
+            <span>
+              <span className="block font-semibold">Mostrar solo enlaces rotos</span>
+              <span className="block text-subtle">
+                Filtra rápidamente recursos con 404, 5xx o timeout.
+              </span>
+            </span>
+          </label>
+        </section>
+      ) : null}
+
       {!loadingResources && !screenError && resources.length === 0 ? (
         <section className="card-panel p-6 text-sm text-subtle">
-          No hay recursos para revisar.
+          {showOnlyBroken ? 'No hay enlaces rotos en este curso.' : 'No hay recursos para revisar.'}
         </section>
       ) : null}
 
@@ -647,20 +667,25 @@ export function ResourcesPage() {
                               detail &&
                               detail.resource.id === resource.id ? (
                                 <div className="space-y-5">
-                                  {resource.coursePath || resource.url || resource.localPath || resource.path ? (
+                                  {resource.modulePath ||
+                                  resource.coursePath ||
+                                  resource.sourceUrl ||
+                                  resource.filePath ||
+                                  resource.localPath ||
+                                  resource.path ? (
                                     <div className="space-y-2 rounded-2xl border border-line bg-[#f9faf7] p-4 text-sm text-subtle">
-                                      {resource.coursePath ? (
+                                      {resource.modulePath || resource.coursePath ? (
                                         <p>
-                                          <span className="font-semibold text-ink">Ruta:</span>{' '}
-                                          {resource.coursePath}
+                                          <span className="font-semibold text-ink">Módulo:</span>{' '}
+                                          {resource.modulePath ?? resource.coursePath}
                                         </p>
                                       ) : null}
-                                      {resource.url ? (
+                                      {resource.sourceUrl ? (
                                         <p>
-                                          <span className="font-semibold text-ink">URL:</span>{' '}
+                                          <span className="font-semibold text-ink">URL de origen:</span>{' '}
                                           <a
                                             className="underline"
-                                            href={resource.url}
+                                            href={resource.sourceUrl}
                                             rel="noreferrer"
                                             target="_blank"
                                           >
@@ -668,10 +693,30 @@ export function ResourcesPage() {
                                           </a>
                                         </p>
                                       ) : null}
-                                      {resource.localPath ? (
+                                      {resource.filePath || resource.localPath ? (
                                         <p>
-                                          <span className="font-semibold text-ink">Archivo:</span>{' '}
-                                          {resource.localPath}
+                                          <span className="font-semibold text-ink">Archivo interno:</span>{' '}
+                                          {resource.filePath ?? resource.localPath}
+                                        </p>
+                                      ) : null}
+                                      {resource.urlStatus ? (
+                                        <p>
+                                          <span className="font-semibold text-ink">Comprobación URL:</span>{' '}
+                                          {resource.urlStatus}
+                                          {resource.checkedAt ? ` · ${new Date(resource.checkedAt).toLocaleString('es-ES')}` : ''}
+                                        </p>
+                                      ) : null}
+                                      {resource.finalUrl && resource.finalUrl !== resource.sourceUrl ? (
+                                        <p>
+                                          <span className="font-semibold text-ink">URL final:</span>{' '}
+                                          <a
+                                            className="underline"
+                                            href={resource.finalUrl}
+                                            rel="noreferrer"
+                                            target="_blank"
+                                          >
+                                            Abrir destino final
+                                          </a>
                                         </p>
                                       ) : null}
                                       {getHealthLabel(resource) ? (

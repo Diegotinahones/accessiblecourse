@@ -46,6 +46,7 @@ from app.services.review_service import (
     ensure_review_rollups,
     get_checklist_snapshot,
     get_resource_or_404,
+    load_inventory_index,
     list_resources_with_fail_counts,
     upsert_checklist,
 )
@@ -73,23 +74,50 @@ def _review_session_read(review_session: ReviewSession) -> ReviewSessionRead:
     )
 
 
-def _resource_read(resource: Resource, fail_count: int) -> ResourceListItemRead:
+def _resource_read(
+    resource: Resource,
+    fail_count: int,
+    inventory_item=None,
+) -> ResourceListItemRead:
+    source_url = inventory_item.source_url if inventory_item is not None else resource.url
+    file_path = inventory_item.file_path if inventory_item is not None else resource.path
+    module_path = inventory_item.course_path if inventory_item is not None else resource.course_path
     return ResourceListItemRead(
         id=resource.id,
         jobId=resource.job_id,
         title=resource.title,
         type=resource.type,
         origin=resource.origin,
-        url=resource.url,
-        path=resource.path,
-        localPath=resource.path,
-        coursePath=resource.course_path,
+        url=source_url,
+        sourceUrl=source_url,
+        path=file_path,
+        localPath=file_path,
+        filePath=file_path,
+        coursePath=module_path,
+        modulePath=module_path,
         status=resource.status,
+        urlStatus=inventory_item.url_status if inventory_item is not None else None,
+        finalUrl=inventory_item.final_url if inventory_item is not None else source_url,
+        checkedAt=inventory_item.checked_at if inventory_item is not None else None,
         notes=resource.notes,
         reviewState=resource.review_state,
         failCount=fail_count,
         updatedAt=resource.updated_at,
     )
+
+
+def _is_broken_inventory_resource(resource: Resource, inventory_item) -> bool:
+    url_status = inventory_item.url_status if inventory_item is not None else None
+    if isinstance(url_status, str):
+        normalized = url_status.strip().lower()
+        if normalized == "timeout":
+            return True
+        if normalized.isdigit():
+            return int(normalized) >= 400
+        if normalized in {"4xx", "5xx"}:
+            return True
+
+    return resource.status.value == "ERROR"
 
 
 def _ensure_review_inventory(session: Session, settings: Settings, job_id: str) -> None:
@@ -167,6 +195,13 @@ def _build_summary_response(session: Session, settings: Settings, job_id: str) -
     )
 
 
+def _load_inventory_index_or_empty(settings: Settings, job_id: str):
+    try:
+        return load_inventory_index(settings, job_id)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
 @router.post("", response_model=JobCreatedResponse, status_code=status.HTTP_201_CREATED)
 async def create_job(
     request: Request,
@@ -224,15 +259,19 @@ def retry_existing_job(
 @router.get("/{job_id}/resources", response_model=ResourceListPayload)
 def get_resources(
     job_id: str,
+    onlyBroken: bool = False,
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> ResourceListPayload:
     _ensure_review_inventory(session, settings, job_id)
     review_session, _ = ensure_review_rollups(session, job_id)
-    resources = [
-        _resource_read(resource, fail_count)
-        for resource, fail_count in list_resources_with_fail_counts(session, job_id)
-    ]
+    inventory_index = _load_inventory_index_or_empty(settings, job_id)
+    resources = []
+    for resource, fail_count in list_resources_with_fail_counts(session, job_id):
+        inventory_item = inventory_index.get(resource.id)
+        if onlyBroken and not _is_broken_inventory_resource(resource, inventory_item):
+            continue
+        resources.append(_resource_read(resource, fail_count, inventory_item))
     logger.info("Inventario de revision cargado", extra={"job_id": job_id, "resource_count": len(resources)})
     return ResourceListPayload(
         jobId=job_id,
@@ -250,6 +289,7 @@ def get_resource_detail(
 ) -> ResourceDetailPayload:
     _ensure_review_inventory(session, settings, job_id)
     resource = _get_review_resource(session, job_id, resource_id)
+    inventory_item = _load_inventory_index_or_empty(settings, job_id).get(resource_id)
     try:
         template_bundle, responses = get_checklist_snapshot(session, resource)
     except LookupError as exc:
@@ -265,7 +305,7 @@ def get_resource_detail(
     review_session, _ = ensure_review_rollups(session, job_id)
 
     return ResourceDetailPayload(
-        resource=_resource_read(resource, fail_count),
+        resource=_resource_read(resource, fail_count, inventory_item),
         checklist=ChecklistDetailRead(
             templateId=template_bundle.template.id,
             resourceType=template_bundle.template.resource_type,

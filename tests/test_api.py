@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -9,6 +10,7 @@ from sqlmodel import Session, select
 
 from app.models import Job as ProcessingJob
 from app.models.entities import ChecklistResponse
+from app.services.url_check import UrlCheckResult
 from tests.conftest import build_sample_imscc
 
 
@@ -34,6 +36,58 @@ def build_large_imscc(payload_size: int) -> bytes:
 """,
         )
         archive.writestr("module_1/large.bin", b"A" * payload_size)
+    return buffer.getvalue()
+
+
+def build_imscc_with_external_link() -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "imsmanifest.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+  <organizations>
+    <organization identifier="org-1">
+      <title>Curso Demo</title>
+      <item identifier="module-1">
+        <title>Tema 1</title>
+        <item identifier="item-1" identifierref="res-pdf">
+          <title>Guía</title>
+        </item>
+        <item identifier="item-2" identifierref="res-link">
+          <title>Enlace externo</title>
+        </item>
+        <item identifier="item-3" identifierref="res-metadata">
+          <title>Metadata</title>
+        </item>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-pdf" type="webcontent" href="course/topic-1/guide.pdf">
+      <file href="course/topic-1/guide.pdf" />
+    </resource>
+    <resource identifier="res-link" type="imswl_xmlv1p1" href="web_resources/external_link.xml">
+      <file href="web_resources/external_link.xml" />
+    </resource>
+    <resource identifier="res-metadata" type="webcontent" href="metadata/descriptor.xml">
+      <file href="metadata/descriptor.xml" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        )
+        archive.writestr("course/topic-1/guide.pdf", b"%PDF-1.4\n%offline pdf\n")
+        archive.writestr(
+            "web_resources/external_link.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<webLink xmlns="http://www.imsglobal.org/xsd/imswl_v1p1">
+  <title>Enlace externo</title>
+  <url href="https://example.com/broken-link" />
+</webLink>
+""",
+        )
+        archive.writestr("metadata/descriptor.xml", "<metadata />")
     return buffer.getvalue()
 
 
@@ -201,6 +255,63 @@ def test_upload_within_limit_returns_201(client) -> None:
         jobs = session.exec(select(ProcessingJob)).all()
 
     assert len(jobs) == 1
+
+
+def test_offline_inventory_groups_by_module_and_filters_broken_links(client, monkeypatch) -> None:
+    class StubURLChecker:
+        def check(self, resources):
+            checked_at = datetime(2026, 4, 14, 10, 30, tzinfo=timezone.utc)
+            results: dict[str, UrlCheckResult] = {}
+            for resource in resources:
+                url = resource.get("sourceUrl") or resource.get("url")
+                if not url:
+                    continue
+                results[str(resource["id"])] = UrlCheckResult(
+                    url=str(url),
+                    checked=True,
+                    broken_link=True,
+                    reason="404_not_found",
+                    status_code=404,
+                    url_status="404",
+                    final_url=str(url),
+                    checked_at=checked_at,
+                )
+            return results
+
+    monkeypatch.setattr("app.services.jobs.build_url_checker", lambda settings: StubURLChecker())
+
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_imscc_with_external_link(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    resources = resources_response.json()["resources"]
+    assert len(resources) == 2
+
+    pdf_resource = next(resource for resource in resources if resource["title"] == "Guía")
+    link_resource = next(resource for resource in resources if resource["title"] == "Enlace externo")
+
+    assert pdf_resource["modulePath"] == "Tema 1"
+    assert pdf_resource["coursePath"] == "Tema 1"
+    assert pdf_resource["filePath"] == "course/topic-1/guide.pdf"
+    assert pdf_resource["sourceUrl"] is None
+
+    assert link_resource["modulePath"] == "Tema 1"
+    assert link_resource["sourceUrl"] == "https://example.com/broken-link"
+    assert link_resource["filePath"] is None
+    assert link_resource["urlStatus"] == "404"
+    assert link_resource["finalUrl"] == "https://example.com/broken-link"
+    assert "broken_link" in link_resource["notes"]
+
+    broken_only_response = client.get(f"/api/jobs/{job_id}/resources?onlyBroken=true")
+    assert broken_only_response.status_code == 200, broken_only_response.text
+    broken_resources = broken_only_response.json()["resources"]
+    assert [resource["title"] for resource in broken_resources] == ["Enlace externo"]
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

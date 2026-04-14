@@ -74,6 +74,25 @@ MANIFEST_WITH_MISSING_FILE = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+MANIFEST_WITH_METADATA_RESOURCE = """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1" identifier="metadata-only">
+  <organizations>
+    <organization identifier="org-1">
+      <title>Metadata only</title>
+      <item identifier="item-1" identifierref="res-metadata">
+        <title>Metadata XML</title>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-metadata" type="webcontent" href="metadata/resource.xml">
+      <file href="metadata/resource.xml" />
+    </resource>
+  </resources>
+</manifest>
+"""
+
+
 class IMSCCParserTests(unittest.TestCase):
     def setUp(self) -> None:
         self.parser = IMSCCParser()
@@ -114,9 +133,12 @@ class IMSCCParserTests(unittest.TestCase):
             by_identifier = {resource["identifier"]: resource for resource in resources}
             self.assertEqual(by_identifier["res-html"]["type"], "WEB")
             self.assertEqual(by_identifier["res-html"]["path"], "course/module1/page.html")
-            self.assertEqual(by_identifier["res-html"]["coursePath"], "Módulo 1 > Página HTML")
+            self.assertEqual(by_identifier["res-html"]["coursePath"], "Módulo 1")
+            self.assertEqual(by_identifier["res-html"]["modulePath"], "Módulo 1")
+            self.assertEqual(by_identifier["res-html"]["itemPath"], "Módulo 1 > Página HTML")
             self.assertEqual(by_identifier["res-video"]["origin"], "external")
             self.assertEqual(by_identifier["res-video"]["url"], "https://www.youtube.com/watch?v=demo123")
+            self.assertEqual(by_identifier["res-video"]["modulePath"], "Módulo 1")
             self.assertEqual(by_identifier["res-video"]["type"], "VIDEO")
 
     def test_classify_resource_types(self) -> None:
@@ -144,6 +166,26 @@ class IMSCCParserTests(unittest.TestCase):
             self.assertEqual(resource["status"], "WARN")
             self.assertEqual(resource["path"], "docs/missing.pdf")
             self.assertIn("no existe dentro del paquete", resource["notes"][0])
+
+    def test_excludes_internal_metadata_xml_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            archive_path = temp_path / "metadata.imscc"
+            destination = temp_path / "extract"
+            self._build_archive(
+                archive_path,
+                {
+                    "imsmanifest.xml": MANIFEST_WITH_METADATA_RESOURCE,
+                    "metadata/resource.xml": "<metadata />",
+                },
+            )
+
+            self.parser.safe_extract_archive(archive_path, destination)
+            manifest_path = self.parser.find_manifest(destination)
+            parsed_manifest = self.parser.parse_manifest(manifest_path, destination)
+            resources = self.parser.build_resource_inventory(parsed_manifest, manifest_path, destination)
+
+            self.assertEqual(resources, [])
 
     def _build_archive(self, archive_path: Path, files: dict[str, str]) -> None:
         with ZipFile(archive_path, "w") as archive:

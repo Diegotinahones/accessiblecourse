@@ -89,10 +89,16 @@ export interface ResourceListItem {
   type: ReviewResourceType;
   origin: string | null;
   url: string | null;
+  sourceUrl: string | null;
   path: string | null;
   localPath: string | null;
+  filePath: string | null;
   coursePath: string | null;
+  modulePath: string | null;
   status: ReviewResourceHealthStatus;
+  urlStatus: string | null;
+  finalUrl: string | null;
+  checkedAt: string | null;
   notes: string | null;
   reviewState: ReviewState;
   failCount: number;

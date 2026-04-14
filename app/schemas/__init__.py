@@ -145,13 +145,12 @@ class OnlineCourseRead(StrictModel):
     id: str
     name: str
     term: str | None = None
-    startAt: datetime | None = None
-    endAt: datetime | None = None
+    start_at: datetime | None = None
+    end_at: datetime | None = None
 
 
 class OnlineJobCreateRequest(StrictModel):
     courseId: str
-    courseName: str | None = None
     courseName: str | None = None
 
 
@@ -169,10 +168,16 @@ class ResourceListItemRead(StrictModel):
     type: ReviewResourceType
     origin: str | None = None
     url: str | None = None
+    sourceUrl: str | None = None
     path: str | None = None
     localPath: str | None = None
+    filePath: str | None = None
     coursePath: str | None = None
+    modulePath: str | None = None
     status: ReviewResourceHealthStatus
+    urlStatus: str | None = None
+    finalUrl: str | None = None
+    checkedAt: datetime | None = None
     notes: str | None = None
     reviewState: ReviewStateEnum
     failCount: int

@@ -24,6 +24,10 @@ interface JobCreatedResponse {
   jobId: string;
 }
 
+interface UploadRequestOptions {
+  onProgress?: (progress: number) => void;
+}
+
 interface RawJobStatusResponse {
   jobId?: string;
   status: 'created' | 'pending' | 'running' | 'processing' | 'done' | 'error';
@@ -85,6 +89,60 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+function uploadRequest<T>(
+  path: string,
+  body: FormData,
+  options?: UploadRequestOptions,
+): Promise<T> {
+  const file = body.get('file');
+  const fallbackTotal = file instanceof File ? file.size : 0;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', resolveApiUrl(path));
+
+    xhr.upload.addEventListener('progress', (event) => {
+      if (!options?.onProgress) {
+        return;
+      }
+
+      const total = event.lengthComputable ? event.total : fallbackTotal;
+      if (!total) {
+        return;
+      }
+
+      options.onProgress(Math.min(100, Math.round((event.loaded / total) * 100)));
+    });
+
+    xhr.onerror = () => {
+      reject(new ApiError(0, 'No se pudo completar la subida del archivo.'));
+    };
+
+    xhr.onload = () => {
+      const rawText = xhr.responseText || '';
+      let payload: unknown = null;
+
+      if (rawText) {
+        try {
+          payload = JSON.parse(rawText) as unknown;
+        } catch {
+          payload = null;
+        }
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new ApiError(xhr.status, getErrorMessage(payload)));
+        return;
+      }
+
+      options?.onProgress?.(100);
+      resolve((payload ?? {}) as T);
+    };
+
+    xhr.send(body);
+  });
 }
 
 function buildCanvasHeaders(auth: CanvasAuth): HeadersInit {
@@ -232,14 +290,11 @@ export function resolveApiUrl(path: string): string {
 }
 
 export const api = {
-  async createJob(file: File): Promise<JobCreatedResponse> {
+  async createJob(file: File, options?: UploadRequestOptions): Promise<JobCreatedResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
-    return request<JobCreatedResponse>('/jobs', {
-      method: 'POST',
-      body: formData,
-    });
+    return uploadRequest<JobCreatedResponse>('/jobs', formData, options);
   },
 
   async getJobStatus(jobId: string): Promise<JobStatus> {

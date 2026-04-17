@@ -1,6 +1,7 @@
 import { ChangeEvent, FormEvent, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
+import { ProgressBar } from '../components/ProgressBar';
 import { api } from '../lib/api';
 import { formatFileSize, getModeSearch, rememberAppMode, rememberCourseName } from '../lib/utils';
 
@@ -9,6 +10,7 @@ export function UploadPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -21,6 +23,7 @@ export function UploadPage() {
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSelectedFile(event.target.files?.[0] ?? null);
+    setUploadProgress(0);
     setError(null);
   };
 
@@ -34,8 +37,11 @@ export function UploadPage() {
 
     try {
       setIsSubmitting(true);
+      setUploadProgress(0);
       setError(null);
-      const { jobId } = await api.createJob(selectedFile);
+      const { jobId } = await api.createJob(selectedFile, {
+        onProgress: (progress) => setUploadProgress(progress),
+      });
       rememberCourseName(jobId, selectedFile.name);
       navigate(`/analyzing/${jobId}${getModeSearch('offline')}`);
     } catch (caughtError) {
@@ -66,6 +72,7 @@ export function UploadPage() {
           <input
             accept=".imscc,.zip"
             className="field-input"
+            disabled={isSubmitting}
             id="course-file"
             onChange={handleFileChange}
             type="file"
@@ -84,6 +91,17 @@ export function UploadPage() {
           >
             {error}
           </p>
+        ) : null}
+
+        {isSubmitting ? (
+          <div className="space-y-3 rounded-2xl border border-line bg-[#f6f7f2] px-4 py-4">
+            <ProgressBar label="Progreso de la subida" value={uploadProgress} />
+            <p aria-live="polite" className="text-sm text-subtle">
+              {uploadProgress >= 100
+                ? 'Subida completada. Preparando el análisis…'
+                : `Subiendo archivo… ${uploadProgress}%`}
+            </p>
+          </div>
         ) : null}
 
         <button

@@ -32,6 +32,8 @@ class ManifestResource:
     href: str | None
     files: list[str]
     dependencies: list[str]
+    title: str | None
+    external_url: str | None
 
 
 @dataclass(slots=True)
@@ -48,6 +50,24 @@ class ParsedManifest:
     structure: dict[str, Any]
     resources: list[ManifestResource]
     item_map: dict[str, ItemReference]
+
+
+@dataclass(slots=True)
+class ManifestItem:
+    node_id: str
+    identifier: str | None
+    raw_title: str | None
+    resource_identifier: str | None
+    children: list["ManifestItem"]
+
+
+@dataclass(slots=True)
+class ResolvedManifestItem:
+    node_id: str
+    identifier: str | None
+    title: str
+    resource_identifier: str | None
+    children: list["ResolvedManifestItem"]
 
 
 def classify_resource(reference: str | None, *, is_external: bool = False) -> str:
@@ -156,24 +176,8 @@ class IMSCCParser:
 
         root = tree.getroot()
         course_title = self._extract_course_title(root) or manifest_path.parent.name or "Course"
-        item_map: dict[str, ItemReference] = {}
-
-        organization_nodes: list[dict[str, Any]] = []
-        for organizations_node in self._find_children(root, "organizations"):
-            for organization in self._find_children(organizations_node, "organization"):
-                organization_title = self._direct_child_text(organization, "title") or course_title
-                children = [self._parse_item(item, [], item_map) for item in self._find_children(organization, "item")]
-                organization_nodes.append(
-                    {
-                        "identifier": organization.attrib.get("identifier"),
-                        "title": organization_title,
-                        "path": None,
-                        "resourceIdentifier": None,
-                        "children": children,
-                    }
-                )
-
         resources: list[ManifestResource] = []
+        manifest_dir = manifest_path.parent
         for resources_node in self._find_children(root, "resources"):
             for resource in self._find_children(resources_node, "resource"):
                 files = [
@@ -188,19 +192,66 @@ class IMSCCParser:
                     )
                     if identifier_ref
                 ]
-                resources.append(
-                    ManifestResource(
-                        identifier=resource.attrib.get("identifier", ""),
-                        resource_type=resource.attrib.get("type"),
-                        href=resource.attrib.get("href"),
-                        files=files,
-                        dependencies=dependencies,
-                    )
+                manifest_resource = ManifestResource(
+                    identifier=resource.attrib.get("identifier", ""),
+                    resource_type=resource.attrib.get("type"),
+                    href=resource.attrib.get("href"),
+                    files=files,
+                    dependencies=dependencies,
+                    title=None,
+                    external_url=resource.attrib.get("href").strip()
+                    if resource.attrib.get("href") and self._is_external_url(resource.attrib.get("href"))
+                    else None,
                 )
+                manifest_resource.title = self._resolve_resource_title(
+                    manifest_resource,
+                    manifest_dir=manifest_dir,
+                    extracted_root=extracted_root,
+                )
+                resources.append(manifest_resource)
+
+        resource_titles = {
+            resource.identifier: resource.title for resource in resources if resource.identifier and resource.title
+        }
+        item_map: dict[str, ItemReference] = {}
+
+        organization_nodes: list[dict[str, Any]] = []
+        for organizations_index, organizations_node in enumerate(self._find_children(root, "organizations")):
+            for organization_index, organization in enumerate(self._find_children(organizations_node, "organization")):
+                parsed_children = [
+                    self._collect_item(item, [organizations_index, organization_index, item_index])
+                    for item_index, item in enumerate(self._find_children(organization, "item"))
+                ]
+                resolved_children = [self._resolve_item_titles(item, resource_titles) for item in parsed_children]
+                organization_title = (
+                    self._normalize_title(self._direct_child_text(organization, "title"))
+                    or self._first_useful_title(child.title for child in resolved_children)
+                    or course_title
+                    or "Sin título"
+                )
+                children = [self._build_item_node(item, [], item_map) for item in resolved_children]
+                organization_nodes.append(
+                    {
+                        "nodeId": f"organization:{organizations_index}:{organization_index}",
+                        "identifier": organization.attrib.get("identifier"),
+                        "title": organization_title,
+                        "children": children,
+                    }
+                )
+
+        unplaced_resource_ids = [
+            resource.identifier
+            for resource in resources
+            if resource.identifier and resource.identifier not in item_map
+        ]
 
         return ParsedManifest(
             course_title=course_title,
-            structure={"title": course_title, "organizations": organization_nodes},
+            structure={
+                "title": course_title or "Estructura del curso",
+                "organizations": organization_nodes,
+                "unplacedResourceIds": unplaced_resource_ids,
+            },
             resources=resources,
             item_map=item_map,
         )
@@ -239,12 +290,8 @@ class IMSCCParser:
                 [path.relative_to(resolved_root).as_posix() for path in resolved_files]
             )
 
-            external_url = None
-            external_title = None
-            if resource.href and self._is_external_url(resource.href):
-                external_url = resource.href.strip()
-            else:
-                external_url, external_title = self._extract_external_link(resource, manifest_dir, extracted_root)
+            external_url = resource.external_url
+            external_title = resource.title
 
             path: str | None = None
             url: str | None = None
@@ -282,13 +329,7 @@ class IMSCCParser:
 
                 primary_reference = path or declared_href or resource.href
 
-            title = (
-                (item_ref.title if item_ref else None)
-                or external_title
-                or _derive_title(primary_reference)
-                or resource.identifier
-                or "Untitled resource"
-            )
+            title = (item_ref.title if item_ref else None) or resource.title or _derive_title(primary_reference) or "Sin título"
 
             inventory.append(
                 {
@@ -310,6 +351,10 @@ class IMSCCParser:
                     "module_path": item_ref.module_path if item_ref else None,
                     "itemPath": item_ref.course_path if item_ref else None,
                     "item_path": item_ref.course_path if item_ref else None,
+                    "details": {
+                        "mappedToCourseStructure": bool(item_ref),
+                        "manifestResourceType": resource.resource_type,
+                    },
                     "status": status,
                     "notes": notes,
                 }
@@ -324,27 +369,57 @@ class IMSCCParser:
             )
         ]
 
-    def _parse_item(self, item: ET.Element, ancestors: list[str], item_map: dict[str, ItemReference]) -> dict[str, Any]:
-        title = self._direct_child_text(item, "title") or "Untitled item"
-        current_path = [*ancestors, title]
-        resource_identifier = item.attrib.get("identifierref")
-        if resource_identifier and resource_identifier not in item_map:
-            module_path = " > ".join(ancestors) if ancestors else title
-            item_map[resource_identifier] = ItemReference(
-                item_identifier=item.attrib.get("identifier", ""),
-                title=title,
+    def _collect_item(self, item: ET.Element, position: list[int]) -> ManifestItem:
+        return ManifestItem(
+            node_id=f"item:{'.'.join(str(value) for value in position)}",
+            identifier=item.attrib.get("identifier"),
+            raw_title=self._normalize_title(self._direct_child_text(item, "title")),
+            resource_identifier=item.attrib.get("identifierref"),
+            children=[
+                self._collect_item(child, [*position, child_index])
+                for child_index, child in enumerate(self._find_children(item, "item"))
+            ],
+        )
+
+    def _resolve_item_titles(
+        self,
+        item: ManifestItem,
+        resource_titles: dict[str, str],
+    ) -> ResolvedManifestItem:
+        resolved_children = [self._resolve_item_titles(child, resource_titles) for child in item.children]
+        inherited_title = self._first_useful_title(child.title for child in resolved_children)
+        title = item.raw_title or resource_titles.get(item.resource_identifier or "") or inherited_title or "Sin título"
+        return ResolvedManifestItem(
+            node_id=item.node_id,
+            identifier=item.identifier,
+            title=title,
+            resource_identifier=item.resource_identifier,
+            children=resolved_children,
+        )
+
+    def _build_item_node(
+        self,
+        item: ResolvedManifestItem,
+        ancestors: list[str],
+        item_map: dict[str, ItemReference],
+    ) -> dict[str, Any]:
+        current_path = [*ancestors, item.title]
+        if item.resource_identifier and item.resource_identifier not in item_map:
+            module_path = " > ".join(ancestors) if ancestors else item.title
+            item_map[item.resource_identifier] = ItemReference(
+                item_identifier=item.identifier or "",
+                title=item.title,
                 course_path=" > ".join(current_path),
                 module_path=module_path,
             )
 
         return {
-            "identifier": item.attrib.get("identifier"),
-            "title": title,
+            "nodeId": item.node_id,
+            "identifier": item.identifier,
+            "title": item.title,
             "path": " > ".join(current_path),
-            "resourceIdentifier": resource_identifier,
-            "children": [
-                self._parse_item(child, current_path, item_map) for child in self._find_children(item, "item")
-            ],
+            "resourceId": item.resource_identifier,
+            "children": [self._build_item_node(child, current_path, item_map) for child in item.children],
         }
 
     def _extract_course_title(self, root: ET.Element) -> str | None:
@@ -395,6 +470,46 @@ class IMSCCParser:
                 if self._is_external_url(text):
                     return text, title
         return None, None
+
+    def _resolve_resource_title(
+        self,
+        resource: ManifestResource,
+        *,
+        manifest_dir: Path,
+        extracted_root: Path,
+    ) -> str | None:
+        external_url = resource.external_url
+        external_title = None
+        if external_url is None:
+            external_url, external_title = self._extract_external_link(resource, manifest_dir, extracted_root)
+            resource.external_url = external_url
+        candidates = [
+            self._normalize_title(external_title),
+            _derive_title(external_url) if external_url else None,
+            *(_derive_title(reference) for reference in [resource.href, *resource.files]),
+        ]
+        for candidate in candidates:
+            normalized = self._normalize_title(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    def _first_useful_title(self, titles: list[str] | tuple[str, ...] | Any) -> str | None:
+        for title in titles:
+            normalized = self._normalize_title(title)
+            if normalized and normalized != "Sin título":
+                return normalized
+        return None
+
+    def _normalize_title(self, title: str | None) -> str | None:
+        if title is None:
+            return None
+        cleaned = title.strip()
+        if not cleaned:
+            return None
+        if cleaned.lower() in {"untitled item", "untitled resource"}:
+            return None
+        return cleaned
 
     def _normalize_reference(self, reference: str | None) -> str | None:
         if not reference:

@@ -3,6 +3,9 @@ import type {
   ChecklistSaveRequest,
   ChecklistSaveResult,
   ChecklistTemplatesResponse,
+  CourseStructure,
+  CourseStructureOrganization,
+  CourseStructureNode,
   GeneratedReport,
   JobStatus,
   OnlineCourse,
@@ -210,6 +213,7 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
   const sourceUrl = item.sourceUrl ?? item.url ?? null;
   const filePath = item.filePath ?? item.localPath ?? item.path ?? null;
   const modulePath = item.modulePath ?? item.coursePath ?? null;
+  const itemPath = item.itemPath ?? null;
 
   return {
     ...item,
@@ -224,11 +228,53 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
     filePath,
     coursePath: modulePath,
     modulePath,
+    itemPath,
     urlStatus: item.urlStatus ?? null,
     finalUrl: item.finalUrl ?? sourceUrl,
     checkedAt: item.checkedAt ?? null,
     notes: item.notes ?? null,
     failCount: item.failCount ?? 0,
+  };
+}
+
+function normalizeCourseStructureNode(node: CourseStructureNode): CourseStructureNode {
+  return {
+    nodeId: node.nodeId ?? node.identifier ?? node.resourceId ?? node.title,
+    identifier: node.identifier ?? null,
+    title: node.title,
+    resourceId: node.resourceId ?? null,
+    children: Array.isArray(node.children) ? node.children.map(normalizeCourseStructureNode) : [],
+  };
+}
+
+function normalizeCourseStructureOrganization(
+  organization: CourseStructureOrganization,
+): CourseStructureOrganization {
+  return {
+    nodeId: organization.nodeId ?? organization.identifier ?? organization.title,
+    identifier: organization.identifier ?? null,
+    title: organization.title,
+    children: Array.isArray(organization.children)
+      ? organization.children.map(normalizeCourseStructureNode)
+      : [],
+  };
+}
+
+function normalizeCourseStructure(structure: CourseStructure | null | undefined): CourseStructure {
+  if (!structure || !Array.isArray(structure.organizations)) {
+    return {
+      title: 'Estructura del curso',
+      organizations: [],
+      unplacedResourceIds: [],
+    };
+  }
+
+  return {
+    title: structure.title ?? 'Estructura del curso',
+    organizations: structure.organizations.map(normalizeCourseStructureOrganization),
+    unplacedResourceIds: Array.isArray(structure.unplacedResourceIds)
+      ? structure.unplacedResourceIds.filter((resourceId): resourceId is string => typeof resourceId === 'string')
+      : [],
   };
 }
 
@@ -259,15 +305,21 @@ function normalizeResourcesResponse(jobId: string, payload: RawResourcesResponse
       jobId,
       resources,
       reviewSession: deriveReviewSession(jobId, resources),
+      structure: normalizeCourseStructure(null),
     };
   }
 
   const resources = payload.resources.map(normalizeResource);
+  const payloadWithLegacyStructure = payload as ResourceListResponse & {
+    courseStructure?: CourseStructure | null;
+  };
+  const rawStructure = payloadWithLegacyStructure.structure ?? payloadWithLegacyStructure.courseStructure ?? null;
   return {
     ...payload,
     jobId: payload.jobId ?? jobId,
     resources,
     reviewSession: payload.reviewSession ?? deriveReviewSession(jobId, resources),
+    structure: normalizeCourseStructure(rawStructure),
   };
 }
 

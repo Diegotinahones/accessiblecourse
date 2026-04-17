@@ -93,6 +93,38 @@ MANIFEST_WITH_METADATA_RESOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+MANIFEST_WITH_TITLE_FALLBACKS = """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1" identifier="title-fallbacks">
+  <organizations>
+    <organization identifier="org-1">
+      <item identifier="module-1">
+        <title>Untitled item</title>
+        <item identifier="lesson-1" identifierref="res-guide">
+          <title>Untitled item</title>
+        </item>
+        <item identifier="group-1">
+          <item identifier="lesson-2" identifierref="res-link">
+            <title>Tema práctico</title>
+          </item>
+        </item>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-guide" type="webcontent" href="docs/Guia_docente.pdf">
+      <file href="docs/Guia_docente.pdf" />
+    </resource>
+    <resource identifier="res-link" type="webcontent" href="docs/practica.html">
+      <file href="docs/practica.html" />
+    </resource>
+    <resource identifier="res-orphan" type="webcontent" href="docs/orphan.html">
+      <file href="docs/orphan.html" />
+    </resource>
+  </resources>
+</manifest>
+"""
+
+
 class IMSCCParserTests(unittest.TestCase):
     def setUp(self) -> None:
         self.parser = IMSCCParser()
@@ -186,6 +218,42 @@ class IMSCCParserTests(unittest.TestCase):
             resources = self.parser.build_resource_inventory(parsed_manifest, manifest_path, destination)
 
             self.assertEqual(resources, [])
+
+    def test_resolves_titles_from_resource_or_child_and_keeps_unmapped_resources_outside_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            archive_path = temp_path / "fallbacks.imscc"
+            destination = temp_path / "extract"
+            self._build_archive(
+                archive_path,
+                {
+                    "imsmanifest.xml": MANIFEST_WITH_TITLE_FALLBACKS,
+                    "docs/Guia_docente.pdf": "%PDF-1.4\n",
+                    "docs/practica.html": "<html><body>Practica</body></html>",
+                    "docs/orphan.html": "<html><body>Orphan</body></html>",
+                },
+            )
+
+            self.parser.safe_extract_archive(archive_path, destination)
+            manifest_path = self.parser.find_manifest(destination)
+            parsed_manifest = self.parser.parse_manifest(manifest_path, destination)
+            resources = self.parser.build_resource_inventory(parsed_manifest, manifest_path, destination)
+
+            organizations = parsed_manifest.structure["organizations"]
+            self.assertEqual(len(organizations), 1)
+            module = organizations[0]["children"][0]
+            self.assertEqual(module["title"], "Guia docente")
+            self.assertEqual(module["children"][0]["title"], "Guia docente")
+            self.assertEqual(module["children"][1]["title"], "Tema práctico")
+            self.assertEqual(parsed_manifest.structure["unplacedResourceIds"], ["res-orphan"])
+            self.assertNotIn("Untitled item", str(parsed_manifest.structure))
+
+            by_identifier = {resource["identifier"]: resource for resource in resources}
+            self.assertEqual(by_identifier["res-guide"]["title"], "Guia docente")
+            self.assertEqual(by_identifier["res-guide"]["itemPath"], "Guia docente > Guia docente")
+            self.assertIsNone(by_identifier["res-orphan"]["coursePath"])
+            self.assertIsNone(by_identifier["res-orphan"]["modulePath"])
+            self.assertIsNone(by_identifier["res-orphan"]["itemPath"])
 
     def _build_archive(self, archive_path: Path, files: dict[str, str]) -> None:
         with ZipFile(archive_path, "w") as archive:

@@ -9,12 +9,14 @@ import {
 } from '../lib/api';
 import type {
   AppMode,
+  CourseStructure,
+  CourseStructureOrganization,
+  CourseStructureNode,
   ResourceDetailResponse,
   ResourceListItem,
   ReviewChecklistItem,
   ReviewChecklistValue,
 } from '../lib/types';
-import { sortResourcesByPriority } from '../lib/types';
 import {
   classNames,
   getModeSearch,
@@ -26,7 +28,6 @@ import {
 
 type SaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
 type VisualReviewState = 'SIN_REVISAR' | 'EN_REVISION' | 'OK' | 'REQUIERE_CAMBIOS';
-const DEFAULT_MODULE_LABEL = 'Contenido sin módulo';
 
 const RESPONSE_OPTIONS: Array<{ label: string; value: ReviewChecklistValue }> = [
   { label: 'Cumple', value: 'PASS' },
@@ -34,8 +35,118 @@ const RESPONSE_OPTIONS: Array<{ label: string; value: ReviewChecklistValue }> = 
   { label: 'Pendiente', value: 'PENDING' },
 ];
 
-function getGroupKey(resource: ResourceListItem): string {
-  return resource.modulePath?.trim() || resource.coursePath?.trim() || DEFAULT_MODULE_LABEL;
+function getStructureNodeKey(node: CourseStructureNode | CourseStructureOrganization, prefix = 'node') {
+  return `${prefix}:${node.nodeId}`;
+}
+
+function countVisibleResources(
+  node: CourseStructureNode | CourseStructureOrganization,
+  resourceIds: Set<string>,
+): number {
+  const ownResourceCount =
+    'resourceId' in node && node.resourceId && resourceIds.has(node.resourceId) ? 1 : 0;
+  return ownResourceCount + node.children.reduce((total, child) => total + countVisibleResources(child, resourceIds), 0);
+}
+
+function pruneCourseStructureNode(
+  node: CourseStructureNode,
+  resourceIds: Set<string>,
+): CourseStructureNode | null {
+  const children = node.children
+    .map((child) => pruneCourseStructureNode(child, resourceIds))
+    .filter((child): child is CourseStructureNode => child !== null);
+  const hasOwnResource = node.resourceId ? resourceIds.has(node.resourceId) : false;
+
+  if (!hasOwnResource && children.length === 0) {
+    return null;
+  }
+
+  return {
+    ...node,
+    children,
+  };
+}
+
+function pruneCourseStructure(
+  structure: CourseStructure | null,
+  resourceIds: Set<string>,
+): CourseStructure | null {
+  if (!structure) {
+    return null;
+  }
+
+  const organizations = structure.organizations
+    .map((organization) => {
+      const children = organization.children
+        .map((child) => pruneCourseStructureNode(child, resourceIds))
+        .filter((child): child is CourseStructureNode => child !== null);
+
+      if (children.length === 0) {
+        return null;
+      }
+
+      return {
+        ...organization,
+        children,
+      };
+    })
+    .filter((organization): organization is CourseStructureOrganization => organization !== null);
+
+  const unplacedResourceIds = structure.unplacedResourceIds.filter((resourceId) => resourceIds.has(resourceId));
+
+  if (organizations.length === 0 && unplacedResourceIds.length === 0) {
+    return null;
+  }
+
+  return {
+    ...structure,
+    organizations,
+    unplacedResourceIds,
+  };
+}
+
+function findBranchKeysForFirstVisibleResource(
+  node: CourseStructureNode | CourseStructureOrganization,
+  resourceIds: Set<string>,
+): string[] {
+  if (countVisibleResources(node, resourceIds) === 0) {
+    return [];
+  }
+
+  const branchKey = node.children.length > 0 ? [getStructureNodeKey(node)] : [];
+  for (const child of node.children) {
+    const childKeys = findBranchKeysForFirstVisibleResource(child, resourceIds);
+    if (childKeys.length > 0) {
+      return [...branchKey, ...childKeys];
+    }
+  }
+
+  return branchKey;
+}
+
+function buildInitialExpandedSections(
+  structure: CourseStructure | null,
+  resources: ResourceListItem[],
+): Record<string, boolean> {
+  const visibleResourceIds = new Set(resources.map((resource) => resource.id));
+
+  if (structure?.organizations.length) {
+    for (const organization of structure.organizations) {
+      if (countVisibleResources(organization, visibleResourceIds) === 0) {
+        continue;
+      }
+
+      const keys = [
+        getStructureNodeKey(organization, 'org'),
+        ...findBranchKeysForFirstVisibleResource(organization, visibleResourceIds),
+      ];
+      return Object.fromEntries(keys.map((key) => [key, true]));
+    }
+
+    return { [getStructureNodeKey(structure.organizations[0], 'org')]: true };
+  }
+
+  return {};
 }
 
 function hasChecklistActivity(items: ReviewChecklistItem[]) {
@@ -174,7 +285,8 @@ export function ResourcesPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [resources, setResources] = useState<ResourceListItem[]>([]);
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [courseStructure, setCourseStructure] = useState<CourseStructure | null>(null);
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const [expandedResourceId, setExpandedResourceId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ResourceDetailResponse | null>(null);
   const [loadingResources, setLoadingResources] = useState(true);
@@ -216,20 +328,14 @@ export function ResourcesPage() {
           return;
         }
 
-        const orderedResources = sortResourcesByPriority(payload.resources);
-        setResources(orderedResources);
-        setExpandedGroups((current) => {
+        setResources(payload.resources);
+        setCourseStructure(payload.structure);
+        setExpandedSections((current) => {
           if (Object.values(current).some(Boolean)) {
             return current;
           }
 
-          const firstOpenGroup = orderedResources[0] ? getGroupKey(orderedResources[0]) : null;
-
-          if (!firstOpenGroup) {
-            return current;
-          }
-
-          return { [firstOpenGroup]: true };
+          return buildInitialExpandedSections(payload.structure, payload.resources);
         });
       })
       .catch((error: Error) => {
@@ -324,9 +430,8 @@ export function ResourcesPage() {
       try {
         const result = await saveChecklist(jobId, snapshot.resource.id, payload);
         const refreshed = await fetchResources(jobId, { onlyBroken: showOnlyBroken });
-        const orderedResources = sortResourcesByPriority(refreshed.resources);
-
-        setResources(orderedResources);
+        setResources(refreshed.resources);
+        setCourseStructure(refreshed.structure);
         setResourceActivityMap((current) => ({
           ...current,
           [snapshot.resource.id]: hasActivity,
@@ -389,25 +494,28 @@ export function ResourcesPage() {
     };
   }, [detail, draftVersion, isDirty, persistDraft]);
 
-  const groupedResources = useMemo(() => {
-    const groups = new Map<string, ResourceListItem[]>();
+  const resourceIndex = useMemo(
+    () => new Map(resources.map((resource) => [resource.id, resource])),
+    [resources],
+  );
 
-    resources.forEach((resource) => {
-      const groupKey = getGroupKey(resource);
-      const items = groups.get(groupKey);
-      if (items) {
-        items.push(resource);
-        return;
-      }
+  const visibleResourceIds = useMemo(
+    () => new Set(resources.map((resource) => resource.id)),
+    [resources],
+  );
 
-      groups.set(groupKey, [resource]);
-    });
+  const visibleCourseStructure = useMemo(
+    () => pruneCourseStructure(courseStructure, visibleResourceIds),
+    [courseStructure, visibleResourceIds],
+  );
 
-    return Array.from(groups.entries()).map(([groupKey, items]) => ({
-      groupKey,
-      groupResources: items,
-    }));
-  }, [resources]);
+  const unmappedResources = useMemo(
+    () =>
+      (visibleCourseStructure?.unplacedResourceIds ?? [])
+        .map((resourceId) => resourceIndex.get(resourceId))
+        .filter((resource): resource is ResourceListItem => resource !== undefined),
+    [resourceIndex, visibleCourseStructure],
+  );
 
   function updateChecklistItem(
     itemKey: string,
@@ -506,6 +614,338 @@ export function ResourcesPage() {
     }
   }
 
+  function renderResourceContent(resource: ResourceListItem, domScope: string) {
+    const encodedScope = encodeURIComponent(domScope);
+    const resourceButtonId = `resource-button-${encodedScope}`;
+    const resourcePanelId = `resource-panel-${encodedScope}`;
+    const isExpanded = expandedResourceId === resource.id;
+    const visualState = getVisualReviewState(resource, resourceActivityMap[resource.id]);
+
+    return (
+      <>
+        <h3>
+          <button
+            aria-controls={resourcePanelId}
+            aria-expanded={isExpanded}
+            className="flex w-full items-center justify-between gap-4 rounded-2xl px-3 py-3 text-left transition hover:bg-[#f6f7f2]"
+            id={resourceButtonId}
+            onClick={() => {
+              void handleToggleResource(resource.id);
+            }}
+            type="button"
+          >
+            <span className="min-w-0 text-base font-semibold text-ink">
+              <span className="block truncate">{resource.title}</span>
+              <span className="mt-1 block text-sm font-normal text-subtle">
+                {resource.type}
+                {getHealthLabel(resource) ? ` · ${getHealthLabel(resource)}` : ''}
+              </span>
+            </span>
+            <span
+              className={classNames(
+                'inline-flex shrink-0 rounded-full border px-3 py-1 text-sm font-semibold',
+                getReviewStateClassName(visualState),
+              )}
+            >
+              {getReviewStateLabel(visualState)}
+            </span>
+          </button>
+        </h3>
+
+        {isExpanded ? (
+          <div
+            aria-labelledby={resourceButtonId}
+            className="pb-4 pt-2"
+            id={resourcePanelId}
+            role="region"
+          >
+            {loadingDetail ? (
+              <div className="rounded-2xl border border-line bg-[#f6f7f2] p-4 text-sm text-subtle">
+                Cargando checklist…
+              </div>
+            ) : null}
+
+            {detailError ? (
+              <div
+                aria-live="assertive"
+                className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-danger"
+                role="alert"
+              >
+                {detailError}
+              </div>
+            ) : null}
+
+            {!loadingDetail &&
+            !detailError &&
+            detail &&
+            detail.resource.id === resource.id ? (
+              <div className="space-y-5">
+                {resource.itemPath ||
+                resource.modulePath ||
+                resource.coursePath ||
+                resource.sourceUrl ||
+                resource.filePath ||
+                resource.localPath ||
+                resource.path ? (
+                  <div className="space-y-2 rounded-2xl border border-line bg-[#f9faf7] p-4 text-sm text-subtle">
+                    {resource.itemPath ? (
+                      <p>
+                        <span className="font-semibold text-ink">Ubicación docente:</span>{' '}
+                        {resource.itemPath}
+                      </p>
+                    ) : null}
+                    {resource.modulePath || resource.coursePath ? (
+                      <p>
+                        <span className="font-semibold text-ink">Módulo:</span>{' '}
+                        {resource.modulePath ?? resource.coursePath}
+                      </p>
+                    ) : null}
+                    {resource.sourceUrl ? (
+                      <p>
+                        <span className="font-semibold text-ink">URL de origen:</span>{' '}
+                        <a
+                          className="underline"
+                          href={resource.sourceUrl}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          Abrir recurso
+                        </a>
+                      </p>
+                    ) : null}
+                    {resource.filePath || resource.localPath ? (
+                      <p>
+                        <span className="font-semibold text-ink">Archivo interno:</span>{' '}
+                        {resource.filePath ?? resource.localPath}
+                      </p>
+                    ) : null}
+                    {resource.urlStatus ? (
+                      <p>
+                        <span className="font-semibold text-ink">Comprobación URL:</span>{' '}
+                        {resource.urlStatus}
+                        {resource.checkedAt
+                          ? ` · ${new Date(resource.checkedAt).toLocaleString('es-ES')}`
+                          : ''}
+                      </p>
+                    ) : null}
+                    {resource.finalUrl && resource.finalUrl !== resource.sourceUrl ? (
+                      <p>
+                        <span className="font-semibold text-ink">URL final:</span>{' '}
+                        <a
+                          className="underline"
+                          href={resource.finalUrl}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          Abrir destino final
+                        </a>
+                      </p>
+                    ) : null}
+                    {getHealthLabel(resource) ? (
+                      <p>
+                        <span className="font-semibold text-ink">Estado técnico:</span>{' '}
+                        {getHealthLabel(resource)}
+                      </p>
+                    ) : null}
+                    {resource.notes ? (
+                      <p>
+                        <span className="font-semibold text-ink">Detalle:</span>{' '}
+                        {resource.notes}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                <ul className="space-y-4">
+                  {detail.checklist.items.map((item) => {
+                    const commentFields = parseCommentFields(item.comment);
+                    const radiosName = `criterion-${resource.id}-${item.itemKey}`;
+                    const commentId = `criterion-comment-${resource.id}-${item.itemKey}`;
+                    const recommendationId = `criterion-recommendation-${resource.id}-${item.itemKey}`;
+
+                    return (
+                      <li
+                        className="rounded-2xl border border-line p-4"
+                        key={item.itemKey}
+                      >
+                        <div>
+                          <p className="text-base font-semibold text-ink">
+                            {item.label}
+                          </p>
+                          {item.description ? (
+                            <p className="mt-1 text-sm text-subtle">
+                              {item.description}
+                            </p>
+                          ) : null}
+                        </div>
+
+                        <fieldset className="mt-4">
+                          <legend className="sr-only">
+                            Estado del criterio {item.label}
+                          </legend>
+                          <div className="grid gap-2 sm:grid-cols-3">
+                            {RESPONSE_OPTIONS.map((option) => (
+                              <label
+                                className={classNames(
+                                  'flex cursor-pointer items-center justify-center rounded-xl border px-3 py-3 text-sm font-semibold transition',
+                                  item.value === option.value
+                                    ? 'border-ink bg-[#edf2ea] text-ink'
+                                    : 'border-line bg-white text-subtle hover:bg-[#f6f7f2]',
+                                )}
+                                key={option.value}
+                              >
+                                <input
+                                  checked={item.value === option.value}
+                                  className="sr-only"
+                                  name={radiosName}
+                                  onChange={() =>
+                                    handleResponseChange(
+                                      item.itemKey,
+                                      option.value,
+                                    )
+                                  }
+                                  type="radio"
+                                />
+                                <span>{option.label}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </fieldset>
+
+                        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                          <div>
+                            <label
+                              className="block text-sm font-semibold text-ink"
+                              htmlFor={commentId}
+                            >
+                              Comentario
+                            </label>
+                            <textarea
+                              className="field-textarea mt-2 min-h-28"
+                              id={commentId}
+                              onChange={(event) =>
+                                handleTextChange(
+                                  item.itemKey,
+                                  event.target.value,
+                                  commentFields.reportRecommendation,
+                                )
+                              }
+                              rows={4}
+                              value={commentFields.commentText}
+                            />
+                          </div>
+
+                          <div>
+                            <label
+                              className="block text-sm font-semibold text-ink"
+                              htmlFor={recommendationId}
+                            >
+                              Recomendación para el informe
+                            </label>
+                            <textarea
+                              className="field-textarea mt-2 min-h-28"
+                              id={recommendationId}
+                              onChange={(event) =>
+                                handleTextChange(
+                                  item.itemKey,
+                                  commentFields.commentText,
+                                  event.target.value,
+                                )
+                              }
+                              rows={4}
+                              value={commentFields.reportRecommendation}
+                            />
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </>
+    );
+  }
+
+  function renderResourceRow(resource: ResourceListItem, domScope = resource.id) {
+    return (
+      <li className="px-4 py-2 sm:px-6" key={`${domScope}:${resource.id}`}>
+        {renderResourceContent(resource, domScope)}
+      </li>
+    );
+  }
+
+  function renderStructureNode(node: CourseStructureNode): JSX.Element | null {
+    const resource = node.resourceId ? resourceIndex.get(node.resourceId) ?? null : null;
+    const resourceCount = countVisibleResources(node, visibleResourceIds);
+    const nodeKey = getStructureNodeKey(node);
+
+    if (resourceCount === 0) {
+      return null;
+    }
+
+    if (node.children.length === 0 && resource) {
+      return renderResourceRow(resource, nodeKey);
+    }
+
+    const buttonId = `course-node-button-${encodeURIComponent(nodeKey)}`;
+    const panelId = `course-node-panel-${encodeURIComponent(nodeKey)}`;
+    const isExpanded = expandedSections[nodeKey] ?? false;
+
+    return (
+      <li className="space-y-3" key={nodeKey}>
+        <div className="rounded-2xl border border-line bg-white">
+          <h3>
+            <button
+              aria-controls={panelId}
+              aria-expanded={isExpanded}
+              className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left text-base font-semibold text-ink sm:px-5"
+              id={buttonId}
+              onClick={() =>
+                setExpandedSections((current) => ({
+                  ...current,
+                  [nodeKey]: !current[nodeKey],
+                }))
+              }
+              type="button"
+            >
+              <span className="min-w-0 truncate">{node.title}</span>
+              <span className="text-sm font-medium text-subtle">{resourceCount}</span>
+            </button>
+          </h3>
+
+          <div
+            aria-labelledby={buttonId}
+            className="border-t border-line px-3 py-3 sm:px-4"
+            hidden={!isExpanded}
+            id={panelId}
+            role="region"
+          >
+            {resource ? (
+              <ul className="divide-y divide-line overflow-hidden rounded-2xl border border-line">
+                {renderResourceRow(resource, `${nodeKey}:resource`)}
+              </ul>
+            ) : null}
+
+            {node.children.length > 0 ? (
+              <div className={resource ? 'mt-3 border-t border-dashed border-line pt-3' : undefined}>
+                <ul className="space-y-3 border-l border-line pl-4 sm:pl-5">
+                  {node.children.map((child) => renderStructureNode(child))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </li>
+    );
+  }
+
+  const showCourseTree = Boolean(
+    (visibleCourseStructure?.organizations.length ?? 0) > 0 || unmappedResources.length > 0,
+  );
+
   return (
     <LayoutSimple
       backLabel="Volver"
@@ -560,297 +1000,76 @@ export function ResourcesPage() {
 
       {!loadingResources && !screenError && resources.length > 0 ? (
         <div className="space-y-4">
-          {groupedResources.map(({ groupKey, groupResources }) => {
-            const groupDomKey = encodeURIComponent(groupKey);
-            const groupButtonId = `resource-group-button-${groupDomKey}`;
-            const groupPanelId = `resource-group-panel-${groupDomKey}`;
-            const isGroupExpanded = expandedGroups[groupKey] ?? false;
+          {showCourseTree ? (
+            <>
+              {visibleCourseStructure?.organizations.map((organization) => {
+                const organizationKey = getStructureNodeKey(organization, 'org');
+                const organizationCount = countVisibleResources(organization, visibleResourceIds);
+                const buttonId = `resource-organization-button-${encodeURIComponent(organizationKey)}`;
+                const panelId = `resource-organization-panel-${encodeURIComponent(organizationKey)}`;
+                const isExpanded = expandedSections[organizationKey] ?? false;
 
-            return (
-              <section className="card-panel overflow-hidden" key={groupKey}>
-                <h2>
-                  <button
-                    aria-controls={groupPanelId}
-                    aria-expanded={isGroupExpanded}
-                    className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
-                    id={groupButtonId}
-                    onClick={() =>
-                      setExpandedGroups((current) => ({
-                        ...current,
-                        [groupKey]: !current[groupKey],
-                      }))
-                    }
-                    type="button"
-                  >
-                    <span>{groupKey}</span>
+                return (
+                  <section className="card-panel overflow-hidden" key={organizationKey}>
+                    <h2>
+                      <button
+                        aria-controls={panelId}
+                        aria-expanded={isExpanded}
+                        className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
+                        id={buttonId}
+                        onClick={() =>
+                          setExpandedSections((current) => ({
+                            ...current,
+                            [organizationKey]: !current[organizationKey],
+                          }))
+                        }
+                        type="button"
+                      >
+                        <span>{organization.title}</span>
+                        <span className="text-sm font-medium text-subtle">
+                          {organizationCount}
+                        </span>
+                      </button>
+                    </h2>
+
+                    <div
+                      aria-labelledby={buttonId}
+                      className="border-t border-line px-4 py-4 sm:px-6"
+                      hidden={!isExpanded}
+                      id={panelId}
+                      role="region"
+                    >
+                      <ul className="space-y-3">
+                        {organization.children.map((child) => renderStructureNode(child))}
+                      </ul>
+                    </div>
+                  </section>
+                );
+              })}
+
+              {unmappedResources.length > 0 ? (
+                <section className="card-panel overflow-hidden">
+                  <div className="flex items-center justify-between gap-4 border-b border-line px-5 py-4 sm:px-6">
+                    <h2 className="text-base font-semibold text-ink">
+                      No ubicados en la estructura del curso
+                    </h2>
                     <span className="text-sm font-medium text-subtle">
-                      {groupResources.length}
+                      {unmappedResources.length}
                     </span>
-                  </button>
-                </h2>
-
-                <div
-                  aria-labelledby={groupButtonId}
-                  className="border-t border-line"
-                  hidden={!isGroupExpanded}
-                  id={groupPanelId}
-                  role="region"
-                >
+                  </div>
                   <ul className="divide-y divide-line">
-                    {groupResources.map((resource) => {
-                      const resourceButtonId = `resource-button-${resource.id}`;
-                      const resourcePanelId = `resource-panel-${resource.id}`;
-                      const isExpanded = expandedResourceId === resource.id;
-                      const visualState = getVisualReviewState(
-                        resource,
-                        resourceActivityMap[resource.id],
-                      );
-
-                      return (
-                        <li className="px-4 py-2 sm:px-6" key={resource.id}>
-                          <h3>
-                            <button
-                              aria-controls={resourcePanelId}
-                              aria-expanded={isExpanded}
-                              className="flex w-full items-center justify-between gap-4 rounded-2xl px-3 py-3 text-left transition hover:bg-[#f6f7f2]"
-                              id={resourceButtonId}
-                              onClick={() => {
-                                void handleToggleResource(resource.id);
-                              }}
-                              type="button"
-                            >
-                              <span className="min-w-0 text-base font-semibold text-ink">
-                                <span className="block truncate">{resource.title}</span>
-                                <span className="mt-1 block text-sm font-normal text-subtle">
-                                  {resource.type}
-                                  {getHealthLabel(resource)
-                                    ? ` · ${getHealthLabel(resource)}`
-                                    : ''}
-                                </span>
-                              </span>
-                              <span
-                                className={classNames(
-                                  'inline-flex shrink-0 rounded-full border px-3 py-1 text-sm font-semibold',
-                                  getReviewStateClassName(visualState),
-                                )}
-                              >
-                                {getReviewStateLabel(visualState)}
-                              </span>
-                            </button>
-                          </h3>
-
-                          {isExpanded ? (
-                            <div
-                              aria-labelledby={resourceButtonId}
-                              className="pb-4 pt-2"
-                              id={resourcePanelId}
-                              role="region"
-                            >
-                              {loadingDetail ? (
-                                <div className="rounded-2xl border border-line bg-[#f6f7f2] p-4 text-sm text-subtle">
-                                  Cargando checklist…
-                                </div>
-                              ) : null}
-
-                              {detailError ? (
-                                <div
-                                  aria-live="assertive"
-                                  className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-danger"
-                                  role="alert"
-                                >
-                                  {detailError}
-                                </div>
-                              ) : null}
-
-                              {!loadingDetail &&
-                              !detailError &&
-                              detail &&
-                              detail.resource.id === resource.id ? (
-                                <div className="space-y-5">
-                                  {resource.modulePath ||
-                                  resource.coursePath ||
-                                  resource.sourceUrl ||
-                                  resource.filePath ||
-                                  resource.localPath ||
-                                  resource.path ? (
-                                    <div className="space-y-2 rounded-2xl border border-line bg-[#f9faf7] p-4 text-sm text-subtle">
-                                      {resource.modulePath || resource.coursePath ? (
-                                        <p>
-                                          <span className="font-semibold text-ink">Módulo:</span>{' '}
-                                          {resource.modulePath ?? resource.coursePath}
-                                        </p>
-                                      ) : null}
-                                      {resource.sourceUrl ? (
-                                        <p>
-                                          <span className="font-semibold text-ink">URL de origen:</span>{' '}
-                                          <a
-                                            className="underline"
-                                            href={resource.sourceUrl}
-                                            rel="noreferrer"
-                                            target="_blank"
-                                          >
-                                            Abrir recurso
-                                          </a>
-                                        </p>
-                                      ) : null}
-                                      {resource.filePath || resource.localPath ? (
-                                        <p>
-                                          <span className="font-semibold text-ink">Archivo interno:</span>{' '}
-                                          {resource.filePath ?? resource.localPath}
-                                        </p>
-                                      ) : null}
-                                      {resource.urlStatus ? (
-                                        <p>
-                                          <span className="font-semibold text-ink">Comprobación URL:</span>{' '}
-                                          {resource.urlStatus}
-                                          {resource.checkedAt ? ` · ${new Date(resource.checkedAt).toLocaleString('es-ES')}` : ''}
-                                        </p>
-                                      ) : null}
-                                      {resource.finalUrl && resource.finalUrl !== resource.sourceUrl ? (
-                                        <p>
-                                          <span className="font-semibold text-ink">URL final:</span>{' '}
-                                          <a
-                                            className="underline"
-                                            href={resource.finalUrl}
-                                            rel="noreferrer"
-                                            target="_blank"
-                                          >
-                                            Abrir destino final
-                                          </a>
-                                        </p>
-                                      ) : null}
-                                      {getHealthLabel(resource) ? (
-                                        <p>
-                                          <span className="font-semibold text-ink">Estado técnico:</span>{' '}
-                                          {getHealthLabel(resource)}
-                                        </p>
-                                      ) : null}
-                                      {resource.notes ? (
-                                        <p>
-                                          <span className="font-semibold text-ink">Detalle:</span>{' '}
-                                          {resource.notes}
-                                        </p>
-                                      ) : null}
-                                    </div>
-                                  ) : null}
-
-                                  <ul className="space-y-4">
-                                    {detail.checklist.items.map((item) => {
-                                      const commentFields = parseCommentFields(item.comment);
-                                      const radiosName = `criterion-${resource.id}-${item.itemKey}`;
-                                      const commentId = `criterion-comment-${resource.id}-${item.itemKey}`;
-                                      const recommendationId = `criterion-recommendation-${resource.id}-${item.itemKey}`;
-
-                                      return (
-                                        <li
-                                          className="rounded-2xl border border-line p-4"
-                                          key={item.itemKey}
-                                        >
-                                          <div>
-                                            <p className="text-base font-semibold text-ink">
-                                              {item.label}
-                                            </p>
-                                            {item.description ? (
-                                              <p className="mt-1 text-sm text-subtle">
-                                                {item.description}
-                                              </p>
-                                            ) : null}
-                                          </div>
-
-                                          <fieldset className="mt-4">
-                                            <legend className="sr-only">
-                                              Estado del criterio {item.label}
-                                            </legend>
-                                            <div className="grid gap-2 sm:grid-cols-3">
-                                              {RESPONSE_OPTIONS.map((option) => (
-                                                <label
-                                                  className={classNames(
-                                                    'flex cursor-pointer items-center justify-center rounded-xl border px-3 py-3 text-sm font-semibold transition',
-                                                    item.value === option.value
-                                                      ? 'border-ink bg-[#edf2ea] text-ink'
-                                                      : 'border-line bg-white text-subtle hover:bg-[#f6f7f2]',
-                                                  )}
-                                                  key={option.value}
-                                                >
-                                                  <input
-                                                    checked={item.value === option.value}
-                                                    className="sr-only"
-                                                    name={radiosName}
-                                                    onChange={() =>
-                                                      handleResponseChange(
-                                                        item.itemKey,
-                                                        option.value,
-                                                      )
-                                                    }
-                                                    type="radio"
-                                                  />
-                                                  <span>{option.label}</span>
-                                                </label>
-                                              ))}
-                                            </div>
-                                          </fieldset>
-
-                                          <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                                            <div>
-                                              <label
-                                                className="block text-sm font-semibold text-ink"
-                                                htmlFor={commentId}
-                                              >
-                                                Comentario
-                                              </label>
-                                              <textarea
-                                                className="field-textarea mt-2 min-h-28"
-                                                id={commentId}
-                                                onChange={(event) =>
-                                                  handleTextChange(
-                                                    item.itemKey,
-                                                    event.target.value,
-                                                    commentFields.reportRecommendation,
-                                                  )
-                                                }
-                                                rows={4}
-                                                value={commentFields.commentText}
-                                              />
-                                            </div>
-
-                                            <div>
-                                              <label
-                                                className="block text-sm font-semibold text-ink"
-                                                htmlFor={recommendationId}
-                                              >
-                                                Recomendación para el informe
-                                              </label>
-                                              <textarea
-                                                className="field-textarea mt-2 min-h-28"
-                                                id={recommendationId}
-                                                onChange={(event) =>
-                                                  handleTextChange(
-                                                    item.itemKey,
-                                                    commentFields.commentText,
-                                                    event.target.value,
-                                                  )
-                                                }
-                                                rows={4}
-                                                value={commentFields.reportRecommendation}
-                                              />
-                                            </div>
-                                          </div>
-                                        </li>
-                                      );
-                                    })}
-                                  </ul>
-                                </div>
-                              ) : null}
-                            </div>
-                          ) : null}
-                        </li>
-                      );
-                    })}
+                    {unmappedResources.map((resource) => renderResourceRow(resource, `unmapped:${resource.id}`))}
                   </ul>
-                </div>
-              </section>
-            );
-          })}
+                </section>
+              ) : null}
+            </>
+          ) : (
+            <section className="card-panel p-6 text-sm text-subtle">
+              {showOnlyBroken
+                ? 'No hay enlaces rotos dentro de la estructura visible del curso.'
+                : 'No se ha podido reconstruir la estructura visible del curso.'}
+            </section>
+          )}
 
           <div className="sticky bottom-4 z-10 pt-2">
             <section className="card-panel border-[#dce4d8] bg-[rgba(255,255,255,0.96)] p-4 backdrop-blur">

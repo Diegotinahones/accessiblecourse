@@ -30,6 +30,11 @@ from app.schemas import (
     ReviewSessionRead,
     ReviewSummaryPayload,
 )
+from app.services.course_structure import (
+    build_fallback_course_structure,
+    filter_course_structure,
+    load_course_structure,
+)
 from app.services.jobs import (
     create_job_record,
     prepare_retry_job,
@@ -45,8 +50,8 @@ from app.services.review_service import (
     ensure_job_inventory,
     ensure_review_rollups,
     get_checklist_snapshot,
+    load_inventory_file,
     get_resource_or_404,
-    load_inventory_index,
     list_resources_with_fail_counts,
     upsert_checklist,
 )
@@ -82,6 +87,7 @@ def _resource_read(
     source_url = inventory_item.source_url if inventory_item is not None else resource.url
     file_path = inventory_item.file_path if inventory_item is not None else resource.path
     module_path = inventory_item.course_path if inventory_item is not None else resource.course_path
+    item_path = inventory_item.item_path if inventory_item is not None else None
     return ResourceListItemRead(
         id=resource.id,
         jobId=resource.job_id,
@@ -95,6 +101,7 @@ def _resource_read(
         filePath=file_path,
         coursePath=module_path,
         modulePath=module_path,
+        itemPath=item_path,
         status=resource.status,
         urlStatus=inventory_item.url_status if inventory_item is not None else None,
         finalUrl=inventory_item.final_url if inventory_item is not None else source_url,
@@ -197,9 +204,38 @@ def _build_summary_response(session: Session, settings: Settings, job_id: str) -
 
 def _load_inventory_index_or_empty(settings: Settings, job_id: str):
     try:
-        return load_inventory_index(settings, job_id)
+        return {item.id: item for item in load_inventory_file(settings, job_id)}
     except (FileNotFoundError, ValueError):
         return {}
+
+
+def _load_inventory_items_or_empty(settings: Settings, job_id: str):
+    try:
+        return load_inventory_file(settings, job_id)
+    except (FileNotFoundError, ValueError):
+        return []
+
+
+def _load_course_structure_or_empty(settings: Settings, job_id: str):
+    try:
+        return load_course_structure(settings, job_id)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _build_visible_course_structure(
+    settings: Settings,
+    job_id: str,
+    resources: list[ResourceListItemRead],
+):
+    resource_payload = [resource.model_dump(mode="python") for resource in resources]
+    raw_structure = _load_course_structure_or_empty(settings, job_id)
+    if raw_structure is None:
+        raw_structure = build_fallback_course_structure(resource_payload)
+
+    visible_resource_ids = {resource.id for resource in resources}
+    filtered_structure = filter_course_structure(raw_structure, visible_resource_ids=visible_resource_ids)
+    return filtered_structure or build_fallback_course_structure(resource_payload)
 
 
 @router.post("", response_model=JobCreatedResponse, status_code=status.HTTP_201_CREATED)
@@ -265,18 +301,28 @@ def get_resources(
 ) -> ResourceListPayload:
     _ensure_review_inventory(session, settings, job_id)
     review_session, _ = ensure_review_rollups(session, job_id)
-    inventory_index = _load_inventory_index_or_empty(settings, job_id)
+    inventory_items = _load_inventory_items_or_empty(settings, job_id)
+    inventory_index = {item.id: item for item in inventory_items}
+    inventory_order = {item.id: index for index, item in enumerate(inventory_items)}
     resources = []
     for resource, fail_count in list_resources_with_fail_counts(session, job_id):
         inventory_item = inventory_index.get(resource.id)
         if onlyBroken and not _is_broken_inventory_resource(resource, inventory_item):
             continue
         resources.append(_resource_read(resource, fail_count, inventory_item))
+    resources.sort(
+        key=lambda resource: (
+            inventory_order.get(resource.id, len(inventory_order)),
+            resource.title.lower(),
+            resource.id,
+        )
+    )
     logger.info("Inventario de revision cargado", extra={"job_id": job_id, "resource_count": len(resources)})
     return ResourceListPayload(
         jobId=job_id,
         resources=resources,
         reviewSession=_review_session_read(review_session),
+        structure=_build_visible_course_structure(settings, job_id, resources),
     )
 
 

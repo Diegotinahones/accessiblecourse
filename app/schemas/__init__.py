@@ -174,6 +174,7 @@ class ResourceListItemRead(StrictModel):
     filePath: str | None = None
     coursePath: str | None = None
     modulePath: str | None = None
+    itemPath: str | None = None
     status: ReviewResourceHealthStatus
     urlStatus: str | None = None
     finalUrl: str | None = None
@@ -188,6 +189,28 @@ class ResourceListPayload(StrictModel):
     jobId: str
     resources: list[ResourceListItemRead]
     reviewSession: ReviewSessionRead
+    structure: "CourseStructureRead"
+
+
+class CourseStructureNodeRead(StrictModel):
+    nodeId: str
+    identifier: str | None = None
+    title: str
+    resourceId: str | None = None
+    children: list["CourseStructureNodeRead"] = Field(default_factory=list)
+
+
+class CourseStructureOrganizationRead(StrictModel):
+    nodeId: str
+    identifier: str | None = None
+    title: str
+    children: list[CourseStructureNodeRead] = Field(default_factory=list)
+
+
+class CourseStructureRead(StrictModel):
+    title: str
+    organizations: list[CourseStructureOrganizationRead] = Field(default_factory=list)
+    unplacedResourceIds: list[str] = Field(default_factory=list)
 
 
 class ChecklistTemplateItemRead(StrictModel):
@@ -363,3 +386,9 @@ class JobReportRead(StrictModel):
     routes: list[ReportRouteRead]
     resources: list[ReportResourceRead]
     appendix: ReportAppendixRead
+
+
+CourseStructureNodeRead.model_rebuild()
+CourseStructureOrganizationRead.model_rebuild()
+CourseStructureRead.model_rebuild()
+ResourceListPayload.model_rebuild()

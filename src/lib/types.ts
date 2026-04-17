@@ -95,6 +95,7 @@ export interface ResourceListItem {
   filePath: string | null;
   coursePath: string | null;
   modulePath: string | null;
+  itemPath: string | null;
   status: ReviewResourceHealthStatus;
   urlStatus: string | null;
   finalUrl: string | null;
@@ -105,10 +106,32 @@ export interface ResourceListItem {
   updatedAt: string;
 }
 
+export interface CourseStructureNode {
+  nodeId: string;
+  identifier: string | null;
+  title: string;
+  resourceId: string | null;
+  children: CourseStructureNode[];
+}
+
+export interface CourseStructureOrganization {
+  nodeId: string;
+  identifier: string | null;
+  title: string;
+  children: CourseStructureNode[];
+}
+
+export interface CourseStructure {
+  title: string;
+  organizations: CourseStructureOrganization[];
+  unplacedResourceIds: string[];
+}
+
 export interface ResourceListResponse {
   jobId: string;
   resources: ResourceListItem[];
   reviewSession: ReviewSession;
+  structure: CourseStructure;
 }
 
 export interface ChecklistTemplateItem {

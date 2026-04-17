@@ -26,6 +26,7 @@ from app.schemas import (
 from app.services.canvas_client import CanvasClient, OnlineJobContextStore
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
+from app.services.course_structure import build_fallback_course_structure
 from app.services.imscc import build_resources_from_extracted
 from app.services.imscc_parser import IMSCCParser, ParserError
 from app.services.storage import (
@@ -193,6 +194,19 @@ def _write_review_inventory_payload(settings: Settings, job_id: str, inventory: 
     )
 
 
+def _write_course_structure_payload(settings: Settings, job_id: str, structure: dict[str, Any] | None) -> None:
+    structure_path = get_job_dir(settings, job_id) / "course_structure.json"
+    if structure is None:
+        structure_path.unlink(missing_ok=True)
+        return
+
+    structure_path.parent.mkdir(parents=True, exist_ok=True)
+    structure_path.write_text(
+        json.dumps(structure, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def _write_review_inventory(settings: Settings, job_id: str, resources) -> None:
     _write_review_inventory_payload(settings, job_id, _build_review_inventory(resources))
 
@@ -222,7 +236,11 @@ def _normalize_origin(origin: str | None, *, source_url: str | None) -> str:
     return "interno"
 
 
-def _normalize_offline_inventory(inventory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _normalize_offline_inventory(
+    inventory: list[dict[str, Any]],
+    *,
+    preserve_unmapped_paths: bool = False,
+) -> list[dict[str, Any]]:
     normalized_resources: list[dict[str, Any]] = []
     for resource in inventory:
         source_url = resource.get("sourceUrl") or resource.get("url")
@@ -241,7 +259,7 @@ def _normalize_offline_inventory(inventory: list[dict[str, Any]]) -> list[dict[s
 
         module_path = resource.get("modulePath") or resource.get("module_path") or resource.get("coursePath")
         if not isinstance(module_path, str) or not module_path.strip():
-            module_path = _derive_course_path(file_path or source_url)
+            module_path = None if preserve_unmapped_paths else _derive_course_path(file_path or source_url)
         else:
             module_path = module_path.strip()
 
@@ -265,26 +283,46 @@ def _normalize_offline_inventory(inventory: list[dict[str, Any]]) -> list[dict[s
     return normalized_resources
 
 
-def _build_manifest_review_inventory(extracted_dir: Path) -> list[dict[str, Any]]:
+def _build_manifest_review_inventory(extracted_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     parser = IMSCCParser()
     manifest_path = parser.find_manifest(extracted_dir)
     parsed_manifest = parser.parse_manifest(manifest_path, extracted_dir)
     inventory = parser.build_resource_inventory(parsed_manifest, manifest_path, extracted_dir)
-    return _normalize_offline_inventory(inventory)
+    normalized_inventory = _normalize_offline_inventory(inventory, preserve_unmapped_paths=True)
+    visible_resource_ids = {
+        str(resource.get("id"))
+        for resource in normalized_inventory
+        if isinstance(resource.get("id"), str) and resource.get("id")
+    }
+    course_structure = {
+        **parsed_manifest.structure,
+        "unplacedResourceIds": [
+            resource.identifier
+            for resource in parsed_manifest.resources
+            if resource.identifier
+            and resource.identifier in visible_resource_ids
+            and resource.identifier not in parsed_manifest.item_map
+        ],
+    }
+    return (
+        normalized_inventory,
+        course_structure,
+    )
 
 
-def _build_offline_review_inventory(extracted_dir: Path) -> list[dict[str, Any]]:
+def _build_offline_review_inventory(extracted_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     try:
-        manifest_inventory = _build_manifest_review_inventory(extracted_dir)
+        manifest_inventory, course_structure = _build_manifest_review_inventory(extracted_dir)
         if manifest_inventory:
-            return manifest_inventory
+            return manifest_inventory, course_structure
     except ParserError:
         logger.info(
             "manifest_inventory_fallback",
             extra={"event": "manifest_inventory_fallback", "details": {"reason": "parser_error"}},
         )
 
-    return _normalize_offline_inventory(_build_review_inventory(build_resources_from_extracted(extracted_dir)))
+    fallback_inventory = _normalize_offline_inventory(_build_review_inventory(build_resources_from_extracted(extracted_dir)))
+    return fallback_inventory, build_fallback_course_structure(fallback_inventory)
 
 
 def _persist_legacy_inventory(session: Session, job_id: str, inventory: list[dict]) -> None:
@@ -424,6 +462,8 @@ def _reset_job_related_data(session: Session, settings: Settings, job_id: str) -
         Path(existing_report.docx_path).unlink(missing_ok=True)
         session.delete(existing_report)
 
+    (get_job_dir(settings, job_id) / "resources.json").unlink(missing_ok=True)
+    (get_job_dir(settings, job_id) / "course_structure.json").unlink(missing_ok=True)
     shutil.rmtree(get_extracted_dir(settings, job_id), ignore_errors=True)
     shutil.rmtree(get_reports_dir(settings, job_id), ignore_errors=True)
     session.commit()
@@ -692,7 +732,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
 
             session.exec(delete(ChecklistEntry).where(ChecklistEntry.job_id == job_id))
             session.exec(delete(ResourceRecord).where(ResourceRecord.job_id == job_id))
-            inventory = _build_offline_review_inventory(extracted_dir)
+            inventory, course_structure = _build_offline_review_inventory(extracted_dir)
             if not inventory:
                 raise AppError(
                     code="no_resources_found",
@@ -703,6 +743,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
             url_validation_summary = _apply_url_validation(inventory, url_checker.check(inventory))
 
             _write_review_inventory_payload(settings, job_id, inventory)
+            _write_course_structure_payload(settings, job_id, course_structure)
             _persist_legacy_inventory(session, job_id, inventory)
 
             _update_job(
@@ -888,6 +929,11 @@ def process_online_job(
             )
 
             _write_review_inventory_payload(settings, job_id, inventory_build.resources)
+            _write_course_structure_payload(
+                settings,
+                job_id,
+                build_fallback_course_structure(inventory_build.resources, title=course.name),
+            )
             _persist_legacy_inventory(session, job_id, inventory_build.resources)
 
             _update_job(

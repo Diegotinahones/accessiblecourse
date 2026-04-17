@@ -91,6 +91,40 @@ def build_imscc_with_external_link() -> bytes:
     return buffer.getvalue()
 
 
+def build_imscc_with_unmapped_resource() -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "imsmanifest.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+  <organizations>
+    <organization identifier="org-1">
+      <title>Curso Demo</title>
+      <item identifier="module-1">
+        <title>Bloque 1</title>
+        <item identifier="item-1" identifierref="res-guide">
+          <title>Guía principal</title>
+        </item>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-guide" type="webcontent" href="course/guide.pdf">
+      <file href="course/guide.pdf" />
+    </resource>
+    <resource identifier="res-orphan" type="webcontent" href="web_resources/orphan.html">
+      <file href="web_resources/orphan.html" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        )
+        archive.writestr("course/guide.pdf", b"%PDF-1.4\n%offline pdf\n")
+        archive.writestr("web_resources/orphan.html", "<html><body>Orphan</body></html>")
+    return buffer.getvalue()
+
+
 def test_bootstrap_inventory_and_persist_checklist(client, test_settings) -> None:
     job_id = "job-thread4-bootstrap"
     write_inventory(
@@ -290,18 +324,29 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
 
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
-    resources = resources_response.json()["resources"]
+    resources_payload = resources_response.json()
+    resources = resources_payload["resources"]
     assert len(resources) == 2
 
     pdf_resource = next(resource for resource in resources if resource["title"] == "Guía")
     link_resource = next(resource for resource in resources if resource["title"] == "Enlace externo")
 
+    assert resources_payload["structure"]["title"] == "Curso Demo"
+    organization = resources_payload["structure"]["organizations"][0]
+    assert organization["title"] == "Curso Demo"
+    assert organization["children"][0]["title"] == "Tema 1"
+    assert organization["children"][0]["children"][0]["resourceId"] == "res-pdf"
+    assert organization["children"][0]["children"][1]["resourceId"] == "res-link"
+    assert resources_payload["structure"]["unplacedResourceIds"] == []
+
     assert pdf_resource["modulePath"] == "Tema 1"
     assert pdf_resource["coursePath"] == "Tema 1"
+    assert pdf_resource["itemPath"] == "Tema 1 > Guía"
     assert pdf_resource["filePath"] == "course/topic-1/guide.pdf"
     assert pdf_resource["sourceUrl"] is None
 
     assert link_resource["modulePath"] == "Tema 1"
+    assert link_resource["itemPath"] == "Tema 1 > Enlace externo"
     assert link_resource["sourceUrl"] == "https://example.com/broken-link"
     assert link_resource["filePath"] is None
     assert link_resource["urlStatus"] == "404"
@@ -312,6 +357,33 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert broken_only_response.status_code == 200, broken_only_response.text
     broken_resources = broken_only_response.json()["resources"]
     assert [resource["title"] for resource in broken_resources] == ["Enlace externo"]
+
+
+def test_offline_inventory_returns_unmapped_resources_without_technical_grouping(client) -> None:
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_imscc_with_unmapped_resource(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    payload = resources_response.json()
+    resources = payload["resources"]
+
+    assert payload["structure"]["organizations"][0]["children"][0]["title"] == "Bloque 1"
+    assert payload["structure"]["unplacedResourceIds"] == ["res-orphan"]
+
+    mapped_resource = next(resource for resource in resources if resource["id"] == "res-guide")
+    unmapped_resource = next(resource for resource in resources if resource["id"] == "res-orphan")
+
+    assert mapped_resource["modulePath"] == "Bloque 1"
+    assert mapped_resource["itemPath"] == "Bloque 1 > Guía principal"
+    assert unmapped_resource["modulePath"] is None
+    assert unmapped_resource["coursePath"] is None
+    assert unmapped_resource["itemPath"] is None
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

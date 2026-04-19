@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 
+from app.services.course_structure import normalize_course_structure
+
 DEFAULT_MAX_ARCHIVE_MEMBERS = 2000
 DEFAULT_MAX_ARCHIVE_MEMBER_SIZE = 256 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_TOTAL_SIZE = 1024 * 1024 * 1024
@@ -213,8 +215,6 @@ class IMSCCParser:
         resource_titles = {
             resource.identifier: resource.title for resource in resources if resource.identifier and resource.title
         }
-        item_map: dict[str, ItemReference] = {}
-
         organization_nodes: list[dict[str, Any]] = []
         for organizations_index, organizations_node in enumerate(self._find_children(root, "organizations")):
             for organization_index, organization in enumerate(self._find_children(organizations_node, "organization")):
@@ -225,11 +225,10 @@ class IMSCCParser:
                 resolved_children = [self._resolve_item_titles(item, resource_titles) for item in parsed_children]
                 organization_title = (
                     self._normalize_title(self._direct_child_text(organization, "title"))
-                    or self._first_useful_title(child.title for child in resolved_children)
                     or course_title
-                    or "Sin título"
+                    or "Estructura del curso"
                 )
-                children = [self._build_item_node(item, [], item_map) for item in resolved_children]
+                children = [self._build_item_node(item, []) for item in resolved_children]
                 organization_nodes.append(
                     {
                         "nodeId": f"organization:{organizations_index}:{organization_index}",
@@ -239,6 +238,26 @@ class IMSCCParser:
                     }
                 )
 
+        normalized_structure = normalize_course_structure(
+            {
+                "title": course_title or "Estructura del curso",
+                "organizations": organization_nodes,
+                "unplacedResourceIds": [],
+            }
+        ) or {
+            "title": course_title or "Estructura del curso",
+            "organizations": [],
+            "unplacedResourceIds": [],
+        }
+
+        item_map: dict[str, ItemReference] = {}
+        for organization in normalized_structure.get("organizations", []):
+            if not isinstance(organization, dict):
+                continue
+            for child in organization.get("children", []):
+                if isinstance(child, dict):
+                    self._register_item_paths(child, [], item_map)
+
         unplaced_resource_ids = [
             resource.identifier
             for resource in resources
@@ -247,11 +266,7 @@ class IMSCCParser:
 
         return ParsedManifest(
             course_title=course_title,
-            structure={
-                "title": course_title or "Estructura del curso",
-                "organizations": organization_nodes,
-                "unplacedResourceIds": unplaced_resource_ids,
-            },
+            structure={**normalized_structure, "unplacedResourceIds": unplaced_resource_ids},
             resources=resources,
             item_map=item_map,
         )
@@ -401,26 +416,37 @@ class IMSCCParser:
         self,
         item: ResolvedManifestItem,
         ancestors: list[str],
-        item_map: dict[str, ItemReference],
     ) -> dict[str, Any]:
         current_path = [*ancestors, item.title]
-        if item.resource_identifier and item.resource_identifier not in item_map:
-            module_path = " > ".join(ancestors) if ancestors else item.title
-            item_map[item.resource_identifier] = ItemReference(
-                item_identifier=item.identifier or "",
-                title=item.title,
-                course_path=" > ".join(current_path),
-                module_path=module_path,
-            )
-
         return {
             "nodeId": item.node_id,
             "identifier": item.identifier,
             "title": item.title,
-            "path": " > ".join(current_path),
             "resourceId": item.resource_identifier,
-            "children": [self._build_item_node(child, current_path, item_map) for child in item.children],
+            "children": [self._build_item_node(child, current_path) for child in item.children],
         }
+
+    def _register_item_paths(
+        self,
+        node: dict[str, Any],
+        ancestors: list[str],
+        item_map: dict[str, ItemReference],
+    ) -> None:
+        title = self._normalize_title(str(node.get("title") or "")) or "Sin título"
+        current_path = [*ancestors, title]
+        resource_identifier = node.get("resourceId")
+        if isinstance(resource_identifier, str) and resource_identifier and resource_identifier not in item_map:
+            module_path = " > ".join(ancestors) if ancestors else title
+            item_map[resource_identifier] = ItemReference(
+                item_identifier=str(node.get("identifier") or ""),
+                title=title,
+                course_path=" > ".join(current_path),
+                module_path=module_path,
+            )
+
+        for child in node.get("children", []):
+            if isinstance(child, dict):
+                self._register_item_paths(child, current_path, item_map)
 
     def _extract_course_title(self, root: ET.Element) -> str | None:
         metadata = next(iter(self._find_children(root, "metadata")), None)

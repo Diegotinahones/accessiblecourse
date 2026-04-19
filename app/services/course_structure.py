@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from app.core.config import Settings
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 COURSE_STRUCTURE_FILENAME = "course_structure.json"
 FALLBACK_ORGANIZATION_TITLE = "Estructura del curso"
@@ -26,7 +27,47 @@ def load_course_structure(settings: Settings, job_id: str) -> dict[str, Any] | N
         return None
 
     payload = json.loads(structure_path.read_text(encoding="utf-8"))
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    return normalize_course_structure(payload)
+
+
+def normalize_course_structure(structure: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if structure is None:
+        return None
+
+    organizations_payload = structure.get("organizations")
+    organizations: list[dict[str, Any]] = []
+    if isinstance(organizations_payload, list):
+        for organization in organizations_payload:
+            if not isinstance(organization, Mapping):
+                continue
+
+            children = _normalize_children(_coerce_children(organization.get("children")))
+            if not children:
+                continue
+
+            organizations.append(
+                {
+                    "nodeId": _coerce_text(organization.get("nodeId")) or "organization:normalized",
+                    "identifier": _coerce_text(organization.get("identifier")),
+                    "title": _coerce_text(organization.get("title")) or FALLBACK_ORGANIZATION_TITLE,
+                    "children": children,
+                }
+            )
+
+    unplaced_payload = structure.get("unplacedResourceIds")
+    unplaced = [
+        resource_id
+        for resource_id in (unplaced_payload if isinstance(unplaced_payload, list) else [])
+        if isinstance(resource_id, str)
+    ]
+
+    return {
+        "title": _coerce_text(structure.get("title")) or FALLBACK_ORGANIZATION_TITLE,
+        "organizations": organizations,
+        "unplacedResourceIds": unplaced,
+    }
 
 
 def filter_course_structure(
@@ -68,11 +109,13 @@ def filter_course_structure(
         if isinstance(resource_id, str) and resource_id in visible_resource_ids
     ]
 
-    return {
-        "title": _coerce_text(structure.get("title")) or FALLBACK_ORGANIZATION_TITLE,
-        "organizations": organizations,
-        "unplacedResourceIds": unplaced,
-    }
+    return normalize_course_structure(
+        {
+            "title": _coerce_text(structure.get("title")) or FALLBACK_ORGANIZATION_TITLE,
+            "organizations": organizations,
+            "unplacedResourceIds": unplaced,
+        }
+    )
 
 
 def build_fallback_course_structure(
@@ -128,9 +171,15 @@ def build_fallback_course_structure(
                 parent_node["children"].append(node)
             parent_node = node
 
-    return {
+    return normalize_course_structure(
+        {
+            "title": title or FALLBACK_ORGANIZATION_TITLE,
+            "organizations": [organization] if organization["children"] else [],
+            "unplacedResourceIds": unplaced_resource_ids,
+        }
+    ) or {
         "title": title or FALLBACK_ORGANIZATION_TITLE,
-        "organizations": [organization] if organization["children"] else [],
+        "organizations": [],
         "unplacedResourceIds": unplaced_resource_ids,
     }
 
@@ -158,6 +207,50 @@ def _filter_node(node: Mapping[str, Any], visible_resource_ids: set[str]) -> dic
     }
 
 
+def _normalize_children(nodes: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    normalized_nodes: list[dict[str, Any]] = []
+    for node in nodes:
+        normalized = _normalize_node(node)
+        if normalized is None:
+            continue
+        if _should_promote_children(normalized):
+            normalized_nodes.extend(
+                child for child in normalized.get("children", []) if isinstance(child, dict)
+            )
+            continue
+        normalized_nodes.append(normalized)
+    return normalized_nodes
+
+
+def _normalize_node(node: Mapping[str, Any]) -> dict[str, Any] | None:
+    children = _normalize_children(_coerce_children(node.get("children")))
+    resource_id = _coerce_text(node.get("resourceId"))
+    title = _coerce_text(node.get("title")) or UNTITLED_LABEL
+
+    if resource_id is None and not children:
+        return None
+
+    normalized = {
+        "nodeId": _coerce_text(node.get("nodeId")) or "node:normalized",
+        "identifier": _coerce_text(node.get("identifier")),
+        "title": title,
+        "resourceId": resource_id,
+        "children": children,
+    }
+
+    if resource_id is None and len(children) == 1:
+        only_child = children[0]
+        if _should_collapse_into_child(normalized, only_child):
+            return only_child
+
+    if resource_id is not None and len(children) == 1:
+        only_child = children[0]
+        if _should_absorb_child(normalized, only_child):
+            normalized["children"] = only_child.get("children", [])
+
+    return normalized
+
+
 def _coerce_children(value: Any) -> list[Mapping[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -175,6 +268,33 @@ def _normalize_label(value: str | None) -> str:
     if not value:
         return ""
     return " ".join(value.lower().split())
+
+
+def _should_collapse_into_child(parent: Mapping[str, Any], child: Mapping[str, Any]) -> bool:
+    parent_title = _coerce_text(parent.get("title")) or UNTITLED_LABEL
+    child_title = _coerce_text(child.get("title")) or UNTITLED_LABEL
+    return parent_title == UNTITLED_LABEL or _normalize_label(parent_title) == _normalize_label(child_title)
+
+
+def _should_absorb_child(parent: Mapping[str, Any], child: Mapping[str, Any]) -> bool:
+    if _coerce_text(child.get("resourceId")) is not None:
+        return False
+    parent_title = _coerce_text(parent.get("title")) or UNTITLED_LABEL
+    child_title = _coerce_text(child.get("title")) or UNTITLED_LABEL
+    return _normalize_label(parent_title) == _normalize_label(child_title)
+
+
+def _should_promote_children(node: Mapping[str, Any]) -> bool:
+    if _coerce_text(node.get("resourceId")) is not None:
+        return False
+
+    children = [child for child in node.get("children", []) if isinstance(child, Mapping)]
+    if len(children) <= 1:
+        return False
+
+    node_title = _coerce_text(node.get("title")) or UNTITLED_LABEL
+    first_child_title = _coerce_text(children[0].get("title")) or UNTITLED_LABEL
+    return _normalize_label(node_title) == _normalize_label(first_child_title)
 
 
 def _split_course_path(value: str | None) -> list[str]:

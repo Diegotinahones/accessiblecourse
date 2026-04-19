@@ -95,6 +95,9 @@ MANIFEST_WITH_METADATA_RESOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 
 MANIFEST_WITH_TITLE_FALLBACKS = """<?xml version="1.0" encoding="UTF-8"?>
 <manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1" identifier="title-fallbacks">
+  <metadata>
+    <title>Curso con títulos heredados</title>
+  </metadata>
   <organizations>
     <organization identifier="org-1">
       <item identifier="module-1">
@@ -241,16 +244,19 @@ class IMSCCParserTests(unittest.TestCase):
 
             organizations = parsed_manifest.structure["organizations"]
             self.assertEqual(len(organizations), 1)
-            module = organizations[0]["children"][0]
-            self.assertEqual(module["title"], "Guia docente")
-            self.assertEqual(module["children"][0]["title"], "Guia docente")
-            self.assertEqual(module["children"][1]["title"], "Tema práctico")
+            organization = organizations[0]
+            self.assertEqual(organization["title"], "Curso con títulos heredados")
+            self.assertEqual([child["title"] for child in organization["children"]], ["Guia docente", "Tema práctico"])
+            self.assertEqual(organization["children"][0]["resourceId"], "res-guide")
+            self.assertEqual(organization["children"][0]["children"], [])
+            self.assertEqual(organization["children"][1]["resourceId"], "res-link")
             self.assertEqual(parsed_manifest.structure["unplacedResourceIds"], ["res-orphan"])
             self.assertNotIn("Untitled item", str(parsed_manifest.structure))
 
             by_identifier = {resource["identifier"]: resource for resource in resources}
             self.assertEqual(by_identifier["res-guide"]["title"], "Guia docente")
-            self.assertEqual(by_identifier["res-guide"]["itemPath"], "Guia docente > Guia docente")
+            self.assertEqual(by_identifier["res-guide"]["itemPath"], "Guia docente")
+            self.assertEqual(by_identifier["res-link"]["itemPath"], "Tema práctico")
             self.assertIsNone(by_identifier["res-orphan"]["coursePath"])
             self.assertIsNone(by_identifier["res-orphan"]["modulePath"])
             self.assertIsNone(by_identifier["res-orphan"]["itemPath"])

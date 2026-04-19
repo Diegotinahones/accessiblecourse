@@ -28,6 +28,7 @@ import {
 
 type SaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
 type VisualReviewState = 'SIN_REVISAR' | 'EN_REVISION' | 'OK' | 'REQUIERE_CAMBIOS';
+type HeadingLevel = 2 | 3 | 4;
 
 const RESPONSE_OPTIONS: Array<{ label: string; value: ReviewChecklistValue }> = [
   { label: 'Cumple', value: 'PASS' },
@@ -132,18 +133,15 @@ function buildInitialExpandedSections(
 
   if (structure?.organizations.length) {
     for (const organization of structure.organizations) {
-      if (countVisibleResources(organization, visibleResourceIds) === 0) {
-        continue;
+      for (const child of organization.children) {
+        if (countVisibleResources(child, visibleResourceIds) === 0) {
+          continue;
+        }
+
+        const keys = findBranchKeysForFirstVisibleResource(child, visibleResourceIds);
+        return Object.fromEntries(keys.map((key) => [key, true]));
       }
-
-      const keys = [
-        getStructureNodeKey(organization, 'org'),
-        ...findBranchKeysForFirstVisibleResource(organization, visibleResourceIds),
-      ];
-      return Object.fromEntries(keys.map((key) => [key, true]));
     }
-
-    return { [getStructureNodeKey(structure.organizations[0], 'org')]: true };
   }
 
   return {};
@@ -278,6 +276,16 @@ function getFooterMessage(
   }
 
   return 'Puedes generar el informe en cualquier momento.';
+}
+
+function getHeadingTag(level: HeadingLevel): 'h2' | 'h3' | 'h4' {
+  if (level === 2) {
+    return 'h2';
+  }
+  if (level === 3) {
+    return 'h3';
+  }
+  return 'h4';
 }
 
 export function ResourcesPage() {
@@ -614,7 +622,247 @@ export function ResourcesPage() {
     }
   }
 
-  function renderResourceContent(resource: ResourceListItem, domScope: string) {
+  async function handleToggleSection(sectionKey: string, resourceId: string | null = null) {
+    if (detail && isDirty) {
+      await persistDraft(draftVersionRef.current, detail);
+    } else {
+      await saveQueueRef.current;
+    }
+
+    setDetailError(null);
+    setGenerationError(null);
+
+    let nextExpanded = false;
+    setExpandedSections((current) => {
+      nextExpanded = !current[sectionKey];
+      return {
+        ...current,
+        [sectionKey]: nextExpanded,
+      };
+    });
+
+    if (resourceId) {
+      setExpandedResourceId((current) => {
+        if (!nextExpanded) {
+          return current === resourceId ? null : current;
+        }
+        return resourceId;
+      });
+    }
+  }
+
+  function renderResourcePanelBody(resource: ResourceListItem) {
+    const isActiveResource = expandedResourceId === resource.id;
+
+    return (
+      <div className="space-y-5">
+        {resource.itemPath ||
+        resource.modulePath ||
+        resource.coursePath ||
+        resource.sourceUrl ||
+        resource.filePath ||
+        resource.localPath ||
+        resource.path ? (
+          <div className="space-y-2 rounded-2xl border border-line bg-[#f9faf7] p-4 text-sm text-subtle">
+            {resource.itemPath ? (
+              <p>
+                <span className="font-semibold text-ink">Ubicación docente:</span>{' '}
+                {resource.itemPath}
+              </p>
+            ) : null}
+            {resource.modulePath || resource.coursePath ? (
+              <p>
+                <span className="font-semibold text-ink">Módulo:</span>{' '}
+                {resource.modulePath ?? resource.coursePath}
+              </p>
+            ) : null}
+            {resource.sourceUrl ? (
+              <p>
+                <span className="font-semibold text-ink">URL de origen:</span>{' '}
+                <a
+                  className="underline"
+                  href={resource.sourceUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Abrir recurso
+                </a>
+              </p>
+            ) : null}
+            {resource.filePath || resource.localPath ? (
+              <p>
+                <span className="font-semibold text-ink">Archivo interno:</span>{' '}
+                {resource.filePath ?? resource.localPath}
+              </p>
+            ) : null}
+            {resource.urlStatus ? (
+              <p>
+                <span className="font-semibold text-ink">Comprobación URL:</span>{' '}
+                {resource.urlStatus}
+                {resource.checkedAt
+                  ? ` · ${new Date(resource.checkedAt).toLocaleString('es-ES')}`
+                  : ''}
+              </p>
+            ) : null}
+            {resource.finalUrl && resource.finalUrl !== resource.sourceUrl ? (
+              <p>
+                <span className="font-semibold text-ink">URL final:</span>{' '}
+                <a
+                  className="underline"
+                  href={resource.finalUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Abrir destino final
+                </a>
+              </p>
+            ) : null}
+            {getHealthLabel(resource) ? (
+              <p>
+                <span className="font-semibold text-ink">Estado técnico:</span>{' '}
+                {getHealthLabel(resource)}
+              </p>
+            ) : null}
+            {resource.notes ? (
+              <p>
+                <span className="font-semibold text-ink">Detalle:</span>{' '}
+                {resource.notes}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {loadingDetail && isActiveResource ? (
+          <div className="rounded-2xl border border-line bg-[#f6f7f2] p-4 text-sm text-subtle">
+            Cargando checklist…
+          </div>
+        ) : null}
+
+        {detailError && isActiveResource ? (
+          <div
+            aria-live="assertive"
+            className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-danger"
+            role="alert"
+          >
+            {detailError}
+          </div>
+        ) : null}
+
+        {!loadingDetail &&
+        !detailError &&
+        detail &&
+        detail.resource.id === resource.id ? (
+          <ul className="space-y-4">
+            {detail.checklist.items.map((item) => {
+              const commentFields = parseCommentFields(item.comment);
+              const radiosName = `criterion-${resource.id}-${item.itemKey}`;
+              const commentId = `criterion-comment-${resource.id}-${item.itemKey}`;
+              const recommendationId = `criterion-recommendation-${resource.id}-${item.itemKey}`;
+
+              return (
+                <li
+                  className="rounded-2xl border border-line p-4"
+                  key={item.itemKey}
+                >
+                  <div>
+                    <p className="text-base font-semibold text-ink">
+                      {item.label}
+                    </p>
+                    {item.description ? (
+                      <p className="mt-1 text-sm text-subtle">
+                        {item.description}
+                      </p>
+                    ) : null}
+                  </div>
+
+                  <fieldset className="mt-4">
+                    <legend className="sr-only">
+                      Estado del criterio {item.label}
+                    </legend>
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      {RESPONSE_OPTIONS.map((option) => (
+                        <label
+                          className={classNames(
+                            'flex cursor-pointer items-center justify-center rounded-xl border px-3 py-3 text-sm font-semibold transition',
+                            item.value === option.value
+                              ? 'border-ink bg-[#edf2ea] text-ink'
+                              : 'border-line bg-white text-subtle hover:bg-[#f6f7f2]',
+                          )}
+                          key={option.value}
+                        >
+                          <input
+                            checked={item.value === option.value}
+                            className="sr-only"
+                            name={radiosName}
+                            onChange={() =>
+                              handleResponseChange(
+                                item.itemKey,
+                                option.value,
+                              )
+                            }
+                            type="radio"
+                          />
+                          <span>{option.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+
+                  <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                    <div>
+                      <label
+                        className="block text-sm font-semibold text-ink"
+                        htmlFor={commentId}
+                      >
+                        Comentario
+                      </label>
+                      <textarea
+                        className="field-textarea mt-2 min-h-28"
+                        id={commentId}
+                        onChange={(event) =>
+                          handleTextChange(
+                            item.itemKey,
+                            event.target.value,
+                            commentFields.reportRecommendation,
+                          )
+                        }
+                        rows={4}
+                        value={commentFields.commentText}
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        className="block text-sm font-semibold text-ink"
+                        htmlFor={recommendationId}
+                      >
+                        Recomendación para el informe
+                      </label>
+                      <textarea
+                        className="field-textarea mt-2 min-h-28"
+                        id={recommendationId}
+                        onChange={(event) =>
+                          handleTextChange(
+                            item.itemKey,
+                            commentFields.commentText,
+                            event.target.value,
+                          )
+                        }
+                        rows={4}
+                        value={commentFields.reportRecommendation}
+                      />
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderResourceRow(resource: ResourceListItem, domScope = resource.id) {
     const encodedScope = encodeURIComponent(domScope);
     const resourceButtonId = `resource-button-${encodedScope}`;
     const resourcePanelId = `resource-panel-${encodedScope}`;
@@ -622,8 +870,8 @@ export function ResourcesPage() {
     const visualState = getVisualReviewState(resource, resourceActivityMap[resource.id]);
 
     return (
-      <>
-        <h3>
+      <li className="rounded-2xl border border-line bg-white px-4 py-2 sm:px-6" key={`${domScope}:${resource.id}`}>
+        <div>
           <button
             aria-controls={resourcePanelId}
             aria-expanded={isExpanded}
@@ -650,7 +898,7 @@ export function ResourcesPage() {
               {getReviewStateLabel(visualState)}
             </span>
           </button>
-        </h3>
+        </div>
 
         {isExpanded ? (
           <div
@@ -659,225 +907,14 @@ export function ResourcesPage() {
             id={resourcePanelId}
             role="region"
           >
-            {loadingDetail ? (
-              <div className="rounded-2xl border border-line bg-[#f6f7f2] p-4 text-sm text-subtle">
-                Cargando checklist…
-              </div>
-            ) : null}
-
-            {detailError ? (
-              <div
-                aria-live="assertive"
-                className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-danger"
-                role="alert"
-              >
-                {detailError}
-              </div>
-            ) : null}
-
-            {!loadingDetail &&
-            !detailError &&
-            detail &&
-            detail.resource.id === resource.id ? (
-              <div className="space-y-5">
-                {resource.itemPath ||
-                resource.modulePath ||
-                resource.coursePath ||
-                resource.sourceUrl ||
-                resource.filePath ||
-                resource.localPath ||
-                resource.path ? (
-                  <div className="space-y-2 rounded-2xl border border-line bg-[#f9faf7] p-4 text-sm text-subtle">
-                    {resource.itemPath ? (
-                      <p>
-                        <span className="font-semibold text-ink">Ubicación docente:</span>{' '}
-                        {resource.itemPath}
-                      </p>
-                    ) : null}
-                    {resource.modulePath || resource.coursePath ? (
-                      <p>
-                        <span className="font-semibold text-ink">Módulo:</span>{' '}
-                        {resource.modulePath ?? resource.coursePath}
-                      </p>
-                    ) : null}
-                    {resource.sourceUrl ? (
-                      <p>
-                        <span className="font-semibold text-ink">URL de origen:</span>{' '}
-                        <a
-                          className="underline"
-                          href={resource.sourceUrl}
-                          rel="noreferrer"
-                          target="_blank"
-                        >
-                          Abrir recurso
-                        </a>
-                      </p>
-                    ) : null}
-                    {resource.filePath || resource.localPath ? (
-                      <p>
-                        <span className="font-semibold text-ink">Archivo interno:</span>{' '}
-                        {resource.filePath ?? resource.localPath}
-                      </p>
-                    ) : null}
-                    {resource.urlStatus ? (
-                      <p>
-                        <span className="font-semibold text-ink">Comprobación URL:</span>{' '}
-                        {resource.urlStatus}
-                        {resource.checkedAt
-                          ? ` · ${new Date(resource.checkedAt).toLocaleString('es-ES')}`
-                          : ''}
-                      </p>
-                    ) : null}
-                    {resource.finalUrl && resource.finalUrl !== resource.sourceUrl ? (
-                      <p>
-                        <span className="font-semibold text-ink">URL final:</span>{' '}
-                        <a
-                          className="underline"
-                          href={resource.finalUrl}
-                          rel="noreferrer"
-                          target="_blank"
-                        >
-                          Abrir destino final
-                        </a>
-                      </p>
-                    ) : null}
-                    {getHealthLabel(resource) ? (
-                      <p>
-                        <span className="font-semibold text-ink">Estado técnico:</span>{' '}
-                        {getHealthLabel(resource)}
-                      </p>
-                    ) : null}
-                    {resource.notes ? (
-                      <p>
-                        <span className="font-semibold text-ink">Detalle:</span>{' '}
-                        {resource.notes}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                <ul className="space-y-4">
-                  {detail.checklist.items.map((item) => {
-                    const commentFields = parseCommentFields(item.comment);
-                    const radiosName = `criterion-${resource.id}-${item.itemKey}`;
-                    const commentId = `criterion-comment-${resource.id}-${item.itemKey}`;
-                    const recommendationId = `criterion-recommendation-${resource.id}-${item.itemKey}`;
-
-                    return (
-                      <li
-                        className="rounded-2xl border border-line p-4"
-                        key={item.itemKey}
-                      >
-                        <div>
-                          <p className="text-base font-semibold text-ink">
-                            {item.label}
-                          </p>
-                          {item.description ? (
-                            <p className="mt-1 text-sm text-subtle">
-                              {item.description}
-                            </p>
-                          ) : null}
-                        </div>
-
-                        <fieldset className="mt-4">
-                          <legend className="sr-only">
-                            Estado del criterio {item.label}
-                          </legend>
-                          <div className="grid gap-2 sm:grid-cols-3">
-                            {RESPONSE_OPTIONS.map((option) => (
-                              <label
-                                className={classNames(
-                                  'flex cursor-pointer items-center justify-center rounded-xl border px-3 py-3 text-sm font-semibold transition',
-                                  item.value === option.value
-                                    ? 'border-ink bg-[#edf2ea] text-ink'
-                                    : 'border-line bg-white text-subtle hover:bg-[#f6f7f2]',
-                                )}
-                                key={option.value}
-                              >
-                                <input
-                                  checked={item.value === option.value}
-                                  className="sr-only"
-                                  name={radiosName}
-                                  onChange={() =>
-                                    handleResponseChange(
-                                      item.itemKey,
-                                      option.value,
-                                    )
-                                  }
-                                  type="radio"
-                                />
-                                <span>{option.label}</span>
-                              </label>
-                            ))}
-                          </div>
-                        </fieldset>
-
-                        <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                          <div>
-                            <label
-                              className="block text-sm font-semibold text-ink"
-                              htmlFor={commentId}
-                            >
-                              Comentario
-                            </label>
-                            <textarea
-                              className="field-textarea mt-2 min-h-28"
-                              id={commentId}
-                              onChange={(event) =>
-                                handleTextChange(
-                                  item.itemKey,
-                                  event.target.value,
-                                  commentFields.reportRecommendation,
-                                )
-                              }
-                              rows={4}
-                              value={commentFields.commentText}
-                            />
-                          </div>
-
-                          <div>
-                            <label
-                              className="block text-sm font-semibold text-ink"
-                              htmlFor={recommendationId}
-                            >
-                              Recomendación para el informe
-                            </label>
-                            <textarea
-                              className="field-textarea mt-2 min-h-28"
-                              id={recommendationId}
-                              onChange={(event) =>
-                                handleTextChange(
-                                  item.itemKey,
-                                  commentFields.commentText,
-                                  event.target.value,
-                                )
-                              }
-                              rows={4}
-                              value={commentFields.reportRecommendation}
-                            />
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            ) : null}
+            {renderResourcePanelBody(resource)}
           </div>
         ) : null}
-      </>
-    );
-  }
-
-  function renderResourceRow(resource: ResourceListItem, domScope = resource.id) {
-    return (
-      <li className="px-4 py-2 sm:px-6" key={`${domScope}:${resource.id}`}>
-        {renderResourceContent(resource, domScope)}
       </li>
     );
   }
 
-  function renderStructureNode(node: CourseStructureNode): JSX.Element | null {
+  function renderStructureNode(node: CourseStructureNode, headingLevel: HeadingLevel): JSX.Element | null {
     const resource = node.resourceId ? resourceIndex.get(node.resourceId) ?? null : null;
     const resourceCount = countVisibleResources(node, visibleResourceIds);
     const nodeKey = getStructureNodeKey(node);
@@ -890,31 +927,38 @@ export function ResourcesPage() {
       return renderResourceRow(resource, nodeKey);
     }
 
+    const HeadingTag = getHeadingTag(headingLevel);
+    const nextHeadingLevel: HeadingLevel = headingLevel === 2 ? 3 : 4;
     const buttonId = `course-node-button-${encodeURIComponent(nodeKey)}`;
     const panelId = `course-node-panel-${encodeURIComponent(nodeKey)}`;
     const isExpanded = expandedSections[nodeKey] ?? false;
 
     return (
       <li className="space-y-3" key={nodeKey}>
-        <div className="rounded-2xl border border-line bg-white">
-          <h3>
+        <section className="rounded-2xl border border-line bg-white" aria-labelledby={buttonId}>
+          <HeadingTag>
             <button
               aria-controls={panelId}
               aria-expanded={isExpanded}
               className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left text-base font-semibold text-ink sm:px-5"
               id={buttonId}
-              onClick={() =>
-                setExpandedSections((current) => ({
-                  ...current,
-                  [nodeKey]: !current[nodeKey],
-                }))
-              }
+              onClick={() => {
+                void handleToggleSection(nodeKey, resource?.id ?? null);
+              }}
               type="button"
             >
-              <span className="min-w-0 truncate">{node.title}</span>
+              <span className="min-w-0">
+                <span className="block truncate">{node.title}</span>
+                {resource ? (
+                  <span className="mt-1 block text-sm font-normal text-subtle">
+                    {resource.type}
+                    {getHealthLabel(resource) ? ` · ${getHealthLabel(resource)}` : ''}
+                  </span>
+                ) : null}
+              </span>
               <span className="text-sm font-medium text-subtle">{resourceCount}</span>
             </button>
-          </h3>
+          </HeadingTag>
 
           <div
             aria-labelledby={buttonId}
@@ -924,20 +968,20 @@ export function ResourcesPage() {
             role="region"
           >
             {resource ? (
-              <ul className="divide-y divide-line overflow-hidden rounded-2xl border border-line">
-                {renderResourceRow(resource, `${nodeKey}:resource`)}
-              </ul>
+              <div className={node.children.length > 0 ? 'border-b border-dashed border-line pb-4' : undefined}>
+                {renderResourcePanelBody(resource)}
+              </div>
             ) : null}
 
             {node.children.length > 0 ? (
-              <div className={resource ? 'mt-3 border-t border-dashed border-line pt-3' : undefined}>
+              <div className={resource ? 'mt-3 pt-3' : undefined}>
                 <ul className="space-y-3 border-l border-line pl-4 sm:pl-5">
-                  {node.children.map((child) => renderStructureNode(child))}
+                  {node.children.map((child) => renderStructureNode(child, nextHeadingLevel))}
                 </ul>
               </div>
             ) : null}
           </div>
-        </div>
+        </section>
       </li>
     );
   }
@@ -1002,50 +1046,19 @@ export function ResourcesPage() {
         <div className="space-y-4">
           {showCourseTree ? (
             <>
-              {visibleCourseStructure?.organizations.map((organization) => {
-                const organizationKey = getStructureNodeKey(organization, 'org');
-                const organizationCount = countVisibleResources(organization, visibleResourceIds);
-                const buttonId = `resource-organization-button-${encodeURIComponent(organizationKey)}`;
-                const panelId = `resource-organization-panel-${encodeURIComponent(organizationKey)}`;
-                const isExpanded = expandedSections[organizationKey] ?? false;
-
-                return (
-                  <section className="card-panel overflow-hidden" key={organizationKey}>
-                    <h2>
-                      <button
-                        aria-controls={panelId}
-                        aria-expanded={isExpanded}
-                        className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
-                        id={buttonId}
-                        onClick={() =>
-                          setExpandedSections((current) => ({
-                            ...current,
-                            [organizationKey]: !current[organizationKey],
-                          }))
-                        }
-                        type="button"
-                      >
-                        <span>{organization.title}</span>
-                        <span className="text-sm font-medium text-subtle">
-                          {organizationCount}
-                        </span>
-                      </button>
-                    </h2>
-
-                    <div
-                      aria-labelledby={buttonId}
-                      className="border-t border-line px-4 py-4 sm:px-6"
-                      hidden={!isExpanded}
-                      id={panelId}
-                      role="region"
-                    >
-                      <ul className="space-y-3">
-                        {organization.children.map((child) => renderStructureNode(child))}
-                      </ul>
-                    </div>
-                  </section>
-                );
-              })}
+              {visibleCourseStructure?.organizations.map((organization) => (
+                <section
+                  aria-label={
+                    visibleCourseStructure.organizations.length > 1 ? organization.title : undefined
+                  }
+                  className="space-y-4"
+                  key={organization.nodeId}
+                >
+                  <ul className="space-y-4">
+                    {organization.children.map((child) => renderStructureNode(child, 2))}
+                  </ul>
+                </section>
+              ))}
 
               {unmappedResources.length > 0 ? (
                 <section className="card-panel overflow-hidden">

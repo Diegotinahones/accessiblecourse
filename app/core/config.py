@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     jobs_rate_limit_per_minute: int = 12
     reports_rate_limit_per_minute: int = 30
     canvas_request_timeout_seconds: float = 10.0
+    canvas_base_url: str | None = None
+    canvas_api_prefix: str = "/api/v1"
+    canvas_token: str | None = None
+    canvas_per_page: int = 100
+    canvas_timeout_seconds: float = 20.0
     url_check_timeout_seconds: float = 5.0
     url_check_max_urls: int = 200
     online_rate_limit_per_minute: int = 20

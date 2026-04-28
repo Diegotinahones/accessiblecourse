@@ -56,6 +56,24 @@ Variables principales:
 - `LOG_LEVEL`
 - `REPORT_BRAND_NAME`
 
+Variables para validar Canvas API:
+
+- `CANVAS_BASE_URL`, por ejemplo `https://aula.uoc.edu`
+- `CANVAS_API_PREFIX`, por ejemplo `/api/v1`
+- `CANVAS_TOKEN`, token secreto de Canvas
+- `CANVAS_PER_PAGE`, por ejemplo `100`
+- `CANVAS_TIMEOUT_SECONDS`, por ejemplo `20`
+
+## Validar token Canvas
+
+Con el backend levantado y las variables `CANVAS_*` configuradas:
+
+```bash
+curl -sS http://localhost:8000/api/canvas/health
+curl -sS http://localhost:8000/api/canvas/profile | head
+curl -sS http://localhost:8000/api/canvas/courses | head
+```
+
 ## Subidas IMSCC grandes
 
 La configuracion por defecto queda alineada para aceptar paquetes de hasta 13 GB:

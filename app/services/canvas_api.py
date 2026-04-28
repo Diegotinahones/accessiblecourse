@@ -38,12 +38,13 @@ class CanvasAPIClient:
     ) -> None:
         if not settings.canvas_base_url:
             raise CanvasAPIError("CANVAS_BASE_URL no está configurado.")
-        if not settings.canvas_token:
+        token = _normalize_canvas_token(settings.canvas_token)
+        if not token:
             raise CanvasAPIError("CANVAS_TOKEN no está configurado.")
 
         self.base_url = settings.canvas_base_url.rstrip("/")
         self.api_prefix = _normalize_api_prefix(settings.canvas_api_prefix)
-        self.token = settings.canvas_token
+        self.token = token
         self.timeout_seconds = settings.canvas_timeout_seconds
         self.transport = transport
 
@@ -150,6 +151,13 @@ def _normalize_api_prefix(value: str) -> str:
     if not cleaned.startswith("/"):
         cleaned = f"/{cleaned}"
     return cleaned.rstrip("/")
+
+
+def _normalize_canvas_token(value: str | None) -> str:
+    token = (value or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
 
 
 def _ensure_list(payload: Any) -> list[Any]:

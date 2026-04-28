@@ -40,6 +40,8 @@ export interface CanvasAuth {
 export interface OnlineCourse {
   id: string;
   name: string;
+  courseCode: string | null;
+  workflowState: string | null;
   term: string | null;
   startAt: string | null;
   endAt: string | null;

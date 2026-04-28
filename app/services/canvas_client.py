@@ -22,6 +22,8 @@ class CanvasCredentials:
     def create(cls, *, base_url: str, token: str, auth_mode: str = "token") -> "CanvasCredentials":
         normalized_base_url = normalize_canvas_base_url(base_url)
         cleaned_token = token.strip()
+        if cleaned_token.lower().startswith("bearer "):
+            cleaned_token = cleaned_token[7:].strip()
         if not cleaned_token:
             raise AppError(
                 code="canvas_token_required",

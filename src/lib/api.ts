@@ -42,8 +42,10 @@ interface RawJobStatusResponse {
 }
 
 interface RawOnlineCourse {
-  id: string;
+  id: string | number;
   name: string;
+  course_code?: string | null;
+  workflow_state?: string | null;
   term?: string | null;
   start_at?: string | null;
   end_at?: string | null;
@@ -157,8 +159,10 @@ function buildCanvasHeaders(auth: CanvasAuth): HeadersInit {
 
 function normalizeOnlineCourse(course: RawOnlineCourse): OnlineCourse {
   return {
-    id: course.id,
+    id: String(course.id),
     name: course.name,
+    courseCode: course.course_code ?? null,
+    workflowState: course.workflow_state ?? null,
     term: course.term ?? null,
     startAt: course.start_at ?? null,
     endAt: course.end_at ?? null,
@@ -375,6 +379,11 @@ export const api = {
     return payload.map(normalizeOnlineCourse);
   },
 
+  async listCanvasCourses(): Promise<OnlineCourse[]> {
+    const payload = await request<RawOnlineCourse[]>('/canvas/courses');
+    return payload.map(normalizeOnlineCourse);
+  },
+
   async createOnlineJob(
     payload: { courseId: string; courseName?: string | null },
     auth: CanvasAuth,
@@ -384,6 +393,16 @@ export const api = {
       headers: {
         'Content-Type': 'application/json',
         ...buildCanvasHeaders(auth),
+      },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async createCanvasJob(payload: { courseId: string; courseName?: string | null }): Promise<JobCreatedResponse> {
+    return request<JobCreatedResponse>('/canvas/jobs', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
     });

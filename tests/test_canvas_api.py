@@ -6,6 +6,7 @@ import httpx
 
 from app.core.config import Settings
 from app.services.canvas_api import CanvasAPIClient, CanvasAPIError
+from tests.test_online_api import StubCanvasClient, StubUrlChecker
 
 
 def canvas_settings() -> Settings:
@@ -32,6 +33,21 @@ def test_canvas_api_client_builds_url_and_sends_bearer_token() -> None:
     assert payload == {"id": 1}
     assert seen["url"] == "https://canvas.example.edu/api/v1/users/self/profile"
     assert seen["authorization"] == "Bearer secret-token"
+
+
+def test_canvas_api_client_accepts_token_pasted_with_bearer_prefix() -> None:
+    seen: dict[str, Any] = {}
+    settings = canvas_settings()
+    settings.canvas_token = "  Bearer pasted-token  "
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"id": 1}, request=request)
+
+    client = CanvasAPIClient(settings, transport=httpx.MockTransport(handler))
+    client.get_json("/users/self/profile")
+
+    assert seen["authorization"] == "Bearer pasted-token"
 
 
 def test_canvas_api_client_exposes_status_and_response_text_on_error() -> None:
@@ -95,6 +111,33 @@ def test_canvas_routes_profile_courses_and_health(client, monkeypatch) -> None:
             "workflow_state": "available",
         }
     ]
+
+
+def test_canvas_job_uses_server_side_token(client, monkeypatch) -> None:
+    client.app.state.settings.canvas_base_url = "https://canvas.example.edu"
+    client.app.state.settings.canvas_token = "secret-token"
+
+    monkeypatch.setattr(
+        "app.api.routes.canvas._build_canvas_client",
+        lambda credentials, settings: StubCanvasClient(credentials),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.canvas._build_url_checker",
+        lambda settings: StubUrlChecker(),
+    )
+
+    create_response = client.post("/api/canvas/jobs", json={"courseId": "77"})
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    status_response = client.get(f"/api/jobs/{job_id}")
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["status"] == "done"
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    assert len(resources_response.json()["resources"]) == 3
 
 
 def test_canvas_health_returns_false_when_env_is_missing(client) -> None:

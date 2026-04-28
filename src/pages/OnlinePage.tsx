@@ -2,26 +2,22 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import { api } from '../lib/api';
-import type { CanvasAuth, OnlineCourse } from '../lib/types';
+import type { OnlineCourse } from '../lib/types';
 import { getModeSearch, rememberAppMode, rememberCourseName } from '../lib/utils';
 
 function buildCourseLabel(course: OnlineCourse) {
-  const meta = [course.term, course.startAt ? new Date(course.startAt).toLocaleDateString('es-ES') : null]
-    .filter(Boolean)
-    .join(' · ');
-
-  return meta ? `${course.name} (${meta})` : course.name;
+  return course.courseCode && course.courseCode !== course.name
+    ? `${course.name} (${course.courseCode})`
+    : course.name;
 }
 
 export function OnlinePage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [canvasBaseUrl, setCanvasBaseUrl] = useState('');
-  const [canvasToken, setCanvasToken] = useState('');
   const [courses, setCourses] = useState<OnlineCourse[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState('');
   const [courseSearch, setCourseSearch] = useState('');
-  const [isLoadingCourses, setIsLoadingCourses] = useState(false);
+  const [isLoadingCourses, setIsLoadingCourses] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,6 +29,71 @@ export function OnlinePage() {
     }
   }, [searchParams, setSearchParams]);
 
+  async function loadCourses() {
+    try {
+      setIsLoadingCourses(true);
+      setError(null);
+      const nextCourses = await api.listCanvasCourses();
+      setCourses(nextCourses);
+      setSelectedCourseId((current) =>
+        current && nextCourses.some((course) => course.id === current)
+          ? current
+          : nextCourses[0]?.id ?? '',
+      );
+      if (nextCourses.length === 0) {
+        setError('No hemos encontrado cursos activos para este token de Canvas/UOC.');
+      }
+    } catch (caughtError) {
+      setCourses([]);
+      setSelectedCourseId('');
+      setError(
+        caughtError instanceof Error ? caughtError.message : 'No hemos podido cargar los cursos de Canvas/UOC.',
+      );
+    } finally {
+      setIsLoadingCourses(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadInitialCourses() {
+      try {
+        setIsLoadingCourses(true);
+        setError(null);
+        const nextCourses = await api.listCanvasCourses();
+        if (cancelled) {
+          return;
+        }
+        setCourses(nextCourses);
+        setSelectedCourseId(nextCourses[0]?.id ?? '');
+        if (nextCourses.length === 0) {
+          setError('No hemos encontrado cursos activos para este token de Canvas/UOC.');
+        }
+      } catch (caughtError) {
+        if (!cancelled) {
+          setCourses([]);
+          setSelectedCourseId('');
+          setError(
+            caughtError instanceof Error
+              ? caughtError.message
+              : 'No hemos podido cargar los cursos de Canvas/UOC.',
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingCourses(false);
+        }
+      }
+    }
+
+    void loadInitialCourses();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const filteredCourses = useMemo(() => {
     const normalizedQuery = courseSearch.trim().toLowerCase();
     if (!normalizedQuery) {
@@ -40,7 +101,9 @@ export function OnlinePage() {
     }
 
     return courses.filter((course) =>
-      `${course.name} ${course.term ?? ''}`.toLowerCase().includes(normalizedQuery),
+      `${course.name} ${course.courseCode ?? ''} ${course.workflowState ?? ''}`
+        .toLowerCase()
+        .includes(normalizedQuery),
     );
   }, [courseSearch, courses]);
 
@@ -49,62 +112,21 @@ export function OnlinePage() {
     courses.find((course) => course.id === selectedCourseId) ??
     null;
 
-  const canvasAuth: CanvasAuth | null =
-    canvasBaseUrl.trim() && canvasToken.trim()
-      ? {
-          baseUrl: canvasBaseUrl.trim(),
-          token: canvasToken.trim(),
-          authMode: 'token',
-        }
-      : null;
-
-  const handleLoadCourses = async () => {
-    if (!canvasAuth) {
-      setError('Introduce la URL base y el token de Canvas para cargar tus cursos.');
-      return;
-    }
-
-    try {
-      setIsLoadingCourses(true);
-      setError(null);
-      const nextCourses = await api.listOnlineCourses(canvasAuth);
-      setCourses(nextCourses);
-      setSelectedCourseId(nextCourses[0]?.id ?? '');
-      setCourseSearch('');
-      if (nextCourses.length === 0) {
-        setError('No hemos encontrado cursos accesibles con ese usuario de Canvas.');
-      }
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error ? caughtError.message : 'No hemos podido cargar los cursos.',
-      );
-    } finally {
-      setIsLoadingCourses(false);
-    }
-  };
-
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    if (!canvasAuth) {
-      setError('Introduce la URL base y el token de Canvas para continuar.');
-      return;
-    }
-
     if (!selectedCourse) {
-      setError('Selecciona un curso de Canvas antes de empezar el análisis.');
+      setError('Selecciona un curso de Canvas/UOC antes de empezar el análisis.');
       return;
     }
 
     try {
       setIsSubmitting(true);
       setError(null);
-      const { jobId } = await api.createOnlineJob(
-        {
-          courseId: selectedCourse.id,
-        },
-        canvasAuth,
-      );
+      const { jobId } = await api.createCanvasJob({
+        courseId: selectedCourse.id,
+        courseName: selectedCourse.name,
+      });
       rememberAppMode('online');
       rememberCourseName(jobId, selectedCourse.name);
       navigate(`/analyzing/${jobId}${getModeSearch('online')}`);
@@ -124,64 +146,29 @@ export function OnlinePage() {
       align="center"
       backLabel="Cambiar modo"
       backTo="/?mode=online"
-      description="Conecta con Canvas/UOC, elige un curso accesible y genera el inventario directamente desde sus módulos."
-      title="Conectar a Canvas/UOC"
+      description="Elige uno de tus cursos activos de Canvas/UOC y genera el inventario directamente desde sus módulos."
+      title="Online (UOC)"
     >
       <form className="card-panel mx-auto max-w-3xl space-y-6 p-6 sm:p-8" onSubmit={handleSubmit}>
-        <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr_auto]">
-          <div className="space-y-2">
-            <label className="block text-sm font-semibold text-ink" htmlFor="canvas-base-url">
-              Canvas Base URL
-            </label>
-            <input
-              autoComplete="url"
-              className="field-input"
-              id="canvas-base-url"
-              onChange={(event) => {
-                setCanvasBaseUrl(event.target.value);
-                setError(null);
-              }}
-              placeholder="https://tu-canvas/"
-              type="url"
-              value={canvasBaseUrl}
-            />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-ink">Cursos disponibles</h2>
+            <p className="mt-1 text-sm text-subtle">
+              Se cargan desde Canvas/UOC usando el token seguro configurado en Railway.
+            </p>
           </div>
 
-          <div className="space-y-2">
-            <label className="block text-sm font-semibold text-ink" htmlFor="canvas-token">
-              Token de Canvas
-            </label>
-            <input
-              autoComplete="off"
-              className="field-input"
-              id="canvas-token"
-              onChange={(event) => {
-                setCanvasToken(event.target.value);
-                setError(null);
-              }}
-              placeholder="Pega aquí tu token"
-              type="password"
-              value={canvasToken}
-            />
-          </div>
-
-          <div className="flex items-end">
-            <button
-              className="button-secondary w-full lg:w-auto"
-              disabled={!canvasAuth || isLoadingCourses}
-              onClick={() => {
-                void handleLoadCourses();
-              }}
-              type="button"
-            >
-              {isLoadingCourses ? 'Cargando…' : 'Cargar cursos'}
-            </button>
-          </div>
+          <button
+            className="button-secondary w-full sm:w-auto"
+            disabled={isLoadingCourses}
+            onClick={() => {
+              void loadCourses();
+            }}
+            type="button"
+          >
+            {isLoadingCourses ? 'Cargando…' : 'Recargar cursos'}
+          </button>
         </div>
-
-        <p className="text-sm text-subtle">
-          El token se usa solo para esta sesión y para el job que lances ahora; no se incluye en respuestas ni en logs.
-        </p>
 
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
           <div className="space-y-2">
@@ -190,9 +177,10 @@ export function OnlinePage() {
             </label>
             <input
               className="field-input"
+              disabled={isLoadingCourses || courses.length === 0}
               id="course-search"
               onChange={(event) => setCourseSearch(event.target.value)}
-              placeholder="Filtra por nombre o periodo"
+              placeholder="Filtra por nombre o código"
               type="search"
               value={courseSearch}
             />
@@ -200,16 +188,19 @@ export function OnlinePage() {
 
           <div className="space-y-2">
             <label className="block text-sm font-semibold text-ink" htmlFor="canvas-course">
-              Curso de Canvas
+              Curso de Canvas/UOC
             </label>
             <select
               className="field-input min-h-[13rem]"
+              disabled={isLoadingCourses || filteredCourses.length === 0}
               id="canvas-course"
               onChange={(event) => setSelectedCourseId(event.target.value)}
               size={Math.min(Math.max(filteredCourses.length, 1), 8)}
               value={selectedCourseId}
             >
-              {filteredCourses.length === 0 ? (
+              {isLoadingCourses ? (
+                <option value="">Cargando cursos…</option>
+              ) : filteredCourses.length === 0 ? (
                 <option value="">No hay cursos para mostrar</option>
               ) : (
                 filteredCourses.map((course) => (
@@ -227,9 +218,9 @@ export function OnlinePage() {
             <p>
               <span className="font-semibold text-ink">Curso:</span> {selectedCourse.name}
             </p>
-            {selectedCourse.term ? (
+            {selectedCourse.courseCode ? (
               <p className="mt-1">
-                <span className="font-semibold text-ink">Periodo:</span> {selectedCourse.term}
+                <span className="font-semibold text-ink">Código:</span> {selectedCourse.courseCode}
               </p>
             ) : null}
           </div>
@@ -247,7 +238,7 @@ export function OnlinePage() {
 
         <button
           className="button-primary w-full"
-          disabled={!selectedCourse || !canvasAuth || isSubmitting}
+          disabled={!selectedCourse || isLoadingCourses || isSubmitting}
           type="submit"
         >
           {isSubmitting ? 'Preparando análisis…' : 'Analizar curso online'}

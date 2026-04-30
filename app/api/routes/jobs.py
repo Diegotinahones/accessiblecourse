@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Request, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.api.deps import get_engine, get_rate_limiter, get_session, get_settings
 from app.core.config import Settings
@@ -14,6 +13,7 @@ from app.core.errors import AppError
 from app.core.rate_limit import MemoryRateLimiter, get_client_ip
 from app.models.entities import ChecklistValue, Resource, ReviewSession
 from app.schemas import (
+    AccessSummaryRead,
     ChecklistDetailRead,
     ChecklistItemRead,
     ChecklistSaveRequest,
@@ -30,6 +30,7 @@ from app.schemas import (
     ReviewSessionRead,
     ReviewSummaryPayload,
 )
+from app.services.access_check import build_access_status_counts
 from app.services.course_structure import (
     build_fallback_course_structure,
     filter_course_structure,
@@ -57,6 +58,7 @@ from app.services.review_service import (
 )
 from app.services.storage import (
     get_upload_path,
+    resolve_job_resource_path,
     sanitize_filename,
     save_upload_file,
     validate_extension,
@@ -64,10 +66,6 @@ from app.services.storage import (
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = logging.getLogger("accessiblecourse.review")
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _review_session_read(review_session: ReviewSession) -> ReviewSessionRead:
@@ -106,6 +104,11 @@ def _resource_read(
         urlStatus=inventory_item.url_status if inventory_item is not None else None,
         finalUrl=inventory_item.final_url if inventory_item is not None else source_url,
         checkedAt=inventory_item.checked_at if inventory_item is not None else None,
+        canAccess=inventory_item.can_access if inventory_item is not None else resource.can_access,
+        accessStatus=inventory_item.access_status if inventory_item is not None else resource.access_status,
+        httpStatus=inventory_item.http_status if inventory_item is not None else resource.http_status,
+        canDownload=inventory_item.can_download if inventory_item is not None else resource.can_download,
+        errorMessage=inventory_item.error_message if inventory_item is not None else resource.error_message,
         notes=resource.notes,
         reviewState=resource.review_state,
         failCount=fail_count,
@@ -114,6 +117,11 @@ def _resource_read(
 
 
 def _is_broken_inventory_resource(resource: Resource, inventory_item) -> bool:
+    access_status = inventory_item.access_status if inventory_item is not None else resource.access_status
+    normalized_access_status = access_status.value if hasattr(access_status, "value") else str(access_status or "")
+    if normalized_access_status.upper() != "OK":
+        return True
+
     url_status = inventory_item.url_status if inventory_item is not None else None
     if isinstance(url_status, str):
         normalized = url_status.strip().lower()
@@ -125,6 +133,31 @@ def _is_broken_inventory_resource(resource: Resource, inventory_item) -> bool:
             return True
 
     return resource.status.value == "ERROR"
+
+
+def _build_access_summary(session: Session, job_id: str) -> AccessSummaryRead:
+    resources = session.exec(select(Resource).where(Resource.job_id == job_id)).all()
+    by_status = build_access_status_counts()
+    accessible = 0
+    downloadable = 0
+
+    for resource in resources:
+        accessible += int(resource.can_access)
+        downloadable += int(resource.can_download)
+        status_key = (
+            resource.access_status.value
+            if hasattr(resource.access_status, "value")
+            else str(resource.access_status or "ERROR")
+        )
+        by_status.setdefault(status_key, 0)
+        by_status[status_key] += 1
+
+    return AccessSummaryRead(
+        total=len(resources),
+        accessible=accessible,
+        downloadable=downloadable,
+        byStatus=by_status,
+    )
 
 
 def _ensure_review_inventory(session: Session, settings: Settings, job_id: str) -> None:
@@ -368,6 +401,75 @@ def get_resource_detail(
             ],
         ),
         reviewSession=_review_session_read(review_session),
+    )
+
+
+@router.get("/{job_id}/access-summary", response_model=AccessSummaryRead)
+def get_access_summary(
+    job_id: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> AccessSummaryRead:
+    _ensure_review_inventory(session, settings, job_id)
+    return _build_access_summary(session, job_id)
+
+
+@router.get("/{job_id}/resources/{resource_id}/download")
+def download_resource_file(
+    job_id: str,
+    resource_id: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+):
+    _ensure_review_inventory(session, settings, job_id)
+    resource = _get_review_resource(session, job_id, resource_id)
+    inventory_item = _load_inventory_index_or_empty(settings, job_id).get(resource_id)
+    can_download = inventory_item.can_download if inventory_item is not None else resource.can_download
+
+    if not can_download:
+        raise AppError(
+            code="resource_not_downloadable",
+            message="Este recurso no tiene un archivo descargable asociado en el backend.",
+            status_code=status.HTTP_409_CONFLICT,
+            job_id=job_id,
+        )
+
+    file_path = inventory_item.file_path if inventory_item is not None else resource.path
+    if not file_path:
+        raise AppError(
+            code="resource_not_downloadable",
+            message="Este recurso no tiene un archivo offline disponible para descarga.",
+            status_code=status.HTTP_409_CONFLICT,
+            job_id=job_id,
+        )
+
+    try:
+        resolved_path = resolve_job_resource_path(settings, job_id, file_path)
+    except AppError as exc:
+        raise AppError(
+            code="resource_not_downloadable",
+            message="La ruta interna de este recurso no es válida para descarga.",
+            status_code=status.HTTP_409_CONFLICT,
+            details={"reason": str(exc.message)},
+            job_id=job_id,
+        ) from exc
+
+    if not resolved_path.exists() or not resolved_path.is_file():
+        raise AppError(
+            code="resource_file_not_found",
+            message="No hemos encontrado el fichero descargable de este recurso.",
+            status_code=status.HTTP_404_NOT_FOUND,
+            job_id=job_id,
+        )
+
+    return FileResponse(
+        path=resolved_path,
+        filename=resolved_path.name,
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 

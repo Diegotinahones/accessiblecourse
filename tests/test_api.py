@@ -344,6 +344,11 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert pdf_resource["itemPath"] == "Tema 1 > Guía"
     assert pdf_resource["filePath"] == "course/topic-1/guide.pdf"
     assert pdf_resource["sourceUrl"] is None
+    assert pdf_resource["canAccess"] is True
+    assert pdf_resource["accessStatus"] == "OK"
+    assert pdf_resource["httpStatus"] is None
+    assert pdf_resource["canDownload"] is True
+    assert pdf_resource["errorMessage"] is None
 
     assert link_resource["modulePath"] == "Tema 1"
     assert link_resource["itemPath"] == "Tema 1 > Enlace externo"
@@ -351,12 +356,41 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert link_resource["filePath"] is None
     assert link_resource["urlStatus"] == "404"
     assert link_resource["finalUrl"] == "https://example.com/broken-link"
+    assert link_resource["canAccess"] is False
+    assert link_resource["accessStatus"] == "NOT_FOUND"
+    assert link_resource["httpStatus"] == 404
+    assert link_resource["canDownload"] is False
+    assert link_resource["errorMessage"] == "La URL devolvió 404."
     assert "broken_link" in link_resource["notes"]
 
     broken_only_response = client.get(f"/api/jobs/{job_id}/resources?onlyBroken=true")
     assert broken_only_response.status_code == 200, broken_only_response.text
     broken_resources = broken_only_response.json()["resources"]
     assert [resource["title"] for resource in broken_resources] == ["Enlace externo"]
+
+    access_summary_response = client.get(f"/api/jobs/{job_id}/access-summary")
+    assert access_summary_response.status_code == 200, access_summary_response.text
+    assert access_summary_response.json() == {
+        "total": 2,
+        "accessible": 1,
+        "downloadable": 1,
+        "byStatus": {
+            "OK": 1,
+            "NOT_FOUND": 1,
+            "FORBIDDEN": 0,
+            "TIMEOUT": 0,
+            "ERROR": 0,
+        },
+    }
+
+    download_pdf_response = client.get(f"/api/jobs/{job_id}/resources/res-pdf/download")
+    assert download_pdf_response.status_code == 200, download_pdf_response.text
+    assert download_pdf_response.headers["content-type"] == "application/pdf"
+    assert download_pdf_response.content.startswith(b"%PDF-1.4")
+
+    download_external_response = client.get(f"/api/jobs/{job_id}/resources/res-link/download")
+    assert download_external_response.status_code == 409, download_external_response.text
+    assert download_external_response.json()["code"] == "resource_not_downloadable"
 
 
 def test_offline_inventory_returns_unmapped_resources_without_technical_grouping(client) -> None:

@@ -10,6 +10,9 @@ from app.models.entities import (
     ChecklistValue as ReviewChecklistValue,
 )
 from app.models.entities import (
+    ResourceAccessStatus as ReviewResourceAccessStatus,
+)
+from app.models.entities import (
     ResourceHealthStatus as ReviewResourceHealthStatus,
 )
 from app.models.entities import (
@@ -179,10 +182,22 @@ class ResourceListItemRead(StrictModel):
     urlStatus: str | None = None
     finalUrl: str | None = None
     checkedAt: datetime | None = None
+    canAccess: bool = False
+    accessStatus: ReviewResourceAccessStatus = ReviewResourceAccessStatus.ERROR
+    httpStatus: int | None = None
+    canDownload: bool = False
+    errorMessage: str | None = None
     notes: str | None = None
     reviewState: ReviewStateEnum
     failCount: int
     updatedAt: datetime
+
+
+class AccessSummaryRead(StrictModel):
+    total: int
+    accessible: int
+    downloadable: int
+    byStatus: dict[str, int]
 
 
 class ResourceListPayload(StrictModel):

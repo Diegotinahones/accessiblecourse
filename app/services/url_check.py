@@ -20,6 +20,9 @@ class UrlCheckResult:
     url_status: str | None = None
     final_url: str | None = None
     checked_at: datetime | None = None
+    content_type: str | None = None
+    content_disposition: str | None = None
+    error_message: str | None = None
 
 
 class URLCheckService:
@@ -60,11 +63,11 @@ class URLCheckService:
                     reason="limit_not_checked",
                 )
                 continue
-            checked_results[resource_id] = self._check_url(url, credentials=credentials)
+            checked_results[resource_id] = self.check_url(url, credentials=credentials)
 
         return checked_results
 
-    def _check_url(self, url: str, *, credentials: CanvasCredentials | None = None) -> UrlCheckResult:
+    def check_url(self, url: str, *, credentials: CanvasCredentials | None = None) -> UrlCheckResult:
         headers: dict[str, str] = {}
         if credentials and self._shares_canvas_host(url, credentials.base_url):
             headers.update(credentials.auth_headers())
@@ -86,18 +89,23 @@ class URLCheckService:
                     reason="timeout",
                     url_status="timeout",
                     checked_at=checked_at,
+                    error_message="La URL ha excedido el tiempo de espera.",
                 )
             return UrlCheckResult(
                 url=url,
                 checked=True,
-                broken_link=False,
+                broken_link=True,
                 reason="request_error",
                 checked_at=checked_at,
+                url_status="error",
+                error_message=str(method_error) if method_error is not None else "No se pudo acceder a la URL.",
             )
 
         status_code = response.status_code
         final_url = str(response.url)
         url_status = str(status_code)
+        content_type = response.headers.get("content-type")
+        content_disposition = response.headers.get("content-disposition")
         shared_canvas_host = credentials is not None and self._shares_canvas_host(url, credentials.base_url)
 
         if status_code in {401, 403} and shared_canvas_host:
@@ -110,6 +118,23 @@ class URLCheckService:
                 url_status=url_status,
                 final_url=final_url,
                 checked_at=checked_at,
+                content_type=content_type,
+                content_disposition=content_disposition,
+            )
+
+        if status_code in {401, 403}:
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=True,
+                reason="forbidden",
+                status_code=status_code,
+                url_status=url_status,
+                final_url=final_url,
+                checked_at=checked_at,
+                content_type=content_type,
+                content_disposition=content_disposition,
+                error_message=f"La URL devolvió {status_code}.",
             )
 
         if status_code == 404:
@@ -122,16 +147,23 @@ class URLCheckService:
                 url_status=url_status,
                 final_url=final_url,
                 checked_at=checked_at,
+                content_type=content_type,
+                content_disposition=content_disposition,
+                error_message="La URL devolvió 404.",
             )
 
         return UrlCheckResult(
             url=url,
             checked=True,
             broken_link=status_code >= 400,
+            reason=f"http_{status_code}" if status_code >= 400 else None,
             status_code=status_code,
             url_status=url_status,
             final_url=final_url,
             checked_at=checked_at,
+            content_type=content_type,
+            content_disposition=content_disposition,
+            error_message=f"La URL devolvió {status_code}." if status_code >= 400 else None,
         )
 
     @staticmethod

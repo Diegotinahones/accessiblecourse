@@ -13,7 +13,13 @@ from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.logging import append_job_log, job_logging_context
 from app.models import ChecklistEntry, Job, JobEvent, ReportRecord, ResourceRecord, utcnow
-from app.models.entities import Job as ReviewJob
+from app.models.entities import (
+    ChecklistResponse,
+    Job as ReviewJob,
+    Resource as ReviewResource,
+    ReviewSession,
+    ReviewSummary,
+)
 from app.schemas import (
     ChecklistDecision,
     ChecklistStateResponse,
@@ -23,6 +29,7 @@ from app.schemas import (
     JobStatusResponse,
     ResourceResponse,
 )
+from app.services.access_check import verify_offline_resource_access
 from app.services.canvas_client import CanvasClient, OnlineJobContextStore
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
@@ -39,6 +46,7 @@ from app.services.storage import (
 from app.services.url_check import URLCheckService
 
 logger = logging.getLogger("accessiblecourse.jobs")
+DEFAULT_GENERIC_MODULE_TITLE = "Módulo general"
 
 RESOURCE_TYPE_TO_REVIEW_TYPE = {
     "PDF": "PDF",
@@ -68,15 +76,6 @@ REVIEW_STATUS_TO_LEGACY_STATUS = {
     "WARN": "AVISO",
     "ERROR": "ERROR",
 }
-
-EXCLUDED_METADATA_EXTENSIONS = {
-    ".xml",
-    ".xsd",
-    ".dtd",
-    ".qti",
-    ".imsmanifest",
-}
-
 
 def get_job_or_404(session: Session, job_id: str) -> Job:
     job = session.get(Job, job_id)
@@ -152,14 +151,26 @@ def _derive_course_path(source: str | None) -> str:
     return parent or "Raiz del curso"
 
 
-def _build_review_inventory(resources) -> list[dict[str, str | None]]:
+def _normalized_excluded_extensions(settings: Settings) -> set[str]:
+    return {extension.lower() for extension in settings.offline_excluded_extensions}
+
+
+def _build_review_inventory(
+    resources,
+    *,
+    excluded_extensions: set[str],
+) -> list[dict[str, str | None]]:
     inventory: list[dict[str, str | None]] = []
     for parsed_resource in resources:
         href = parsed_resource.href or parsed_resource.extracted_path
         is_external = bool(href and href.startswith(("http://", "https://")))
         file_path = parsed_resource.extracted_path or (None if is_external else href)
         source_url = href if is_external else None
-        if _should_skip_metadata_resource(file_path=file_path, source_url=source_url):
+        if _should_skip_metadata_resource(
+            file_path=file_path,
+            source_url=source_url,
+            excluded_extensions=excluded_extensions,
+        ):
             continue
 
         module_path = _derive_course_path(file_path or source_url)
@@ -207,8 +218,18 @@ def _write_course_structure_payload(settings: Settings, job_id: str, structure: 
     )
 
 
-def _write_review_inventory(settings: Settings, job_id: str, resources) -> None:
-    _write_review_inventory_payload(settings, job_id, _build_review_inventory(resources))
+def _write_review_inventory(
+    settings: Settings,
+    job_id: str,
+    resources,
+    *,
+    excluded_extensions: set[str],
+) -> None:
+    _write_review_inventory_payload(
+        settings,
+        job_id,
+        _build_review_inventory(resources, excluded_extensions=excluded_extensions),
+    )
 
 
 def build_url_checker(settings: Settings) -> URLCheckService:
@@ -218,7 +239,12 @@ def build_url_checker(settings: Settings) -> URLCheckService:
     )
 
 
-def _should_skip_metadata_resource(*, file_path: str | None, source_url: str | None) -> bool:
+def _should_skip_metadata_resource(
+    *,
+    file_path: str | None,
+    source_url: str | None,
+    excluded_extensions: set[str],
+) -> bool:
     if source_url:
         return False
     if not file_path:
@@ -226,7 +252,7 @@ def _should_skip_metadata_resource(*, file_path: str | None, source_url: str | N
     normalized_name = Path(file_path.split("#", 1)[0].split("?", 1)[0]).name.lower()
     if normalized_name == "imsmanifest.xml":
         return True
-    return Path(normalized_name).suffix.lower() in EXCLUDED_METADATA_EXTENSIONS
+    return Path(normalized_name).suffix.lower() in excluded_extensions
 
 
 def _normalize_origin(origin: str | None, *, source_url: str | None) -> str:
@@ -240,6 +266,7 @@ def _normalize_offline_inventory(
     inventory: list[dict[str, Any]],
     *,
     preserve_unmapped_paths: bool = False,
+    excluded_extensions: set[str],
 ) -> list[dict[str, Any]]:
     normalized_resources: list[dict[str, Any]] = []
     for resource in inventory:
@@ -254,7 +281,11 @@ def _normalize_offline_inventory(
         else:
             file_path = None
 
-        if _should_skip_metadata_resource(file_path=file_path, source_url=source_url):
+        if _should_skip_metadata_resource(
+            file_path=file_path,
+            source_url=source_url,
+            excluded_extensions=excluded_extensions,
+        ):
             continue
 
         module_path = resource.get("modulePath") or resource.get("module_path") or resource.get("coursePath")
@@ -283,12 +314,39 @@ def _normalize_offline_inventory(
     return normalized_resources
 
 
-def _build_manifest_review_inventory(extracted_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+def _assign_generic_module_paths(resources: list[dict[str, Any]], module_title: str = DEFAULT_GENERIC_MODULE_TITLE) -> None:
+    for resource in resources:
+        title = str(resource.get("title") or "Recurso")
+        if not isinstance(resource.get("modulePath"), str) or not str(resource.get("modulePath")).strip():
+            resource["modulePath"] = module_title
+            resource["module_path"] = module_title
+        if not isinstance(resource.get("coursePath"), str) or not str(resource.get("coursePath")).strip():
+            resource["coursePath"] = module_title
+            resource["course_path"] = module_title
+        if not isinstance(resource.get("itemPath"), str) or not str(resource.get("itemPath")).strip():
+            resource["itemPath"] = f"{module_title} > {title}"
+            resource["item_path"] = f"{module_title} > {title}"
+
+
+def _build_manifest_review_inventory(
+    extracted_dir: Path,
+    settings: Settings,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     parser = IMSCCParser()
     manifest_path = parser.find_manifest(extracted_dir)
     parsed_manifest = parser.parse_manifest(manifest_path, extracted_dir)
-    inventory = parser.build_resource_inventory(parsed_manifest, manifest_path, extracted_dir)
-    normalized_inventory = _normalize_offline_inventory(inventory, preserve_unmapped_paths=True)
+    excluded_extensions = _normalized_excluded_extensions(settings)
+    inventory = parser.build_resource_inventory(
+        parsed_manifest,
+        manifest_path,
+        extracted_dir,
+        excluded_extensions=excluded_extensions,
+    )
+    normalized_inventory = _normalize_offline_inventory(
+        inventory,
+        preserve_unmapped_paths=True,
+        excluded_extensions=excluded_extensions,
+    )
     visible_resource_ids = {
         str(resource.get("id"))
         for resource in normalized_inventory
@@ -310,9 +368,12 @@ def _build_manifest_review_inventory(extracted_dir: Path) -> tuple[list[dict[str
     )
 
 
-def _build_offline_review_inventory(extracted_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+def _build_offline_review_inventory(
+    extracted_dir: Path,
+    settings: Settings,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     try:
-        manifest_inventory, course_structure = _build_manifest_review_inventory(extracted_dir)
+        manifest_inventory, course_structure = _build_manifest_review_inventory(extracted_dir, settings)
         if manifest_inventory:
             return manifest_inventory, course_structure
     except ParserError:
@@ -321,7 +382,16 @@ def _build_offline_review_inventory(extracted_dir: Path) -> tuple[list[dict[str,
             extra={"event": "manifest_inventory_fallback", "details": {"reason": "parser_error"}},
         )
 
-    fallback_inventory = _normalize_offline_inventory(_build_review_inventory(build_resources_from_extracted(extracted_dir)))
+    excluded_extensions = _normalized_excluded_extensions(settings)
+    fallback_inventory = _normalize_offline_inventory(
+        _build_review_inventory(
+            build_resources_from_extracted(extracted_dir),
+            excluded_extensions=excluded_extensions,
+        ),
+        preserve_unmapped_paths=True,
+        excluded_extensions=excluded_extensions,
+    )
+    _assign_generic_module_paths(fallback_inventory)
     return fallback_inventory, build_fallback_course_structure(fallback_inventory)
 
 
@@ -363,7 +433,7 @@ def create_job_record(
     original_filename: str,
     stored_filename: str,
     size_bytes: int,
-    total_steps: int = 4,
+    total_steps: int = 5,
     initial_message: str = "Analisis en cola.",
     event_details: dict | None = None,
 ) -> JobCreatedResponse:
@@ -456,6 +526,10 @@ def _update_job(
 def _reset_job_related_data(session: Session, settings: Settings, job_id: str) -> None:
     session.exec(delete(ChecklistEntry).where(ChecklistEntry.job_id == job_id))
     session.exec(delete(ResourceRecord).where(ResourceRecord.job_id == job_id))
+    session.exec(delete(ChecklistResponse).where(ChecklistResponse.job_id == job_id))
+    session.exec(delete(ReviewResource).where(ReviewResource.job_id == job_id))
+    session.exec(delete(ReviewSummary).where(ReviewSummary.job_id == job_id))
+    session.exec(delete(ReviewSession).where(ReviewSession.job_id == job_id))
     existing_report = session.exec(select(ReportRecord).where(ReportRecord.job_id == job_id)).first()
     if existing_report:
         Path(existing_report.pdf_path).unlink(missing_ok=True)
@@ -694,7 +768,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 session,
                 job,
                 status=JobLifecycleStatus.PROCESSING,
-                progress=35,
+                progress=30,
                 current_step=2,
                 message="Extrayendo recursos del curso.",
             )
@@ -704,7 +778,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 job_id=job_id,
                 event="progress",
                 message="Extrayendo el paquete de curso.",
-                progress=35,
+                progress=30,
             )
             session.commit()
 
@@ -716,31 +790,54 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 session,
                 job,
                 status=JobLifecycleStatus.PROCESSING,
-                progress=70,
+                progress=55,
                 current_step=3,
-                message="Preparando checklist de recursos.",
+                message="Reconstruyendo estructura e inventario.",
             )
             record_job_event(
                 session,
                 settings,
                 job_id=job_id,
                 event="progress",
-                message="Catalogando recursos y checklist base.",
-                progress=70,
+                message="Catalogando recursos y estructura del curso.",
+                progress=55,
             )
             session.commit()
 
             session.exec(delete(ChecklistEntry).where(ChecklistEntry.job_id == job_id))
             session.exec(delete(ResourceRecord).where(ResourceRecord.job_id == job_id))
-            inventory, course_structure = _build_offline_review_inventory(extracted_dir)
+            inventory, course_structure = _build_offline_review_inventory(extracted_dir, settings)
             if not inventory:
                 raise AppError(
                     code="no_resources_found",
                     message="No se han encontrado recursos procesables dentro del paquete.",
                     job_id=job_id,
                 )
+
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=4,
+                progress=80,
+                message="Verificando acceso y descarga de recursos.",
+            )
             url_checker = build_url_checker(settings)
-            url_validation_summary = _apply_url_validation(inventory, url_checker.check(inventory))
+            access_summary = verify_offline_resource_access(
+                inventory,
+                extracted_dir=extracted_dir,
+                url_checker=url_checker,
+            )
+
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=5,
+                progress=95,
+                message="Guardando inventario verificado.",
+                details=access_summary,
+            )
 
             _write_review_inventory_payload(settings, job_id, inventory)
             _write_course_structure_payload(settings, job_id, course_structure)
@@ -751,7 +848,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 job,
                 status=JobLifecycleStatus.DONE,
                 progress=100,
-                current_step=4,
+                current_step=5,
                 message="Analisis completado.",
             )
             record_job_event(
@@ -763,7 +860,9 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 progress=100,
                 details={
                     "resourceCount": len(inventory),
-                    "brokenLinkCount": len(url_validation_summary["brokenLinks"]),
+                    "accessibleCount": access_summary["accessible"],
+                    "downloadableCount": access_summary["downloadable"],
+                    "byStatus": access_summary["byStatus"],
                 },
             )
             session.commit()
@@ -905,7 +1004,13 @@ def process_online_job(
                 details={"moduleCount": len(modules)},
             )
 
-            inventory_build = build_canvas_inventory(client, course_id=course.id, modules=modules)
+            inventory_build = build_canvas_inventory(
+                client,
+                course_id=course.id,
+                modules=modules,
+                url_checker=url_checker,
+                credentials=context.credentials,
+            )
             _update_job_progress(
                 session,
                 settings,
@@ -916,16 +1021,20 @@ def process_online_job(
                 details={"itemsRead": inventory_build.items_read, "resourceCount": len(inventory_build.resources)},
             )
 
-            url_results = url_checker.check(inventory_build.resources, credentials=context.credentials)
-            url_validation_summary = _apply_url_validation(inventory_build.resources, url_results)
             _update_job_progress(
                 session,
                 settings,
                 job,
                 current_step=5,
                 progress=82,
-                message="Validacion de URLs completada.",
-                details=url_validation_summary,
+                message="Verificacion de acceso y URLs completada.",
+                details={
+                    "checkedUrls": inventory_build.checked_urls,
+                    "accessible": inventory_build.accessible,
+                    "downloadable": inventory_build.downloadable,
+                    "brokenLinks": inventory_build.broken_links,
+                    "byStatus": inventory_build.by_status,
+                },
             )
 
             _write_review_inventory_payload(settings, job_id, inventory_build.resources)
@@ -955,7 +1064,9 @@ def process_online_job(
                     "courseId": course.id,
                     "courseName": course.name,
                     "resourceCount": len(inventory_build.resources),
-                    "brokenLinkCount": len(url_validation_summary["brokenLinks"]),
+                    "brokenLinkCount": len(inventory_build.broken_links),
+                    "accessible": inventory_build.accessible,
+                    "downloadable": inventory_build.downloadable,
                 },
             )
             session.commit()

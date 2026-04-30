@@ -282,6 +282,28 @@ function normalizeCourseStructure(structure: CourseStructure | null | undefined)
   };
 }
 
+function normalizeJobStatus(payload: RawJobStatusResponse): JobStatus {
+  const normalizedStatus =
+    payload.status === 'created' || payload.status === 'pending' || payload.status === 'running'
+      ? 'processing'
+      : payload.status;
+  const totalSteps = payload.totalSteps ?? 5;
+  const currentStep =
+    payload.currentStep ??
+    Math.min(
+      totalSteps,
+      Math.max(1, Math.ceil(Math.max(payload.progress, 1) / (100 / totalSteps))),
+    );
+
+  return {
+    status: normalizedStatus,
+    progress: payload.progress,
+    message: payload.message ?? buildStepMessage(payload.progress),
+    currentStep,
+    totalSteps,
+  };
+}
+
 function deriveReviewSession(jobId: string, resources: ResourceListItem[]): ReviewSession {
   const hasNeedsFix = resources.some((resource) => resource.reviewState === 'NEEDS_FIX');
   const hasOk = resources.some((resource) => resource.reviewState === 'OK');
@@ -355,21 +377,14 @@ export const api = {
 
   async getJobStatus(jobId: string): Promise<JobStatus> {
     const payload = await request<RawJobStatusResponse>(`/jobs/${jobId}`);
-    const normalizedStatus =
-      payload.status === 'created' || payload.status === 'pending' || payload.status === 'running'
-        ? 'processing'
-        : payload.status;
-    const totalSteps = payload.totalSteps ?? 5;
-    const currentStep =
-      payload.currentStep ?? Math.min(totalSteps, Math.max(1, Math.ceil(Math.max(payload.progress, 1) / (100 / totalSteps))));
+    return normalizeJobStatus(payload);
+  },
 
-    return {
-      status: normalizedStatus,
-      progress: payload.progress,
-      message: payload.message ?? buildStepMessage(payload.progress),
-      currentStep,
-      totalSteps,
-    };
+  async retryJob(jobId: string): Promise<JobStatus> {
+    const payload = await request<RawJobStatusResponse>(`/jobs/${jobId}/retry`, {
+      method: 'POST',
+    });
+    return normalizeJobStatus(payload);
   },
 
   async listOnlineCourses(auth: CanvasAuth): Promise<OnlineCourse[]> {
@@ -468,4 +483,8 @@ export function getDirectReportDownloadUrls(jobId: string) {
     docx: resolveApiUrl(`/reports/${jobId}/download/docx`),
     json: resolveApiUrl(`/reports/${jobId}/download/json`),
   };
+}
+
+export function getResourceDownloadUrl(jobId: string, resourceId: string) {
+  return resolveApiUrl(`/jobs/${jobId}/resources/${resourceId}/download`);
 }

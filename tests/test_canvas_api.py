@@ -140,6 +140,59 @@ def test_canvas_job_uses_server_side_token(client, monkeypatch) -> None:
     assert len(resources_response.json()["resources"]) == 3
 
 
+def test_canvas_access_summary_groups_resources_by_module(client, monkeypatch) -> None:
+    client.app.state.settings.canvas_base_url = "https://canvas.example.edu"
+    client.app.state.settings.canvas_token = "secret-token"
+
+    monkeypatch.setattr(
+        "app.api.routes.canvas._build_canvas_client",
+        lambda credentials, settings: StubCanvasClient(credentials),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.canvas._build_url_checker",
+        lambda settings: StubUrlChecker(),
+    )
+
+    response = client.get("/api/canvas/courses/77/access-summary")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["courseId"] == "77"
+    assert payload["total"] == 3
+    assert payload["accessible"] == 2
+    assert payload["downloadable"] == 1
+    assert payload["byStatus"]["OK"] == 2
+    assert payload["byStatus"]["NOT_FOUND"] == 1
+    assert len(payload["modules"]) == 2
+    assert payload["modules"][0]["moduleName"] == "Modulo 1"
+    assert payload["modules"][0]["resources"][0]["title"] == "Guia docente.pdf"
+
+
+def test_canvas_download_streams_file_with_backend_proxy(client, monkeypatch) -> None:
+    client.app.state.settings.canvas_base_url = "https://canvas.example.edu"
+    client.app.state.settings.canvas_token = "secret-token"
+
+    monkeypatch.setattr(
+        "app.api.routes.canvas._build_canvas_client",
+        lambda credentials, settings: StubCanvasClient(credentials),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.canvas._build_url_checker",
+        lambda settings: StubUrlChecker(),
+    )
+
+    summary_response = client.get("/api/canvas/courses/77/access-summary")
+    assert summary_response.status_code == 200, summary_response.text
+    first_resource_id = summary_response.json()["modules"][0]["resources"][0]["id"]
+
+    download_response = client.get(f"/api/canvas/courses/77/resources/{first_resource_id}/download")
+
+    assert download_response.status_code == 200, download_response.text
+    assert download_response.content == b"%PDF-1.4 test canvas pdf"
+    assert download_response.headers["content-type"].startswith("application/pdf")
+    assert "attachment;" in download_response.headers["content-disposition"]
+
+
 def test_canvas_health_returns_false_when_env_is_missing(client) -> None:
     response = client.get("/api/canvas/health")
 

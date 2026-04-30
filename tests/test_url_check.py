@@ -26,3 +26,20 @@ def test_url_check_marks_404_after_head_fallback_to_get() -> None:
     assert result.url_status == "404"
     assert result.final_url == "https://example.com/missing"
     assert result.checked_at is not None
+    assert result.error_message == "La URL devolvió 404."
+
+
+def test_url_check_marks_403_as_forbidden() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, request=request)
+
+    service = URLCheckService(timeout_seconds=1, max_urls=10, transport=httpx.MockTransport(handler))
+    results = service.check([{"id": "res-403", "url": "https://example.com/forbidden"}])
+
+    result = results["res-403"]
+    assert result.checked is True
+    assert result.broken_link is True
+    assert result.reason == "forbidden"
+    assert result.status_code == 403
+    assert result.url_status == "403"
+    assert result.error_message == "La URL devolvió 403."

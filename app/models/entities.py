@@ -31,6 +31,14 @@ class ResourceHealthStatus(str, Enum):
     ERROR = "ERROR"
 
 
+class ResourceAccessStatus(str, Enum):
+    OK = "OK"
+    NOT_FOUND = "NOT_FOUND"
+    FORBIDDEN = "FORBIDDEN"
+    TIMEOUT = "TIMEOUT"
+    ERROR = "ERROR"
+
+
 class ReviewState(str, Enum):
     OK = "OK"
     IN_REVIEW = "IN_REVIEW"
@@ -73,6 +81,14 @@ class Resource(SQLModel, table=True):
         default=ResourceHealthStatus.OK,
         sa_column=Column(SAEnum(ResourceHealthStatus), nullable=False),
     )
+    can_access: bool = Field(default=False, nullable=False)
+    access_status: ResourceAccessStatus = Field(
+        default=ResourceAccessStatus.ERROR,
+        sa_column=Column(SAEnum(ResourceAccessStatus), nullable=False),
+    )
+    http_status: int | None = Field(default=None, nullable=True)
+    can_download: bool = Field(default=False, nullable=False)
+    error_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     notes: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     review_state: ReviewState = Field(
         default=ReviewState.IN_REVIEW,

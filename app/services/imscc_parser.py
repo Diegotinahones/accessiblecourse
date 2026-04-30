@@ -276,10 +276,15 @@ class IMSCCParser:
         parsed_manifest: ParsedManifest,
         manifest_path: Path,
         extracted_root: Path,
+        *,
+        excluded_extensions: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         inventory: list[dict[str, Any]] = []
         manifest_dir = manifest_path.parent
         resolved_root = extracted_root.resolve()
+        effective_excluded_extensions = {
+            extension.lower() for extension in (excluded_extensions or EXCLUDED_METADATA_EXTENSIONS)
+        }
 
         for resource in parsed_manifest.resources:
             item_ref = parsed_manifest.item_map.get(resource.identifier)
@@ -381,6 +386,7 @@ class IMSCCParser:
             if not _should_skip_metadata_resource(
                 resource.get("filePath") if isinstance(resource.get("filePath"), str) else None,
                 resource.get("sourceUrl") if isinstance(resource.get("sourceUrl"), str) else None,
+                effective_excluded_extensions,
             )
         ]
 
@@ -627,7 +633,11 @@ def _unique_preserving_order(values: list[str]) -> list[str]:
     return unique
 
 
-def _should_skip_metadata_resource(file_path: str | None, source_url: str | None) -> bool:
+def _should_skip_metadata_resource(
+    file_path: str | None,
+    source_url: str | None,
+    excluded_extensions: set[str],
+) -> bool:
     if source_url:
         return False
     if not file_path:
@@ -635,4 +645,4 @@ def _should_skip_metadata_resource(file_path: str | None, source_url: str | None
     normalized_name = Path(_strip_query_and_fragment(file_path)).name.lower()
     if normalized_name == "imsmanifest.xml":
         return True
-    return Path(normalized_name).suffix.lower() in EXCLUDED_METADATA_EXTENSIONS
+    return Path(normalized_name).suffix.lower() in excluded_extensions

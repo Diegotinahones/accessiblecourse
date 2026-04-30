@@ -100,6 +100,25 @@ class CanvasFile:
 
 
 @dataclass(slots=True)
+class CanvasDownloadHandle:
+    client: httpx.Client = field(repr=False)
+    response: httpx.Response = field(repr=False)
+    filename: str | None = None
+    content_type: str | None = None
+    content_length: int | None = None
+
+    def iter_bytes(self):
+        try:
+            yield from self.response.iter_bytes()
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        self.response.close()
+        self.client.close()
+
+
+@dataclass(slots=True)
 class OnlineJobContext:
     credentials: CanvasCredentials
     course_id: str
@@ -295,6 +314,75 @@ class CanvasClient:
                 status_code=502,
             )
         return payload
+
+    def stream_download(self, url: str, *, filename: str | None = None) -> CanvasDownloadHandle:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        client = httpx.Client(
+            transport=self.transport,
+            timeout=timeout,
+            headers=self.credentials.auth_headers(),
+            follow_redirects=True,
+        )
+        try:
+            request = client.build_request("GET", url)
+            response = client.send(request, stream=True)
+        except httpx.TimeoutException as exc:
+            client.close()
+            raise AppError(
+                code="canvas_timeout",
+                message="Canvas no ha respondido a tiempo. Intentalo de nuevo.",
+                status_code=504,
+            ) from exc
+        except httpx.HTTPError as exc:
+            client.close()
+            raise AppError(
+                code="canvas_unreachable",
+                message="No hemos podido conectar con Canvas usando la URL indicada.",
+                status_code=502,
+            ) from exc
+
+        if response.status_code in {401, 403}:
+            response.close()
+            client.close()
+            raise AppError(
+                code="canvas_auth_failed",
+                message="No hemos podido autenticar la sesion de Canvas. Revisa la URL base y el token.",
+                status_code=401,
+            )
+        if response.status_code == 404:
+            response.close()
+            client.close()
+            raise AppError(
+                code="canvas_not_found",
+                message="No hemos encontrado el recurso solicitado en Canvas.",
+                status_code=404,
+            )
+        if response.status_code == 429:
+            response.close()
+            client.close()
+            raise AppError(
+                code="canvas_rate_limited",
+                message="Canvas ha limitado temporalmente las peticiones. Intentalo de nuevo en unos segundos.",
+                status_code=429,
+            )
+        if response.status_code >= 400:
+            response.close()
+            client.close()
+            raise AppError(
+                code="canvas_request_failed",
+                message="Canvas ha rechazado la descarga solicitada.",
+                status_code=502,
+                details={"statusCode": response.status_code},
+            )
+
+        content_length = response.headers.get("content-length")
+        return CanvasDownloadHandle(
+            client=client,
+            response=response,
+            filename=filename,
+            content_type=response.headers.get("content-type"),
+            content_length=int(content_length) if content_length and content_length.isdigit() else None,
+        )
 
     def _parse_course(self, payload: dict[str, Any]) -> CanvasCourse:
         term_payload = payload.get("term") if isinstance(payload.get("term"), dict) else {}

@@ -28,7 +28,7 @@ export function LayoutSimple({
   }, [title]);
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(32,94,60,0.08),_transparent_42%),_#f6f7f2] text-ink">
+    <div className="min-h-screen bg-white text-ink">
       <a
         href="#page-content"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-xl focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"

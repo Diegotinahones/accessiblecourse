@@ -68,6 +68,28 @@ def get_job_log_path(settings: Settings, job_id: str) -> Path:
     return get_job_dir(settings, job_id) / "job.log"
 
 
+def resolve_job_resource_path(settings: Settings, job_id: str, relative_path: str) -> Path:
+    extracted_root = get_extracted_dir(settings, job_id).resolve()
+    normalized = PurePosixPath(relative_path.split("#", 1)[0].split("?", 1)[0].replace("\\", "/"))
+    if normalized.is_absolute() or any(part == ".." for part in normalized.parts):
+        raise AppError(
+            code="invalid_resource_path",
+            message="La ruta del recurso no es válida para descarga.",
+            details={"path": relative_path},
+            job_id=job_id,
+        )
+
+    candidate = (extracted_root / Path(*normalized.parts)).resolve()
+    if not str(candidate).startswith(str(extracted_root)):
+        raise AppError(
+            code="invalid_resource_path",
+            message="La ruta del recurso sale del directorio permitido.",
+            details={"path": relative_path},
+            job_id=job_id,
+        )
+    return candidate
+
+
 def _bytes_to_mb(size_bytes: int) -> float | int:
     value = round(size_bytes / (1024 * 1024), 3)
     return int(value) if value.is_integer() else value

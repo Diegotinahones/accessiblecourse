@@ -17,6 +17,7 @@ from app.models.entities import (
     ChecklistTemplate,
     ChecklistValue,
     Job,
+    ResourceAccessStatus,
     Resource,
     ResourceHealthStatus,
     ResourceType,
@@ -46,6 +47,17 @@ class InventoryResourceSeed(BaseModel):
     url_status: str | None = Field(default=None, validation_alias=AliasChoices("url_status", "urlStatus"))
     final_url: str | None = Field(default=None, validation_alias=AliasChoices("final_url", "finalUrl"))
     checked_at: datetime | None = Field(default=None, validation_alias=AliasChoices("checked_at", "checkedAt"))
+    can_access: bool = Field(default=False, validation_alias=AliasChoices("can_access", "canAccess"))
+    access_status: ResourceAccessStatus = Field(
+        default=ResourceAccessStatus.ERROR,
+        validation_alias=AliasChoices("access_status", "accessStatus"),
+    )
+    http_status: int | None = Field(default=None, validation_alias=AliasChoices("http_status", "httpStatus"))
+    can_download: bool = Field(default=False, validation_alias=AliasChoices("can_download", "canDownload"))
+    error_message: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("error_message", "errorMessage"),
+    )
     details: dict[str, Any] | None = None
 
     @field_validator("notes")
@@ -115,6 +127,11 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
                 path=item.file_path,
                 course_path=item.course_path,
                 status=item.status,
+                can_access=item.can_access,
+                access_status=item.access_status,
+                http_status=item.http_status,
+                can_download=item.can_download,
+                error_message=item.error_message,
                 notes=item.notes,
                 review_state=ReviewState.IN_REVIEW,
             )

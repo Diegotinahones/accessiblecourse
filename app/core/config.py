@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     max_upload_mb: int = 200
     max_extracted_files: int = 2000
     max_extracted_mb: int = 1024
+    offline_excluded_extensions: list[str] = Field(
+        default_factory=lambda: [".xml", ".xsd", ".dtd", ".qti", ".imsmanifest"]
+    )
     log_level: str = "INFO"
     log_json: bool = False
     report_brand_name: str = "AccessibleCourse"
@@ -39,8 +42,6 @@ class Settings(BaseSettings):
     canvas_token: str | None = None
     canvas_per_page: int = 100
     canvas_timeout_seconds: float = 20.0
-    url_check_timeout_seconds: float = 5.0
-    url_check_max_urls: int = 200
     online_rate_limit_per_minute: int = 20
     url_check_timeout_seconds: float = 8.0
     url_check_max_urls: int = 250
@@ -55,6 +56,30 @@ class Settings(BaseSettings):
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
         raise ValueError("CORS_ORIGINS must be a comma-separated string or a list.")
+
+    @field_validator("offline_excluded_extensions", mode="before")
+    @classmethod
+    def validate_offline_excluded_extensions(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw_items = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, list):
+            raw_items = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raise ValueError("OFFLINE_EXCLUDED_EXTENSIONS must be a comma-separated string or a list.")
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            extension = item.lower()
+            if not extension.startswith("."):
+                extension = f".{extension}"
+            if extension in seen:
+                continue
+            normalized.append(extension)
+            seen.add(extension)
+        return normalized
 
     @property
     def max_upload_bytes(self) -> int:

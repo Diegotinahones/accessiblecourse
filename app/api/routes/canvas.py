@@ -4,6 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, status
+from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from app.api.deps import get_engine, get_rate_limiter, get_session, get_settings
@@ -13,6 +14,7 @@ from app.core.rate_limit import MemoryRateLimiter, get_client_ip
 from app.schemas import JobCreatedResponse, OnlineJobCreateRequest
 from app.services.canvas_api import CanvasAPIClient, CanvasAPIError
 from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContext
+from app.services.canvas_inventory import build_canvas_inventory
 from app.services.jobs import create_online_job_record, process_online_job
 from app.services.url_check import URLCheckService
 
@@ -112,6 +114,119 @@ def create_canvas_job(
         _build_url_checker,
     )
     return response
+
+
+@router.get("/courses/{course_id}/access-summary")
+def get_canvas_course_access_summary(
+    course_id: str,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    rate_limiter: MemoryRateLimiter = Depends(get_rate_limiter),
+) -> dict[str, Any]:
+    rate_limiter.hit(
+        bucket="canvas:courses:access-summary",
+        key=get_client_ip(request),
+        limit=settings.online_rate_limit_per_minute,
+    )
+    credentials = _canvas_credentials_from_settings(settings)
+    client = _build_canvas_client(credentials, settings)
+    url_checker = _build_url_checker(settings)
+
+    course = client.get_course(course_id)
+    modules = client.list_modules(course.id)
+    if not modules:
+        raise AppError(
+            code="canvas_no_modules",
+            message="El curso no tiene modulos visibles para comprobar los recursos online.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+    inventory = build_canvas_inventory(
+        client,
+        course_id=course.id,
+        modules=modules,
+        url_checker=url_checker,
+        credentials=credentials,
+    )
+
+    return {
+        "courseId": course.id,
+        "courseName": course.name,
+        "total": len(inventory.resources),
+        "accessible": inventory.accessible,
+        "downloadable": inventory.downloadable,
+        "byStatus": inventory.by_status,
+        "brokenLinks": inventory.broken_links,
+        "modules": inventory.modules,
+    }
+
+
+@router.get("/courses/{course_id}/resources/{resource_id}/download")
+def download_canvas_course_resource(
+    course_id: str,
+    resource_id: str,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    rate_limiter: MemoryRateLimiter = Depends(get_rate_limiter),
+):
+    rate_limiter.hit(
+        bucket="canvas:courses:resource-download",
+        key=get_client_ip(request),
+        limit=settings.online_rate_limit_per_minute,
+    )
+    credentials = _canvas_credentials_from_settings(settings)
+    client = _build_canvas_client(credentials, settings)
+    modules = client.list_modules(course_id)
+    if not modules:
+        raise AppError(
+            code="canvas_no_modules",
+            message="El curso no tiene modulos visibles para localizar el recurso.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+    inventory = build_canvas_inventory(
+        client,
+        course_id=course_id,
+        modules=modules,
+        url_checker=None,
+        credentials=credentials,
+    )
+    resource = next((item for item in inventory.resources if str(item.get("id")) == resource_id), None)
+    if resource is None:
+        raise AppError(
+            code="resource_not_found",
+            message="No hemos encontrado ese recurso en Canvas.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    download_url = resource.get("downloadUrl")
+    if not isinstance(download_url, str) or not download_url:
+        raise AppError(
+            code="resource_not_downloadable",
+            message="Este recurso no tiene un fichero descargable asociado en Canvas.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+    filename = None
+    details = resource.get("details")
+    if isinstance(details, dict):
+        raw_filename = details.get("filename") or details.get("displayName")
+        if isinstance(raw_filename, str) and raw_filename.strip():
+            filename = raw_filename.strip()
+    if not filename:
+        filename = str(resource.get("title") or "canvas-resource")
+
+    handle = client.stream_download(download_url, filename=filename)
+    response_headers: dict[str, str] = {}
+    if handle.content_length is not None:
+        response_headers["Content-Length"] = str(handle.content_length)
+    response_headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+    return StreamingResponse(
+        handle.iter_bytes(),
+        media_type=handle.content_type or "application/octet-stream",
+        headers=response_headers,
+    )
 
 
 def _raise_canvas_error(exc: CanvasAPIError) -> None:

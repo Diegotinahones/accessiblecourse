@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from app.services.canvas_client import CanvasCourse, CanvasFile, CanvasModule, CanvasModuleItem
 from app.services.url_check import UrlCheckResult
 
@@ -107,6 +109,34 @@ class StubCanvasClient:
             preview_url=None,
         )
 
+    def get_page(self, course_id: str, page_url: str) -> dict[str, str]:
+        return {
+            "url": f"https://canvas.example.edu/api/v1/courses/{course_id}/pages/{page_url}",
+            "updated_at": "2026-04-30T09:30:00Z",
+        }
+
+    def stream_download(self, url: str, *, filename: str | None = None):
+        return StubDownloadHandle(
+            payload=b"%PDF-1.4 test canvas pdf",
+            filename=filename or "guia-docente.pdf",
+            content_type="application/pdf",
+        )
+
+
+@dataclass
+class StubDownloadHandle:
+    payload: bytes
+    filename: str
+    content_type: str
+    content_length: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.content_length is None:
+            self.content_length = len(self.payload)
+
+    def iter_bytes(self):
+        yield self.payload
+
 
 class StubUrlChecker:
     def check(self, resources, *, credentials):
@@ -128,6 +158,37 @@ class StubUrlChecker:
                     status_code=200 if resource.get("url") else None,
                 )
         return results
+
+    def check_url(self, url: str, *, credentials=None):
+        if url == "https://broken.example.com/video":
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=True,
+                reason="404_not_found",
+                status_code=404,
+                url_status="404",
+                error_message="La URL devolvió 404.",
+            )
+        if url == "https://canvas.example.edu/files/1/download":
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                status_code=200,
+                url_status="200",
+                final_url=url,
+                content_type="application/pdf",
+                content_disposition='attachment; filename="guia-docente.pdf"',
+            )
+        return UrlCheckResult(
+            url=url,
+            checked=True,
+            broken_link=False,
+            status_code=200,
+            url_status="200",
+            final_url=url,
+        )
 
 
 def test_online_courses_and_job_flow(client, monkeypatch) -> None:
@@ -167,10 +228,18 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     assert pdf_resource["coursePath"] == "Modulo 1 > Recursos principales"
     assert pdf_resource["localPath"] == "course files/modulo-1/guia-docente.pdf"
     assert pdf_resource["type"] == "PDF"
+    assert pdf_resource["canAccess"] is True
+    assert pdf_resource["canDownload"] is True
+    assert pdf_resource["accessStatus"] == "OK"
 
     broken_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Video externo")
     assert broken_resource["status"] == "ERROR"
     assert "broken_link" in broken_resource["notes"]
+    assert broken_resource["accessStatus"] == "NOT_FOUND"
+
+    page_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Bienvenida")
+    assert page_resource["canAccess"] is True
+    assert page_resource["canDownload"] is False
 
     detail_response = client.get(f"/api/jobs/{job_id}/resources/{pdf_resource['id']}")
     assert detail_response.status_code == 200, detail_response.text

@@ -98,6 +98,17 @@ class StubCanvasClient:
         ]
 
     def get_file(self, course_id: str, file_id: str) -> CanvasFile:
+        if file_id == "99":
+            return CanvasFile(
+                id=file_id,
+                display_name="Plantilla accesible.docx",
+                filename="plantilla-accesible.docx",
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                folder_full_name="course files/modulo-2",
+                url="https://canvas.example.edu/files/99/download",
+                html_url="https://canvas.example.edu/courses/77/files/99",
+                preview_url=None,
+            )
         return CanvasFile(
             id=file_id,
             display_name="Guia docente.pdf",
@@ -110,10 +121,24 @@ class StubCanvasClient:
         )
 
     def get_page(self, course_id: str, page_url: str) -> dict[str, str]:
+        if page_url == "rubrica":
+            return {
+                "url": f"https://canvas.example.edu/api/v1/courses/{course_id}/pages/{page_url}",
+                "updated_at": "2026-04-30T09:45:00Z",
+                "body": '<p><a href="/courses/77/files/99/download">Plantilla duplicada</a></p>',
+            }
         return {
             "url": f"https://canvas.example.edu/api/v1/courses/{course_id}/pages/{page_url}",
             "updated_at": "2026-04-30T09:30:00Z",
+            "body": """
+                <p><a href="/courses/77/files/99/download">Plantilla accesible</a></p>
+                <p><a href="/courses/77/pages/rubrica">Rubrica de evaluacion</a></p>
+                <p><a href="/courses/77/files/metadata.xml">Metadata XML</a></p>
+            """,
         }
+
+    def get_text(self, url: str):
+        raise AssertionError(f"Unexpected HTML request: {url}")
 
     def stream_download(self, url: str, *, filename: str | None = None):
         return StubDownloadHandle(
@@ -181,6 +206,17 @@ class StubUrlChecker:
                 content_type="application/pdf",
                 content_disposition='attachment; filename="guia-docente.pdf"',
             )
+        if url == "https://canvas.example.edu/files/99/download":
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                status_code=200,
+                url_status="200",
+                final_url=url,
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                content_disposition='attachment; filename="plantilla-accesible.docx"',
+            )
         return UrlCheckResult(
             url=url,
             checked=True,
@@ -188,6 +224,40 @@ class StubUrlChecker:
             status_code=200,
             url_status="200",
             final_url=url,
+        )
+
+    def check_url_no_redirects(self, url: str, *, credentials=None):
+        if url == "https://canvas.example.edu/files/99/download":
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                reason="redirect",
+                status_code=302,
+                url_status="302",
+                final_url=url,
+                redirected=True,
+                redirect_location="https://canvas-cdn.example.edu/files/99",
+            )
+        if url == "https://canvas.example.edu/files/1/download":
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                status_code=200,
+                url_status="200",
+                final_url=url,
+                content_type="application/pdf",
+                content_disposition='attachment; filename="guia-docente.pdf"',
+            )
+        return UrlCheckResult(
+            url=url,
+            checked=True,
+            broken_link=False,
+            status_code=200,
+            url_status="200",
+            final_url=url,
+            content_type="text/html",
         )
 
 
@@ -222,7 +292,7 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
     resources_payload = resources_response.json()
-    assert len(resources_payload["resources"]) == 3
+    assert len(resources_payload["resources"]) == 5
 
     pdf_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Guia docente.pdf")
     assert pdf_resource["coursePath"] == "Modulo 1 > Recursos principales"
@@ -240,6 +310,13 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     page_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Bienvenida")
     assert page_resource["canAccess"] is True
     assert page_resource["canDownload"] is False
+    assert page_resource["discoveredChildrenCount"] == 2
+
+    discovered_file = next(resource for resource in resources_payload["resources"] if resource["title"] == "Plantilla accesible.docx")
+    assert discovered_file["canAccess"] is True
+    assert discovered_file["canDownload"] is True
+    assert discovered_file["downloadStatusCode"] == 302
+    assert discovered_file["parentResourceId"] == page_resource["id"]
 
     detail_response = client.get(f"/api/jobs/{job_id}/resources/{pdf_resource['id']}")
     assert detail_response.status_code == 200, detail_response.text
@@ -259,4 +336,4 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
 
     report_response = client.post(f"/api/jobs/{job_id}/report")
     assert report_response.status_code == 200, report_response.text
-    assert report_response.json()["stats"]["resources"] == 3
+    assert report_response.json()["stats"]["resources"] == 5

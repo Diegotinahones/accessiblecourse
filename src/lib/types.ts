@@ -102,6 +102,15 @@ export interface ResourceListItem {
   urlStatus: string | null;
   finalUrl: string | null;
   checkedAt: string | null;
+  canAccess: boolean;
+  accessStatus: 'OK' | 'NOT_FOUND' | 'FORBIDDEN' | 'TIMEOUT' | 'ERROR';
+  httpStatus: number | null;
+  accessStatusCode: number | null;
+  canDownload: boolean;
+  downloadStatusCode: number | null;
+  discoveredChildrenCount: number;
+  parentResourceId: string | null;
+  errorMessage: string | null;
   notes: string | null;
   reviewState: ReviewState;
   failCount: number;

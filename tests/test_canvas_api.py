@@ -137,7 +137,7 @@ def test_canvas_job_uses_server_side_token(client, monkeypatch) -> None:
 
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
-    assert len(resources_response.json()["resources"]) == 3
+    assert len(resources_response.json()["resources"]) == 5
 
 
 def test_canvas_access_summary_groups_resources_by_module(client, monkeypatch) -> None:
@@ -158,13 +158,15 @@ def test_canvas_access_summary_groups_resources_by_module(client, monkeypatch) -
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["courseId"] == "77"
-    assert payload["total"] == 3
-    assert payload["accessible"] == 2
-    assert payload["downloadable"] == 1
-    assert payload["byStatus"]["OK"] == 2
+    assert payload["total"] == 5
+    assert payload["accessible"] == 4
+    assert payload["downloadable"] == 2
+    assert payload["downloadableAccessible"] == 2
+    assert payload["byStatus"]["OK"] == 4
     assert payload["byStatus"]["NOT_FOUND"] == 1
+    assert payload["deepScan"]["scannedPages"] == 2
     assert len(payload["modules"]) == 2
-    assert payload["modules"][0]["moduleName"] == "Modulo 1"
+    assert payload["modules"][0]["moduleName"] == "Modulo 1 > Recursos principales"
     assert payload["modules"][0]["resources"][0]["title"] == "Guia docente.pdf"
 
 

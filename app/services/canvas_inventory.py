@@ -54,6 +54,7 @@ def build_canvas_inventory(
     modules: list[CanvasModule],
     url_checker: URLCheckService | None = None,
     credentials: CanvasCredentials | None = None,
+    verify_access: bool = True,
 ) -> CanvasInventoryBuild:
     file_cache: dict[str, CanvasFile] = {}
     resources: list[dict[str, Any]] = []
@@ -80,6 +81,7 @@ def build_canvas_inventory(
                 file_cache=file_cache,
                 url_checker=url_checker,
                 credentials=credentials,
+                verify_access=verify_access,
             )
             if resource is None:
                 continue
@@ -126,6 +128,7 @@ def _build_resource(
     file_cache: dict[str, CanvasFile],
     url_checker: URLCheckService | None,
     credentials: CanvasCredentials | None,
+    verify_access: bool,
 ) -> dict[str, Any] | None:
     if item.type == "File":
         return _build_file_resource(
@@ -137,6 +140,7 @@ def _build_resource(
             file_cache=file_cache,
             url_checker=url_checker,
             credentials=credentials,
+            verify_access=verify_access,
         )
     return _build_non_file_resource(
         client,
@@ -146,6 +150,7 @@ def _build_resource(
         item=item,
         url_checker=url_checker,
         credentials=credentials,
+        verify_access=verify_access,
     )
 
 
@@ -159,6 +164,7 @@ def _build_file_resource(
     file_cache: dict[str, CanvasFile],
     url_checker: URLCheckService | None,
     credentials: CanvasCredentials | None,
+    verify_access: bool,
 ) -> dict[str, Any] | None:
     file: CanvasFile | None = None
     file_error: AppError | None = None
@@ -217,6 +223,9 @@ def _build_file_resource(
         )
         return resource
 
+    if not verify_access:
+        return resource
+
     if url_checker is None:
         _set_access_state(
             resource,
@@ -256,6 +265,7 @@ def _build_non_file_resource(
     item: CanvasModuleItem,
     url_checker: URLCheckService | None,
     credentials: CanvasCredentials | None,
+    verify_access: bool,
 ) -> dict[str, Any] | None:
     resolved_url = item.external_url or item.html_url
     if item.type == "ExternalTool":
@@ -285,6 +295,9 @@ def _build_non_file_resource(
     details = dict(resource["details"])
     details["canvasType"] = item.type
     resource["details"] = details
+
+    if not verify_access:
+        return resource
 
     if item.type == "ExternalTool":
         _set_access_state(
@@ -442,10 +455,21 @@ def _base_resource(
         "itemPath": item_path,
         "status": _default_status(resource_type, origin).value,
         "canAccess": False,
+        "can_access": False,
         "accessStatus": ACCESS_STATUS_ERROR,
+        "access_status": ACCESS_STATUS_ERROR,
         "httpStatus": None,
+        "http_status": None,
+        "accessStatusCode": None,
+        "access_status_code": None,
         "canDownload": False,
+        "can_download": False,
+        "downloadStatusCode": None,
+        "download_status_code": None,
+        "discoveredChildrenCount": 0,
+        "discovered_children_count": 0,
         "errorMessage": None,
+        "error_message": None,
         "notes": None,
         "details": {
             "canvasType": item.type,
@@ -634,8 +658,12 @@ def _set_access_state(
     resource["access_status"] = access_status
     resource["httpStatus"] = http_status
     resource["http_status"] = http_status
+    resource["accessStatusCode"] = http_status
+    resource["access_status_code"] = http_status
     resource["canDownload"] = can_download
     resource["can_download"] = can_download
+    resource["downloadStatusCode"] = http_status if can_download else None
+    resource["download_status_code"] = resource["downloadStatusCode"]
     resource["errorMessage"] = error_message
     resource["error_message"] = error_message
     details = dict(resource.get("details") or {})

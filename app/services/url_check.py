@@ -23,6 +23,8 @@ class UrlCheckResult:
     content_type: str | None = None
     content_disposition: str | None = None
     error_message: str | None = None
+    redirected: bool = False
+    redirect_location: str | None = None
 
 
 class URLCheckService:
@@ -68,6 +70,18 @@ class URLCheckService:
         return checked_results
 
     def check_url(self, url: str, *, credentials: CanvasCredentials | None = None) -> UrlCheckResult:
+        return self._check_url(url, credentials=credentials, follow_redirects=True)
+
+    def check_url_no_redirects(self, url: str, *, credentials: CanvasCredentials | None = None) -> UrlCheckResult:
+        return self._check_url(url, credentials=credentials, follow_redirects=False)
+
+    def _check_url(
+        self,
+        url: str,
+        *,
+        credentials: CanvasCredentials | None = None,
+        follow_redirects: bool,
+    ) -> UrlCheckResult:
         headers: dict[str, str] = {}
         if credentials and self._shares_canvas_host(url, credentials.base_url):
             headers.update(credentials.auth_headers())
@@ -75,7 +89,7 @@ class URLCheckService:
         with httpx.Client(
             transport=self.transport,
             timeout=httpx.Timeout(self.timeout_seconds),
-            follow_redirects=True,
+            follow_redirects=follow_redirects,
         ) as client:
             response, method_error = self._request_with_head_fallback(client, url, headers=headers)
             checked_at = datetime.now(timezone.utc)
@@ -106,7 +120,25 @@ class URLCheckService:
         url_status = str(status_code)
         content_type = response.headers.get("content-type")
         content_disposition = response.headers.get("content-disposition")
+        redirect_location = response.headers.get("location")
+        redirected = 300 <= status_code < 400
         shared_canvas_host = credentials is not None and self._shares_canvas_host(url, credentials.base_url)
+
+        if redirected:
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                reason="redirect",
+                status_code=status_code,
+                url_status=url_status,
+                final_url=final_url,
+                checked_at=checked_at,
+                content_type=content_type,
+                content_disposition=content_disposition,
+                redirected=True,
+                redirect_location=redirect_location,
+            )
 
         if status_code in {401, 403} and shared_canvas_host:
             return UrlCheckResult(
@@ -120,6 +152,8 @@ class URLCheckService:
                 checked_at=checked_at,
                 content_type=content_type,
                 content_disposition=content_disposition,
+                redirected=redirected,
+                redirect_location=redirect_location,
             )
 
         if status_code in {401, 403}:
@@ -135,6 +169,8 @@ class URLCheckService:
                 content_type=content_type,
                 content_disposition=content_disposition,
                 error_message=f"La URL devolvió {status_code}.",
+                redirected=redirected,
+                redirect_location=redirect_location,
             )
 
         if status_code == 404:
@@ -150,6 +186,8 @@ class URLCheckService:
                 content_type=content_type,
                 content_disposition=content_disposition,
                 error_message="La URL devolvió 404.",
+                redirected=redirected,
+                redirect_location=redirect_location,
             )
 
         return UrlCheckResult(
@@ -164,6 +202,8 @@ class URLCheckService:
             content_type=content_type,
             content_disposition=content_disposition,
             error_message=f"La URL devolvió {status_code}." if status_code >= 400 else None,
+            redirected=redirected,
+            redirect_location=redirect_location,
         )
 
     @staticmethod

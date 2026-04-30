@@ -121,7 +121,7 @@ def _internal_access_payload(resource: dict[str, Any], extracted_dir: Path) -> d
     return _build_access_payload(
         can_access=True,
         access_status="OK",
-        http_status=None,
+        http_status=200,
         can_download=True,
         error_message=None,
     )
@@ -234,8 +234,12 @@ def _merge_access_payload(resource: dict[str, Any], access_payload: dict[str, An
     resource["access_status"] = access_payload["accessStatus"]
     resource["httpStatus"] = access_payload["httpStatus"]
     resource["http_status"] = access_payload["httpStatus"]
+    resource["accessStatusCode"] = access_payload["httpStatus"]
+    resource["access_status_code"] = access_payload["httpStatus"]
     resource["canDownload"] = access_payload["canDownload"]
     resource["can_download"] = access_payload["canDownload"]
+    resource["downloadStatusCode"] = access_payload["httpStatus"] if access_payload["canDownload"] else None
+    resource["download_status_code"] = resource["downloadStatusCode"]
     resource["errorMessage"] = access_payload["errorMessage"]
     resource["error_message"] = access_payload["errorMessage"]
 

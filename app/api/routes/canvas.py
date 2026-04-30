@@ -15,6 +15,7 @@ from app.schemas import JobCreatedResponse, OnlineJobCreateRequest
 from app.services.canvas_api import CanvasAPIClient, CanvasAPIError
 from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContext
 from app.services.canvas_inventory import build_canvas_inventory
+from app.services.access_analysis import OnlineAccessAdapter, analyze_access
 from app.services.jobs import create_online_job_record, process_online_job
 from app.services.url_check import URLCheckService
 
@@ -145,19 +146,46 @@ def get_canvas_course_access_summary(
         client,
         course_id=course.id,
         modules=modules,
-        url_checker=url_checker,
+        url_checker=None,
         credentials=credentials,
+        verify_access=False,
     )
+    analysis = analyze_access(
+        job_id=f"canvas-course-{course.id}",
+        resources=inventory.resources,
+        adapter=OnlineAccessAdapter(
+            client=client,
+            credentials=credentials,
+            course_id=course.id,
+            url_checker=url_checker,
+            max_depth=settings.online_deep_scan_max_depth if settings.online_deep_scan_enabled else 0,
+            max_pages=settings.online_deep_scan_max_pages,
+        ),
+    )
+    summary = analysis.summary
 
     return {
         "courseId": course.id,
         "courseName": course.name,
-        "total": len(inventory.resources),
-        "accessible": inventory.accessible,
-        "downloadable": inventory.downloadable,
-        "byStatus": inventory.by_status,
-        "brokenLinks": inventory.broken_links,
-        "modules": inventory.modules,
+        "total": summary["total"],
+        "accessible": summary["accessible"],
+        "downloadable": summary["downloadable"],
+        "downloadableAccessible": summary["downloadableAccessible"],
+        "byStatus": summary["byStatus"],
+        "deepScan": summary.get("deepScan"),
+        "modules": [
+            {
+                "moduleId": group["modulePath"],
+                "moduleName": group["modulePath"],
+                "total": group["total"],
+                "accessible": group["accessible"],
+                "downloadable": group["downloadable"],
+                "downloadableAccessible": group["downloadableAccessible"],
+                "byStatus": group["byStatus"],
+                "resources": group["resources"],
+            }
+            for group in summary["groups"]
+        ],
     }
 
 
@@ -190,8 +218,21 @@ def download_canvas_course_resource(
         modules=modules,
         url_checker=None,
         credentials=credentials,
+        verify_access=False,
     )
-    resource = next((item for item in inventory.resources if str(item.get("id")) == resource_id), None)
+    analysis = analyze_access(
+        job_id=f"canvas-course-{course_id}",
+        resources=inventory.resources,
+        adapter=OnlineAccessAdapter(
+            client=client,
+            credentials=credentials,
+            course_id=course_id,
+            url_checker=_build_url_checker(settings),
+            max_depth=settings.online_deep_scan_max_depth if settings.online_deep_scan_enabled else 0,
+            max_pages=settings.online_deep_scan_max_pages,
+        ),
+    )
+    resource = next((item for item in analysis.resources if str(item.get("id")) == resource_id), None)
     if resource is None:
         raise AppError(
             code="resource_not_found",

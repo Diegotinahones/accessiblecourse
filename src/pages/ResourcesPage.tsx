@@ -15,7 +15,7 @@ import {
   rememberAppMode,
 } from '../lib/utils';
 
-type AccessStatus = 'OK' | '404' | '403' | 'timeout' | 'error';
+type BadgeTone = 'ok' | 'warning' | 'danger' | 'neutral';
 
 interface ResourceGroup {
   id: string;
@@ -23,50 +23,45 @@ interface ResourceGroup {
   resources: ResourceListItem[];
 }
 
-function getAccessStatus(resource: ResourceListItem): AccessStatus {
-  const normalizedStatus = resource.urlStatus?.trim().toLowerCase();
-
-  if (normalizedStatus === '404') {
-    return '404';
-  }
-
-  if (normalizedStatus === '403') {
-    return '403';
-  }
-
-  if (normalizedStatus === 'timeout') {
-    return 'timeout';
-  }
-
-  if (normalizedStatus && normalizedStatus !== '200') {
-    return 'error';
-  }
-
-  if (resource.status === 'ERROR') {
-    return 'error';
-  }
-
-  return 'OK';
+function getAccessLabel(resource: ResourceListItem) {
+  return resource.canAccess && resource.accessStatus === 'OK' ? 'OK' : 'NO ACCEDE';
 }
 
-function getStatusClasses(status: AccessStatus) {
-  if (status === 'OK') {
+function getAccessTone(resource: ResourceListItem): BadgeTone {
+  if (resource.canAccess && resource.accessStatus === 'OK') {
+    return 'ok';
+  }
+  if (resource.accessStatus === 'FORBIDDEN' || resource.accessStatus === 'TIMEOUT') {
+    return 'warning';
+  }
+  return 'danger';
+}
+
+function getDownloadLabel(resource: ResourceListItem) {
+  return resource.canDownload ? 'DESCARGABLE' : 'NO DESCARGABLE';
+}
+
+function getDownloadTone(resource: ResourceListItem): BadgeTone {
+  if (resource.canDownload) {
+    return 'ok';
+  }
+  return resource.canAccess ? 'neutral' : 'warning';
+}
+
+function getStatusClasses(tone: BadgeTone) {
+  if (tone === 'ok') {
     return 'border-emerald-200 bg-emerald-50 text-[#166534]';
   }
 
-  if (status === '404') {
-    return 'border-rose-200 bg-rose-50 text-danger';
-  }
-
-  if (status === '403') {
+  if (tone === 'warning') {
     return 'border-amber-200 bg-amber-50 text-[#8a5a00]';
   }
 
-  if (status === 'timeout') {
+  if (tone === 'neutral') {
     return 'border-slate-200 bg-slate-100 text-slate-700';
   }
 
-  return 'border-slate-200 bg-slate-100 text-slate-700';
+  return 'border-rose-200 bg-rose-50 text-danger';
 }
 
 function getSectionLabel(resource: ResourceListItem) {
@@ -74,7 +69,7 @@ function getSectionLabel(resource: ResourceListItem) {
 }
 
 function isDownloadable(resource: ResourceListItem, mode: AppMode) {
-  return mode === 'offline' && Boolean(resource.filePath || resource.localPath || resource.path);
+  return mode === 'offline' && resource.canDownload && Boolean(resource.filePath || resource.localPath || resource.path);
 }
 
 function buildGroupsByPath(resources: ResourceListItem[]): ResourceGroup[] {
@@ -253,12 +248,16 @@ export function ResourcesPage() {
     return buildGroupsByPath(resources);
   }, [resources, structure]);
   const accessedCount = useMemo(
-    () => resources.filter((resource) => getAccessStatus(resource) === 'OK').length,
+    () => resources.filter((resource) => resource.canAccess).length,
     [resources],
   );
   const downloadableCount = useMemo(
-    () => resources.filter((resource) => isDownloadable(resource, appMode)).length,
-    [appMode, resources],
+    () => resources.filter((resource) => resource.canDownload).length,
+    [resources],
+  );
+  const accessibleDownloadableCount = useMemo(
+    () => resources.filter((resource) => resource.canAccess && resource.canDownload).length,
+    [resources],
   );
 
   const handleRetryAnalysis = async () => {
@@ -321,7 +320,9 @@ export function ResourcesPage() {
             <p className="text-base text-ink">
               Se ha accedido a {accessedCount} de {resources.length} recursos.
             </p>
-            <p className="text-base text-ink">Descargables: {downloadableCount}</p>
+            <p className="text-base text-ink">
+              Descargables: {downloadableCount} ({accessibleDownloadableCount} accesibles).
+            </p>
           </section>
 
           <section className="space-y-4">
@@ -360,7 +361,8 @@ export function ResourcesPage() {
                     >
                       <ul className="divide-y divide-line">
                         {group.resources.map((resource) => {
-                          const accessStatus = getAccessStatus(resource);
+                          const accessLabel = getAccessLabel(resource);
+                          const downloadLabel = getDownloadLabel(resource);
                           const downloadable = jobId
                             ? isDownloadable(resource, appMode)
                             : false;
@@ -376,10 +378,16 @@ export function ResourcesPage() {
                                 </p>
                                 <div className="flex flex-wrap gap-2 text-sm">
                                   <span
-                                    aria-label={`Estado ${accessStatus}`}
-                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(accessStatus)}`}
+                                    aria-label={`Acceso ${accessLabel}`}
+                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getAccessTone(resource))}`}
                                   >
-                                    {accessStatus}
+                                    {accessLabel}
+                                  </span>
+                                  <span
+                                    aria-label={`Descarga ${downloadLabel}`}
+                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getDownloadTone(resource))}`}
+                                  >
+                                    {downloadLabel}
                                   </span>
                                   <span
                                     aria-label={`Tipo ${getReviewResourceTypeLabel(resource.type)}`}

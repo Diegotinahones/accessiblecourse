@@ -125,6 +125,59 @@ def build_imscc_with_unmapped_resource() -> bytes:
     return buffer.getvalue()
 
 
+def build_imscc_with_offline_deep_scan() -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "imsmanifest.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+  <organizations>
+    <organization identifier="org-1">
+      <title>Curso con deep scan</title>
+      <item identifier="module-1">
+        <title>Unidad 1</title>
+        <item identifier="item-1" identifierref="res-html">
+          <title>Página principal</title>
+        </item>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-html" type="webcontent" href="course/module/page.html">
+      <file href="course/module/page.html" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        )
+        archive.writestr(
+            "course/module/page.html",
+            """
+            <html><body>
+              <a href="../downloads/worksheet.docx">Ficha descargable</a>
+              <a href="../downloads/worksheet.docx#dup">Ficha descargable</a>
+              <img src="../images/chart.png" alt="Diagrama del curso" />
+              <a href="nested/page2.html">Más materiales</a>
+              <a href="https://example.com/resource">Recurso web</a>
+              <iframe src="https://www.youtube.com/watch?v=demo123"></iframe>
+            </body></html>
+            """,
+        )
+        archive.writestr(
+            "course/module/nested/page2.html",
+            """
+            <html><body>
+              <a href="../../downloads/slides.pptx">Presentación final</a>
+            </body></html>
+            """,
+        )
+        archive.writestr("course/downloads/worksheet.docx", b"DOCX")
+        archive.writestr("course/downloads/slides.pptx", b"PPTX")
+        archive.writestr("course/images/chart.png", b"PNG")
+    return buffer.getvalue()
+
+
 def test_bootstrap_inventory_and_persist_checklist(client, test_settings) -> None:
     job_id = "job-thread4-bootstrap"
     write_inventory(
@@ -346,8 +399,10 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert pdf_resource["sourceUrl"] is None
     assert pdf_resource["canAccess"] is True
     assert pdf_resource["accessStatus"] == "OK"
-    assert pdf_resource["httpStatus"] is None
+    assert pdf_resource["httpStatus"] == 200
+    assert pdf_resource["accessStatusCode"] == 200
     assert pdf_resource["canDownload"] is True
+    assert pdf_resource["downloadStatusCode"] == 200
     assert pdf_resource["errorMessage"] is None
 
     assert link_resource["modulePath"] == "Tema 1"
@@ -370,18 +425,21 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
 
     access_summary_response = client.get(f"/api/jobs/{job_id}/access-summary")
     assert access_summary_response.status_code == 200, access_summary_response.text
-    assert access_summary_response.json() == {
-        "total": 2,
-        "accessible": 1,
-        "downloadable": 1,
-        "byStatus": {
-            "OK": 1,
-            "NOT_FOUND": 1,
-            "FORBIDDEN": 0,
-            "TIMEOUT": 0,
-            "ERROR": 0,
-        },
+    access_summary = access_summary_response.json()
+    assert access_summary["jobId"] == job_id
+    assert access_summary["status"] == "done"
+    assert access_summary["progress"] == 100
+    assert access_summary["total"] == 2
+    assert access_summary["accessible"] == 1
+    assert access_summary["downloadable"] == 1
+    assert access_summary["byStatus"] == {
+        "OK": 1,
+        "NOT_FOUND": 1,
+        "FORBIDDEN": 0,
+        "TIMEOUT": 0,
+        "ERROR": 0,
     }
+    assert access_summary["groups"][0]["modulePath"] == "Tema 1"
 
     download_pdf_response = client.get(f"/api/jobs/{job_id}/resources/res-pdf/download")
     assert download_pdf_response.status_code == 200, download_pdf_response.text
@@ -418,6 +476,81 @@ def test_offline_inventory_returns_unmapped_resources_without_technical_grouping
     assert unmapped_resource["modulePath"] is None
     assert unmapped_resource["coursePath"] is None
     assert unmapped_resource["itemPath"] is None
+
+
+def test_offline_deep_scan_discovers_nested_local_and_external_resources(client, monkeypatch) -> None:
+    class StubURLChecker:
+        def check_url(self, url: str):
+            checked_at = datetime(2026, 4, 30, 9, 0, tzinfo=timezone.utc)
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                status_code=200,
+                url_status="200",
+                final_url=url,
+                checked_at=checked_at,
+                content_type="text/html; charset=utf-8",
+            )
+
+    monkeypatch.setattr("app.services.jobs.build_url_checker", lambda settings: StubURLChecker())
+
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_imscc_with_offline_deep_scan(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    resources = resources_response.json()["resources"]
+    assert len(resources) == 6
+
+    by_source = {
+        resource.get("filePath") or resource.get("sourceUrl") or resource["id"]: resource for resource in resources
+    }
+
+    worksheet = by_source["course/downloads/worksheet.docx"]
+    slides = by_source["course/downloads/slides.pptx"]
+    image = by_source["course/images/chart.png"]
+    web = by_source["https://example.com/resource"]
+    video = by_source["https://www.youtube.com/watch?v=demo123"]
+    html_page = next(resource for resource in resources if resource["id"] == "res-html")
+
+    assert worksheet["canAccess"] is True
+    assert worksheet["accessStatus"] == "OK"
+    assert worksheet["httpStatus"] == 200
+    assert worksheet["accessStatusCode"] == 200
+    assert worksheet["canDownload"] is True
+    assert worksheet["parentResourceId"] == "res-html"
+
+    assert slides["canAccess"] is True
+    assert slides["canDownload"] is True
+    assert image["type"] == "IMAGE"
+    assert image["canAccess"] is True
+    assert image["canDownload"] is True
+    assert web["type"] == "WEB"
+    assert web["canAccess"] is True
+    assert web["canDownload"] is False
+    assert video["type"] == "VIDEO"
+    assert video["canAccess"] is True
+    assert video["canDownload"] is False
+    assert html_page["discoveredChildrenCount"] == 4
+
+    summary_response = client.get(f"/api/jobs/{job_id}/summary")
+    assert summary_response.status_code == 200, summary_response.text
+    summary_payload = summary_response.json()
+    assert summary_payload["totalResources"] == 6
+    assert summary_payload["accessibleResources"] == 6
+    assert summary_payload["downloadableResources"] == 4
+
+    access_summary_response = client.get(f"/api/jobs/{job_id}/access-summary")
+    assert access_summary_response.status_code == 200, access_summary_response.text
+    access_summary = access_summary_response.json()
+    assert access_summary["accessible"] == 6
+    assert access_summary["downloadable"] == 4
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

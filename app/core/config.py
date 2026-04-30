@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     canvas_per_page: int = 100
     canvas_timeout_seconds: float = 20.0
     online_rate_limit_per_minute: int = 20
+    online_deep_scan_enabled: bool = True
+    online_deep_scan_max_depth: int = 2
+    online_deep_scan_max_pages: int = 50
     url_check_timeout_seconds: float = 8.0
     url_check_max_urls: int = 250
 

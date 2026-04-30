@@ -185,7 +185,11 @@ class ResourceListItemRead(StrictModel):
     canAccess: bool = False
     accessStatus: ReviewResourceAccessStatus = ReviewResourceAccessStatus.ERROR
     httpStatus: int | None = None
+    accessStatusCode: int | None = None
     canDownload: bool = False
+    downloadStatusCode: int | None = None
+    discoveredChildrenCount: int = 0
+    parentResourceId: str | None = None
     errorMessage: str | None = None
     notes: str | None = None
     reviewState: ReviewStateEnum
@@ -193,11 +197,40 @@ class ResourceListItemRead(StrictModel):
     updatedAt: datetime
 
 
-class AccessSummaryRead(StrictModel):
+class AccessSummaryResourceRead(StrictModel):
+    id: str
+    title: str
+    type: str
+    accessStatus: ReviewResourceAccessStatus
+    canAccess: bool
+    canDownload: bool
+    accessStatusCode: int | None = None
+    downloadStatusCode: int | None = None
+    badge: dict[str, str]
+
+
+class AccessSummaryGroupRead(StrictModel):
+    modulePath: str
     total: int
     accessible: int
     downloadable: int
+    downloadableAccessible: int = 0
     byStatus: dict[str, int]
+    resources: list[AccessSummaryResourceRead] = Field(default_factory=list)
+
+
+class AccessSummaryRead(StrictModel):
+    jobId: str
+    status: str
+    progress: int
+    total: int
+    accessible: int
+    downloadable: int
+    downloadableAccessible: int = 0
+    byStatus: dict[str, int]
+    groups: list[AccessSummaryGroupRead] = Field(default_factory=list)
+    discovered: int = 0
+    deepScan: dict[str, Any] | None = None
 
 
 class ResourceListPayload(StrictModel):
@@ -303,6 +336,8 @@ class ReviewSummaryPayload(StrictModel):
     jobId: str
     totalResources: int
     totalFailItems: int
+    accessibleResources: int = 0
+    downloadableResources: int = 0
     lastUpdated: datetime
     reviewSession: ReviewSessionRead
     resources: list[ReviewFailResourceRead]

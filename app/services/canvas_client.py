@@ -118,6 +118,14 @@ class CanvasDownloadHandle:
         self.client.close()
 
 
+@dataclass(slots=True, frozen=True)
+class CanvasTextResponse:
+    text: str
+    status_code: int
+    content_type: str | None
+    url: str
+
+
 @dataclass(slots=True)
 class OnlineJobContext:
     credentials: CanvasCredentials
@@ -137,6 +145,10 @@ class OnlineJobContextStore:
     def pop(self, job_id: str) -> OnlineJobContext | None:
         with self._lock:
             return self._items.pop(job_id, None)
+
+    def get(self, job_id: str) -> OnlineJobContext | None:
+        with self._lock:
+            return self._items.get(job_id)
 
     def delete(self, job_id: str) -> None:
         with self._lock:
@@ -314,6 +326,72 @@ class CanvasClient:
                 status_code=502,
             )
         return payload
+
+    def get_text(self, path_or_url: str, *, accept: str = "text/html") -> CanvasTextResponse:
+        url = path_or_url if path_or_url.startswith(("http://", "https://")) else self.credentials.build_url(path_or_url)
+        timeout = httpx.Timeout(self.timeout_seconds)
+        headers = {**self.credentials.auth_headers(), "Accept": accept}
+
+        with httpx.Client(
+            transport=self.transport,
+            timeout=timeout,
+            headers=headers,
+            follow_redirects=False,
+        ) as client:
+            try:
+                response = client.get(url)
+            except httpx.TimeoutException as exc:
+                raise AppError(
+                    code="canvas_timeout",
+                    message="Canvas no ha respondido a tiempo. Intentalo de nuevo.",
+                    status_code=504,
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise AppError(
+                    code="canvas_unreachable",
+                    message="No hemos podido conectar con Canvas usando la URL indicada.",
+                    status_code=502,
+                ) from exc
+
+        if 300 <= response.status_code < 400:
+            raise AppError(
+                code="canvas_redirect_required",
+                message="Canvas ha redirigido la peticion HTML antes de devolver contenido.",
+                status_code=response.status_code,
+                details={"location": response.headers.get("location")},
+            )
+        if response.status_code in {401, 403}:
+            raise AppError(
+                code="canvas_auth_failed",
+                message="Canvas ha rechazado el acceso al contenido HTML con el token configurado.",
+                status_code=response.status_code,
+            )
+        if response.status_code == 404:
+            raise AppError(
+                code="canvas_not_found",
+                message="No hemos encontrado el contenido HTML solicitado en Canvas.",
+                status_code=404,
+            )
+        if response.status_code == 429:
+            raise AppError(
+                code="canvas_rate_limited",
+                message="Canvas ha limitado temporalmente las peticiones. Intentalo de nuevo en unos segundos.",
+                status_code=429,
+            )
+        if response.status_code >= 400:
+            raise AppError(
+                code="canvas_request_failed",
+                message="Canvas ha rechazado la peticion HTML necesaria para profundizar el inventario.",
+                status_code=502,
+                details={"statusCode": response.status_code},
+            )
+
+        return CanvasTextResponse(
+            text=response.text,
+            status_code=response.status_code,
+            content_type=response.headers.get("content-type"),
+            url=str(response.url),
+        )
 
     def stream_download(self, url: str, *, filename: str | None = None) -> CanvasDownloadHandle:
         timeout = httpx.Timeout(self.timeout_seconds)

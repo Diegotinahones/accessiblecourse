@@ -29,13 +29,14 @@ from app.schemas import (
     JobStatusResponse,
     ResourceResponse,
 )
-from app.services.access_check import verify_offline_resource_access
-from app.services.canvas_client import CanvasClient, OnlineJobContextStore
+from app.services.access_analysis import OfflineAccessAdapter, OnlineAccessAdapter, analyze_access
+from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContextStore
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
 from app.services.course_structure import build_fallback_course_structure
 from app.services.imscc import build_resources_from_extracted
 from app.services.imscc_parser import IMSCCParser, ParserError
+from app.services.review_service import sync_job_inventory_from_payload
 from app.services.storage import (
     get_extracted_dir,
     get_job_dir,
@@ -205,6 +206,20 @@ def _write_review_inventory_payload(settings: Settings, job_id: str, inventory: 
     )
 
 
+def _persist_analyzed_inventory(
+    session: Session,
+    settings: Settings,
+    *,
+    job_id: str,
+    inventory: list[dict[str, Any]],
+    course_structure: dict[str, Any] | None,
+) -> None:
+    _write_review_inventory_payload(settings, job_id, inventory)
+    _write_course_structure_payload(settings, job_id, course_structure)
+    _persist_legacy_inventory(session, job_id, inventory)
+    sync_job_inventory_from_payload(session, job_id, inventory)
+
+
 def _write_course_structure_payload(settings: Settings, job_id: str, structure: dict[str, Any] | None) -> None:
     structure_path = get_job_dir(settings, job_id) / "course_structure.json"
     if structure is None:
@@ -216,6 +231,14 @@ def _write_course_structure_payload(settings: Settings, job_id: str, structure: 
         json.dumps(structure, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _load_course_structure_payload(settings: Settings, job_id: str) -> dict[str, Any] | None:
+    structure_path = get_job_dir(settings, job_id) / "course_structure.json"
+    if not structure_path.exists():
+        return None
+    payload = json.loads(structure_path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else None
 
 
 def _write_review_inventory(
@@ -366,6 +389,36 @@ def _build_manifest_review_inventory(
         normalized_inventory,
         course_structure,
     )
+
+
+def _merge_discovered_inventory(
+    inventory: list[dict[str, Any]],
+    discovered_inventory: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    discovered_by_parent: dict[str, list[dict[str, Any]]] = {}
+    unparented: list[dict[str, Any]] = []
+
+    for resource in discovered_inventory:
+        details = resource.get("details")
+        html_discovery = details.get("htmlDiscovery") if isinstance(details, dict) else None
+        parent_id = html_discovery.get("parentResourceId") if isinstance(html_discovery, dict) else None
+        if isinstance(parent_id, str) and parent_id:
+            discovered_by_parent.setdefault(parent_id, []).append(resource)
+        else:
+            unparented.append(resource)
+
+    merged: list[dict[str, Any]] = []
+    for resource in inventory:
+        merged.append(resource)
+        resource_id = resource.get("id")
+        if isinstance(resource_id, str) and resource_id in discovered_by_parent:
+            merged.extend(discovered_by_parent.pop(resource_id))
+
+    for remaining in discovered_by_parent.values():
+        unparented.extend(remaining)
+
+    merged.extend(unparented)
+    return merged
 
 
 def _build_offline_review_inventory(
@@ -820,14 +873,20 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 job,
                 current_step=4,
                 progress=80,
-                message="Verificando acceso y descarga de recursos.",
+                message="Ejecutando Access + Deep Scan.",
             )
-            url_checker = build_url_checker(settings)
-            access_summary = verify_offline_resource_access(
-                inventory,
-                extracted_dir=extracted_dir,
-                url_checker=url_checker,
+            access_analysis = analyze_access(
+                job_id=job_id,
+                resources=inventory,
+                adapter=OfflineAccessAdapter(
+                    settings=settings,
+                    job_id=job_id,
+                    url_checker=build_url_checker(settings),
+                ),
+                progress=95,
             )
+            inventory = access_analysis.resources
+            access_summary = access_analysis.summary
 
             _update_job_progress(
                 session,
@@ -835,13 +894,17 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 job,
                 current_step=5,
                 progress=95,
-                message="Guardando inventario verificado.",
+                message="Guardando inventario analizado.",
                 details=access_summary,
             )
 
-            _write_review_inventory_payload(settings, job_id, inventory)
-            _write_course_structure_payload(settings, job_id, course_structure)
-            _persist_legacy_inventory(session, job_id, inventory)
+            _persist_analyzed_inventory(
+                session,
+                settings,
+                job_id=job_id,
+                inventory=inventory,
+                course_structure=course_structure,
+            )
 
             _update_job(
                 session,
@@ -862,6 +925,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                     "resourceCount": len(inventory),
                     "accessibleCount": access_summary["accessible"],
                     "downloadableCount": access_summary["downloadable"],
+                    "discoveredCount": access_analysis.discovered_count,
                     "byStatus": access_summary["byStatus"],
                 },
             )
@@ -924,7 +988,7 @@ def process_online_job(
 ) -> None:
     with Session(engine) as session:
         job = get_job_or_404(session, job_id)
-        context = job_contexts.pop(job_id)
+        context = job_contexts.get(job_id)
         if context is None:
             _update_job(
                 session,
@@ -1008,8 +1072,9 @@ def process_online_job(
                 client,
                 course_id=course.id,
                 modules=modules,
-                url_checker=url_checker,
+                url_checker=None,
                 credentials=context.credentials,
+                verify_access=False,
             )
             _update_job_progress(
                 session,
@@ -1017,7 +1082,7 @@ def process_online_job(
                 job,
                 current_step=4,
                 progress=65,
-                message=f"Items leidos: {inventory_build.items_read}",
+                message=f"Inventario inicial construido: {inventory_build.items_read} items leidos.",
                 details={"itemsRead": inventory_build.items_read, "resourceCount": len(inventory_build.resources)},
             )
 
@@ -1027,23 +1092,41 @@ def process_online_job(
                 job,
                 current_step=5,
                 progress=82,
-                message="Verificacion de acceso y URLs completada.",
-                details={
-                    "checkedUrls": inventory_build.checked_urls,
-                    "accessible": inventory_build.accessible,
-                    "downloadable": inventory_build.downloadable,
-                    "brokenLinks": inventory_build.broken_links,
-                    "byStatus": inventory_build.by_status,
-                },
+                message="Ejecutando Access + Deep Scan.",
+            )
+            access_analysis = analyze_access(
+                job_id=job_id,
+                resources=inventory_build.resources,
+                adapter=OnlineAccessAdapter(
+                    client=client,
+                    credentials=context.credentials,
+                    course_id=course.id,
+                    url_checker=url_checker,
+                    max_depth=settings.online_deep_scan_max_depth if settings.online_deep_scan_enabled else 0,
+                    max_pages=settings.online_deep_scan_max_pages,
+                ),
+                progress=95,
+            )
+            inventory = access_analysis.resources
+            access_summary = access_analysis.summary
+
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=6,
+                progress=95,
+                message="Guardando inventario online analizado.",
+                details=access_summary,
             )
 
-            _write_review_inventory_payload(settings, job_id, inventory_build.resources)
-            _write_course_structure_payload(
+            _persist_analyzed_inventory(
+                session,
                 settings,
-                job_id,
-                build_fallback_course_structure(inventory_build.resources, title=course.name),
+                job_id=job_id,
+                inventory=inventory,
+                course_structure=build_fallback_course_structure(inventory, title=course.name),
             )
-            _persist_legacy_inventory(session, job_id, inventory_build.resources)
 
             _update_job(
                 session,
@@ -1063,10 +1146,11 @@ def process_online_job(
                 details={
                     "courseId": course.id,
                     "courseName": course.name,
-                    "resourceCount": len(inventory_build.resources),
-                    "brokenLinkCount": len(inventory_build.broken_links),
-                    "accessible": inventory_build.accessible,
-                    "downloadable": inventory_build.downloadable,
+                    "resourceCount": len(inventory),
+                    "accessible": access_summary["accessible"],
+                    "downloadable": access_summary["downloadable"],
+                    "discoveredCount": access_analysis.discovered_count,
+                    "byStatus": access_summary["byStatus"],
                 },
             )
             session.commit()
@@ -1116,6 +1200,222 @@ def process_online_job(
             )
             logger.exception("Unhandled online job processing error", extra={"event": "error", "job_id": job_id})
             session.commit()
+
+
+def prepare_access_analysis_retry(session: Session, settings: Settings, job_id: str) -> JobStatusResponse:
+    job = get_job_or_404(session, job_id)
+    inventory_path = get_job_dir(settings, job_id) / "resources.json"
+    if not inventory_path.exists():
+        raise AppError(
+            code="inventory_not_found",
+            message="No hemos encontrado inventario previo para reanalizar el acceso.",
+            status_code=404,
+            job_id=job_id,
+        )
+    if job.status == JobLifecycleStatus.PROCESSING.value:
+        raise AppError(
+            code="job_processing",
+            message="El analisis ya esta en curso.",
+            status_code=409,
+            job_id=job_id,
+        )
+
+    _update_job(
+        session,
+        job,
+        status=JobLifecycleStatus.PROCESSING,
+        progress=min(job.progress or 0, 80),
+        current_step=min(max(job.current_step, 1), job.total_steps),
+        message="Reanalisis de acceso en cola.",
+        error_code=None,
+        error_message=None,
+    )
+    record_job_event(
+        session,
+        settings,
+        job_id=job_id,
+        event="access_retry_queued",
+        message="Reanalisis Access + Deep Scan en cola.",
+        progress=job.progress,
+    )
+    session.commit()
+    session.refresh(job)
+    return serialize_job(job)
+
+
+def rerun_access_analysis(
+    engine,
+    settings: Settings,
+    job_contexts: OnlineJobContextStore,
+    job_id: str,
+    canvas_client_factory: Callable[[Any, Settings], CanvasClient],
+    url_check_factory: Callable[[Settings], URLCheckService],
+) -> None:
+    with Session(engine) as session:
+        job = get_job_or_404(session, job_id)
+        try:
+            inventory_path = get_job_dir(settings, job_id) / "resources.json"
+            resources_payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+            if not isinstance(resources_payload, list):
+                raise AppError(
+                    code="invalid_inventory",
+                    message="El inventario del curso no tiene un formato valido.",
+                    status_code=409,
+                    job_id=job_id,
+                )
+
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=min(max(job.current_step, 1), job.total_steps),
+                progress=82,
+                message="Reejecutando Access + Deep Scan.",
+                event="access_retry_started",
+            )
+
+            adapter = _build_retry_access_adapter(
+                settings=settings,
+                job_contexts=job_contexts,
+                job_id=job_id,
+                resources=resources_payload,
+                canvas_client_factory=canvas_client_factory,
+                url_check_factory=url_check_factory,
+            )
+            analysis = analyze_access(
+                job_id=job_id,
+                resources=resources_payload,
+                adapter=adapter,
+                progress=95,
+                clean_discovered=True,
+            )
+            course_structure = _load_course_structure_payload(settings, job_id)
+            if course_structure is None:
+                course_structure = build_fallback_course_structure(analysis.resources, title=job.original_filename)
+
+            _persist_analyzed_inventory(
+                session,
+                settings,
+                job_id=job_id,
+                inventory=analysis.resources,
+                course_structure=course_structure,
+            )
+            _update_job(
+                session,
+                job,
+                status=JobLifecycleStatus.DONE,
+                progress=100,
+                current_step=job.total_steps,
+                message="Reanalisis de acceso completado.",
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="access_retry_finished",
+                message="Access + Deep Scan recalculado correctamente.",
+                progress=100,
+                details={
+                    "resourceCount": len(analysis.resources),
+                    "accessible": analysis.summary["accessible"],
+                    "downloadable": analysis.summary["downloadable"],
+                    "discoveredCount": analysis.discovered_count,
+                    "byStatus": analysis.summary["byStatus"],
+                },
+            )
+            session.commit()
+        except AppError as exc:
+            _update_job(
+                session,
+                job,
+                status=JobLifecycleStatus.ERROR,
+                progress=job.progress or 0,
+                current_step=min(job.current_step, job.total_steps),
+                message=exc.message,
+                error_code=exc.code,
+                error_message=exc.message,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="access_retry_error",
+                message=exc.message,
+                progress=job.progress,
+                details=exc.details if isinstance(exc.details, dict) else {"details": exc.details},
+                level=logging.ERROR,
+            )
+            session.commit()
+        except Exception as exc:  # pragma: no cover
+            _update_job(
+                session,
+                job,
+                status=JobLifecycleStatus.ERROR,
+                progress=job.progress or 0,
+                current_step=min(job.current_step, job.total_steps),
+                message="No hemos podido reanalizar el acceso del curso.",
+                error_code="unexpected_access_retry_error",
+                error_message=str(exc),
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="access_retry_error",
+                message="Error no controlado durante el reanalisis de acceso.",
+                progress=job.progress,
+                details={"exception": exc.__class__.__name__},
+                level=logging.ERROR,
+            )
+            logger.exception("Unhandled access retry error", extra={"event": "access_retry_error", "job_id": job_id})
+            session.commit()
+
+
+def _build_retry_access_adapter(
+    *,
+    settings: Settings,
+    job_contexts: OnlineJobContextStore,
+    job_id: str,
+    resources: list[dict[str, Any]],
+    canvas_client_factory: Callable[[Any, Settings], CanvasClient],
+    url_check_factory: Callable[[Settings], URLCheckService],
+):
+    context = job_contexts.get(job_id)
+    if context is not None:
+        return OnlineAccessAdapter(
+            client=canvas_client_factory(context.credentials, settings),
+            credentials=context.credentials,
+            course_id=context.course_id,
+            url_checker=url_check_factory(settings),
+        )
+
+    course_id = _course_id_from_resources(resources)
+    if course_id and settings.canvas_base_url and settings.canvas_token:
+        credentials = CanvasCredentials.create(base_url=settings.canvas_base_url, token=settings.canvas_token)
+        return OnlineAccessAdapter(
+            client=canvas_client_factory(credentials, settings),
+            credentials=credentials,
+            course_id=course_id,
+            url_checker=url_check_factory(settings),
+        )
+
+    if get_extracted_dir(settings, job_id).exists():
+        return OfflineAccessAdapter(settings=settings, job_id=job_id, url_checker=url_check_factory(settings))
+
+    raise AppError(
+        code="access_retry_not_available",
+        message="No hay contexto suficiente para reanalizar este job.",
+        status_code=409,
+        job_id=job_id,
+    )
+
+
+def _course_id_from_resources(resources: list[dict[str, Any]]) -> str | None:
+    for resource in resources:
+        value = resource.get("courseId")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def prepare_retry_job(session: Session, settings: Settings, job_id: str) -> JobStatusResponse:

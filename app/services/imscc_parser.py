@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
+from uuid import NAMESPACE_URL, uuid5
 from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 
@@ -13,6 +16,19 @@ from app.services.course_structure import normalize_course_structure
 DEFAULT_MAX_ARCHIVE_MEMBERS = 2000
 DEFAULT_MAX_ARCHIVE_MEMBER_SIZE = 256 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_TOTAL_SIZE = 1024 * 1024 * 1024
+HTML_DISCOVERY_NAMESPACE = uuid5(NAMESPACE_URL, "accessiblecourse.imscc.html-discovery")
+HTML_RESOURCE_EXTENSIONS = {".html", ".htm"}
+HTML_REFERENCE_ATTRIBUTES = (
+    ("a", "href"),
+    ("img", "src"),
+    ("source", "src"),
+    ("video", "src"),
+    ("audio", "src"),
+    ("iframe", "src"),
+    ("embed", "src"),
+    ("object", "data"),
+)
+IGNORED_REFERENCE_SCHEMES = {"mailto", "tel", "javascript", "data"}
 
 EXCLUDED_METADATA_EXTENSIONS = {
     ".xml",
@@ -70,6 +86,79 @@ class ResolvedManifestItem:
     title: str
     resource_identifier: str | None
     children: list["ResolvedManifestItem"]
+
+
+@dataclass(slots=True)
+class HTMLReference:
+    tag: str
+    attribute: str
+    reference: str
+    title: str | None
+
+
+@dataclass(slots=True)
+class _OpenHTMLReference:
+    tag: str
+    reference: HTMLReference
+    text_parts: list[str]
+
+
+class HTMLReferenceParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.references: list[HTMLReference] = []
+        self._open_references: list[_OpenHTMLReference] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.lower()
+        attributes = {name.lower(): value for name, value in attrs if value is not None}
+        for tag_name, attribute_name in HTML_REFERENCE_ATTRIBUTES:
+            if normalized_tag != tag_name:
+                continue
+            raw_reference = attributes.get(attribute_name)
+            if not raw_reference:
+                continue
+            title = attributes.get("title") or attributes.get("aria-label") or attributes.get("alt")
+            reference = HTMLReference(
+                tag=normalized_tag,
+                attribute=attribute_name,
+                reference=raw_reference.strip(),
+                title=title.strip() if isinstance(title, str) and title.strip() else None,
+            )
+            self.references.append(reference)
+            if normalized_tag == "a" and reference.title is None:
+                self._open_references.append(_OpenHTMLReference(tag=normalized_tag, reference=reference, text_parts=[]))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data: str) -> None:
+        for open_reference in self._open_references:
+            open_reference.text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.lower()
+        for index in range(len(self._open_references) - 1, -1, -1):
+            open_reference = self._open_references[index]
+            if open_reference.tag != normalized_tag:
+                continue
+            self._apply_text_title(open_reference)
+            del self._open_references[index:]
+            return
+
+    def close(self) -> None:
+        super().close()
+        for open_reference in self._open_references:
+            self._apply_text_title(open_reference)
+        self._open_references.clear()
+
+    @staticmethod
+    def _apply_text_title(open_reference: _OpenHTMLReference) -> None:
+        if open_reference.reference.title is not None:
+            return
+        text = " ".join(part.strip() for part in open_reference.text_parts if part.strip()).strip()
+        if text:
+            open_reference.reference.title = " ".join(text.split())
 
 
 def classify_resource(reference: str | None, *, is_external: bool = False) -> str:
@@ -390,6 +479,157 @@ class IMSCCParser:
             )
         ]
 
+    def discover_html_linked_resources(
+        self,
+        inventory: list[dict[str, Any]],
+        extracted_root: Path,
+        *,
+        excluded_extensions: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        effective_excluded_extensions = {
+            extension.lower() for extension in (excluded_extensions or EXCLUDED_METADATA_EXTENSIONS)
+        }
+        resources_by_path: dict[str, dict[str, Any]] = {}
+        resources_by_url: dict[str, dict[str, Any]] = {}
+
+        for resource in inventory:
+            relative_path = _inventory_file_path(resource)
+            if relative_path:
+                resources_by_path.setdefault(relative_path, resource)
+            source_url = _inventory_source_url(resource)
+            if source_url:
+                resources_by_url.setdefault(_normalize_external_url(source_url), resource)
+
+        parent_child_ids: dict[str, list[str]] = {}
+        discovered_resources: list[dict[str, Any]] = []
+
+        for html_relative_path in self._collect_html_targets(inventory, extracted_root):
+            html_path = _resolve_relative_path(extracted_root, html_relative_path)
+            if html_path is None or not html_path.exists() or not html_path.is_file():
+                continue
+
+            parent_resource = resources_by_path.get(html_relative_path)
+            for candidate in self.extract_html_links(html_path, extracted_root):
+                if candidate["kind"] == "external":
+                    source_url = str(candidate["url"])
+                    existing_resource = resources_by_url.get(_normalize_external_url(source_url))
+                    child_resource = existing_resource
+                    if child_resource is None:
+                        child_resource = self._build_discovered_html_resource(
+                            candidate,
+                            parent_resource=parent_resource,
+                            parent_html_path=html_relative_path,
+                        )
+                        resources_by_url[_normalize_external_url(source_url)] = child_resource
+                        discovered_resources.append(child_resource)
+                    self._register_html_child(parent_resource, child_resource, parent_child_ids)
+                    continue
+
+                relative_path = str(candidate["path"])
+                if Path(relative_path).suffix.lower() in HTML_RESOURCE_EXTENSIONS:
+                    continue
+                if _should_skip_metadata_resource(relative_path, None, effective_excluded_extensions):
+                    continue
+
+                existing_resource = resources_by_path.get(relative_path)
+                child_resource = existing_resource
+                if child_resource is None:
+                    child_resource = self._build_discovered_html_resource(
+                        candidate,
+                        parent_resource=parent_resource,
+                        parent_html_path=html_relative_path,
+                    )
+                    resources_by_path[relative_path] = child_resource
+                    discovered_resources.append(child_resource)
+                self._register_html_child(parent_resource, child_resource, parent_child_ids)
+
+        self._apply_html_discovery_details(inventory, parent_child_ids)
+        return discovered_resources
+
+    def extract_html_links(self, html_path: Path, extracted_root: Path) -> list[dict[str, str]]:
+        relative_html_path = html_path.resolve().relative_to(extracted_root.resolve()).as_posix()
+        parser = HTMLReferenceParser()
+        parser.feed(html_path.read_text(encoding="utf-8", errors="ignore"))
+        discovered: list[dict[str, str]] = []
+        local_seen: set[str] = set()
+        external_seen: set[str] = set()
+
+        for html_reference in parser.references:
+            reference = html_reference.reference
+            if not reference or reference.startswith("#") or self._should_skip_html_reference(reference):
+                continue
+
+            if self._is_external_url(reference):
+                source_url = reference.strip()
+                normalized_url = _normalize_external_url(source_url)
+                if _looks_like_xml_reference(source_url) or normalized_url in external_seen:
+                    continue
+                external_seen.add(normalized_url)
+                discovered.append(
+                    {
+                        "kind": "external",
+                        "url": source_url,
+                        "title": html_reference.title or _derive_title(source_url),
+                        "tag": html_reference.tag,
+                        "attribute": html_reference.attribute,
+                        "parentHtmlPath": relative_html_path,
+                    }
+                )
+                continue
+
+            resolved_path = self.resolve_html_reference(reference, html_path, extracted_root)
+            if resolved_path is None or not resolved_path.exists() or not resolved_path.is_file():
+                continue
+
+            relative_path = resolved_path.resolve().relative_to(extracted_root.resolve()).as_posix()
+            if _looks_like_xml_reference(relative_path) or relative_path in local_seen:
+                continue
+            local_seen.add(relative_path)
+            discovered.append(
+                {
+                    "kind": "local",
+                    "path": relative_path,
+                    "title": html_reference.title or _derive_title(relative_path),
+                    "tag": html_reference.tag,
+                    "attribute": html_reference.attribute,
+                    "parentHtmlPath": relative_html_path,
+                }
+            )
+
+        return discovered
+
+    def resolve_html_reference(self, reference: str | None, html_path: Path, extracted_root: Path) -> Path | None:
+        raw_reference = (reference or "").strip().replace("\\", "/")
+        normalized = self._normalize_reference(reference)
+        if normalized is None or self._is_external_url(normalized):
+            return None
+
+        parsed = urlparse(reference or "")
+        if parsed.scheme.lower() in IGNORED_REFERENCE_SCHEMES:
+            return None
+
+        root = extracted_root
+        root_for_checks = extracted_root.resolve()
+        stripped = _strip_query_and_fragment(normalized).replace("\\", "/")
+        if not stripped:
+            return None
+
+        pure_reference = PurePosixPath(stripped)
+        if raw_reference.startswith("/") or pure_reference.is_absolute():
+            relative_target = PurePosixPath(*[part for part in pure_reference.parts if part not in {"", "/"}])
+        else:
+            try:
+                html_parent = html_path.relative_to(root).parent
+            except ValueError:
+                html_parent = html_path.resolve().relative_to(root_for_checks).parent
+            relative_target = PurePosixPath(html_parent.as_posix()) / pure_reference
+
+        candidate = Path(os.path.normpath(root / Path(*relative_target.parts)))
+        candidate_for_checks = candidate.resolve()
+        if not _is_within_root(candidate_for_checks, root_for_checks):
+            return None
+        return candidate
+
     def _collect_item(self, item: ET.Element, position: list[int]) -> ManifestItem:
         return ManifestItem(
             node_id=f"item:{'.'.join(str(value) for value in position)}",
@@ -584,6 +824,127 @@ class IMSCCParser:
         parsed = urlparse(reference)
         return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
 
+    def _build_discovered_html_resource(
+        self,
+        candidate: dict[str, str],
+        *,
+        parent_resource: dict[str, Any] | None,
+        parent_html_path: str,
+    ) -> dict[str, Any]:
+        is_external = candidate["kind"] == "external"
+        primary_reference = candidate["url"] if is_external else candidate["path"]
+        title = candidate.get("title") or _derive_title(primary_reference) or "Sin título"
+        module_path = _inherit_html_course_path(parent_resource, parent_html_path)
+        parent_item_path = _inventory_item_path(parent_resource)
+        item_path = f"{parent_item_path} > {title}" if parent_item_path else title
+
+        details = {
+            "htmlDiscovery": {
+                "discovered": True,
+                "parentResourceId": str(parent_resource.get("id")) if parent_resource and parent_resource.get("id") else None,
+                "parentHtmlPath": parent_html_path,
+                "tag": candidate["tag"],
+                "attribute": candidate["attribute"],
+            }
+        }
+
+        resource_id = str(uuid5(HTML_DISCOVERY_NAMESPACE, f"{candidate['kind']}|{primary_reference}"))
+        return {
+            "id": resource_id,
+            "identifier": resource_id,
+            "title": title,
+            "type": classify_resource(primary_reference, is_external=is_external),
+            "origin": "external" if is_external else "internal",
+            "url": primary_reference if is_external else None,
+            "sourceUrl": primary_reference if is_external else None,
+            "path": None if is_external else primary_reference,
+            "filePath": None if is_external else primary_reference,
+            "localPath": None if is_external else primary_reference,
+            "coursePath": module_path,
+            "course_path": module_path,
+            "modulePath": module_path,
+            "module_path": module_path,
+            "itemPath": item_path,
+            "item_path": item_path,
+            "status": "OK",
+            "files": [primary_reference] if not is_external else [],
+            "dependencies": [],
+            "discoveredChildrenCount": 0,
+            "discovered_children_count": 0,
+            "parentResourceId": details["htmlDiscovery"]["parentResourceId"],
+            "parent_resource_id": details["htmlDiscovery"]["parentResourceId"],
+            "notes": None,
+            "localFile": not is_external,
+            "local_file": not is_external,
+            "external": is_external,
+            "details": details,
+        }
+
+    def _register_html_child(
+        self,
+        parent_resource: dict[str, Any] | None,
+        child_resource: dict[str, Any],
+        parent_child_ids: dict[str, list[str]],
+    ) -> None:
+        if parent_resource is None:
+            return
+
+        parent_id = parent_resource.get("id")
+        child_id = child_resource.get("id")
+        if not isinstance(parent_id, str) or not parent_id or not isinstance(child_id, str) or not child_id:
+            return
+        if parent_id == child_id:
+            return
+
+        parent_child_ids.setdefault(parent_id, [])
+        if child_id not in parent_child_ids[parent_id]:
+            parent_child_ids[parent_id].append(child_id)
+
+    def _apply_html_discovery_details(
+        self,
+        inventory: list[dict[str, Any]],
+        parent_child_ids: dict[str, list[str]],
+    ) -> None:
+        for resource in inventory:
+            resource_id = resource.get("id")
+            if not isinstance(resource_id, str) or resource_id not in parent_child_ids:
+                continue
+            details = dict(resource.get("details") or {})
+            details["htmlDiscovery"] = {
+                **dict(details.get("htmlDiscovery") or {}),
+                "containsLinkedResources": True,
+                "linkedResourceCount": len(parent_child_ids[resource_id]),
+                "linkedResourceIds": list(parent_child_ids[resource_id]),
+            }
+            resource["discoveredChildrenCount"] = len(parent_child_ids[resource_id])
+            resource["discovered_children_count"] = len(parent_child_ids[resource_id])
+            resource["details"] = details
+
+    def _collect_html_targets(self, inventory: list[dict[str, Any]], extracted_root: Path) -> list[str]:
+        targets: list[str] = []
+        seen: set[str] = set()
+
+        for resource in inventory:
+            relative_path = _inventory_file_path(resource)
+            if not relative_path or Path(relative_path).suffix.lower() not in HTML_RESOURCE_EXTENSIONS:
+                continue
+            if relative_path not in seen:
+                seen.add(relative_path)
+                targets.append(relative_path)
+
+        for html_path in sorted(path for path in extracted_root.rglob("*") if path.is_file()):
+            relative_path = html_path.resolve().relative_to(extracted_root.resolve()).as_posix()
+            if Path(relative_path).suffix.lower() not in HTML_RESOURCE_EXTENSIONS or relative_path in seen:
+                continue
+            seen.add(relative_path)
+            targets.append(relative_path)
+
+        return targets
+
+    def _should_skip_html_reference(self, reference: str) -> bool:
+        parsed = urlparse(reference.strip())
+        return parsed.scheme.lower() in IGNORED_REFERENCE_SCHEMES
+
 
 def _derive_title(reference: str | None) -> str | None:
     if not reference:
@@ -646,3 +1007,82 @@ def _should_skip_metadata_resource(
     if normalized_name == "imsmanifest.xml":
         return True
     return Path(normalized_name).suffix.lower() in excluded_extensions
+
+
+def _inventory_file_path(resource: dict[str, Any] | None) -> str | None:
+    if not isinstance(resource, dict):
+        return None
+    for key in ("filePath", "localPath", "path"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized = value.strip().replace("\\", "/")
+            return normalized or None
+    return None
+
+
+def _inventory_source_url(resource: dict[str, Any] | None) -> str | None:
+    if not isinstance(resource, dict):
+        return None
+    for key in ("sourceUrl", "url"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _normalize_external_url(reference: str) -> str:
+    stripped = reference.strip()
+    without_fragment = stripped.split("#", 1)[0].rstrip("/")
+    return without_fragment.lower()
+
+
+def _inventory_item_path(resource: dict[str, Any] | None) -> str | None:
+    if not isinstance(resource, dict):
+        return None
+    for key in ("itemPath", "item_path"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _inherit_html_course_path(parent_resource: dict[str, Any] | None, parent_html_path: str) -> str | None:
+    if isinstance(parent_resource, dict):
+        for key in ("modulePath", "module_path", "coursePath", "course_path"):
+            value = parent_resource.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    parent = PurePosixPath(parent_html_path).parent
+    if parent.as_posix() in {"", "."}:
+        return None
+    return parent.as_posix()
+
+
+def _resolve_relative_path(extracted_root: Path, relative_path: str) -> Path | None:
+    root = extracted_root.resolve()
+    normalized = PurePosixPath(relative_path.replace("\\", "/"))
+    if normalized.is_absolute() or any(part == ".." for part in normalized.parts):
+        return None
+    candidate = (root / Path(*normalized.parts)).resolve()
+    if not _is_within_root(candidate, root):
+        return None
+    return candidate
+
+
+def _looks_like_xml_reference(reference: str) -> bool:
+    return Path(_strip_query_and_fragment(reference)).suffix.lower() == ".xml"
+
+
+def _extract_html_reference_title(element: Any, reference: str) -> str | None:
+    for attribute_name in ("title", "aria-label", "alt"):
+        value = element.get(attribute_name)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+
+    text = " ".join(part.strip() for part in element.stripped_strings if part and part.strip())
+    if text:
+        return text
+    return _derive_title(reference)

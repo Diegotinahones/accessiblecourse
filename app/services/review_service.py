@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func
-from sqlmodel import Session, col, select
+from sqlmodel import Session, col, delete, select
 
 from app.core.config import Settings
 from app.models.entities import (
@@ -47,13 +47,35 @@ class InventoryResourceSeed(BaseModel):
     url_status: str | None = Field(default=None, validation_alias=AliasChoices("url_status", "urlStatus"))
     final_url: str | None = Field(default=None, validation_alias=AliasChoices("final_url", "finalUrl"))
     checked_at: datetime | None = Field(default=None, validation_alias=AliasChoices("checked_at", "checkedAt"))
-    can_access: bool = Field(default=False, validation_alias=AliasChoices("can_access", "canAccess"))
+    can_access: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("can_access", "canAccess", "accessible"),
+    )
     access_status: ResourceAccessStatus = Field(
         default=ResourceAccessStatus.ERROR,
         validation_alias=AliasChoices("access_status", "accessStatus"),
     )
     http_status: int | None = Field(default=None, validation_alias=AliasChoices("http_status", "httpStatus"))
-    can_download: bool = Field(default=False, validation_alias=AliasChoices("can_download", "canDownload"))
+    access_status_code: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("access_status_code", "accessStatusCode"),
+    )
+    can_download: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("can_download", "canDownload", "downloadable"),
+    )
+    download_status_code: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("download_status_code", "downloadStatusCode"),
+    )
+    discovered_children_count: int = Field(
+        default=0,
+        validation_alias=AliasChoices("discovered_children_count", "discoveredChildrenCount"),
+    )
+    parent_resource_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("parent_resource_id", "parentResourceId"),
+    )
     error_message: str | None = Field(
         default=None,
         validation_alias=AliasChoices("error_message", "errorMessage"),
@@ -130,12 +152,65 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
                 can_access=item.can_access,
                 access_status=item.access_status,
                 http_status=item.http_status,
+                access_status_code=item.access_status_code,
                 can_download=item.can_download,
+                download_status_code=item.download_status_code,
+                discovered_children_count=item.discovered_children_count,
                 error_message=item.error_message,
                 notes=item.notes,
                 review_state=ReviewState.IN_REVIEW,
             )
         )
+
+    session.commit()
+    ensure_review_rollups(session, job_id, touch=True)
+
+
+def sync_job_inventory_from_payload(session: Session, job_id: str, resources: list[dict[str, Any]]) -> None:
+    items = [InventoryResourceSeed.model_validate(item) for item in resources]
+    job = session.get(Job, job_id)
+    if job is None:
+        job = Job(id=job_id, name=job_id.replace("-", " ").title())
+        session.add(job)
+        session.flush()
+
+    existing_resources = session.exec(select(Resource).where(Resource.job_id == job_id)).all()
+    existing_by_id = {resource.id: resource for resource in existing_resources}
+    incoming_ids = {item.id for item in items}
+    removed_ids = [resource_id for resource_id in existing_by_id if resource_id not in incoming_ids]
+
+    if removed_ids:
+        session.exec(
+            delete(ChecklistResponse).where(
+                ChecklistResponse.job_id == job_id,
+                col(ChecklistResponse.resource_id).in_(removed_ids),
+            )
+        )
+        for resource_id in removed_ids:
+            session.delete(existing_by_id[resource_id])
+
+    for item in items:
+        resource = existing_by_id.get(item.id)
+        if resource is None:
+            resource = Resource(id=item.id, job_id=job_id, title=item.title, type=item.type)
+        resource.title = item.title
+        resource.type = item.type
+        resource.origin = item.origin
+        resource.url = item.source_url
+        resource.path = item.file_path
+        resource.course_path = item.course_path
+        resource.status = item.status
+        resource.can_access = item.can_access
+        resource.access_status = item.access_status
+        resource.http_status = item.http_status
+        resource.access_status_code = item.access_status_code
+        resource.can_download = item.can_download
+        resource.download_status_code = item.download_status_code
+        resource.discovered_children_count = item.discovered_children_count
+        resource.error_message = item.error_message
+        resource.notes = item.notes
+        resource.updated_at = _utc_now()
+        session.add(resource)
 
     session.commit()
     ensure_review_rollups(session, job_id, touch=True)
@@ -166,6 +241,12 @@ def ensure_review_rollups(session: Session, job_id: str, *, touch: bool = False)
         .select_from(ChecklistResponse)
         .where(ChecklistResponse.job_id == job_id, ChecklistResponse.value == ChecklistValue.FAIL)
     ).one()
+    accessible_resources = session.exec(
+        select(func.count()).select_from(Resource).where(Resource.job_id == job_id, Resource.can_access)
+    ).one()
+    downloadable_resources = session.exec(
+        select(func.count()).select_from(Resource).where(Resource.job_id == job_id, Resource.can_download)
+    ).one()
     total_responses = session.exec(
         select(func.count()).select_from(ChecklistResponse).where(ChecklistResponse.job_id == job_id)
     ).one()
@@ -179,6 +260,8 @@ def ensure_review_rollups(session: Session, job_id: str, *, touch: bool = False)
     summary = get_or_create_review_summary(session, job_id)
     summary.total_resources = int(total_resources)
     summary.total_fail_items = int(total_fail_items)
+    summary.accessible_resources = int(accessible_resources)
+    summary.downloadable_resources = int(downloadable_resources)
     if touch or summary.last_updated is None:
         summary.last_updated = now
 

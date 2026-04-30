@@ -87,7 +87,10 @@ class Resource(SQLModel, table=True):
         sa_column=Column(SAEnum(ResourceAccessStatus), nullable=False),
     )
     http_status: int | None = Field(default=None, nullable=True)
+    access_status_code: int | None = Field(default=None, nullable=True)
     can_download: bool = Field(default=False, nullable=False)
+    download_status_code: int | None = Field(default=None, nullable=True)
+    discovered_children_count: int = Field(default=0, nullable=False)
     error_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     notes: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     review_state: ReviewState = Field(
@@ -148,6 +151,8 @@ class ReviewSummary(SQLModel, table=True):
     job_id: str = Field(primary_key=True, foreign_key="jobs.id")
     total_resources: int = Field(default=0, nullable=False)
     total_fail_items: int = Field(default=0, nullable=False)
+    accessible_resources: int = Field(default=0, nullable=False)
+    downloadable_resources: int = Field(default=0, nullable=False)
     last_updated: datetime = Field(default_factory=utcnow, nullable=False)
 
 

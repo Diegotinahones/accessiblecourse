@@ -30,7 +30,8 @@ from app.schemas import (
     ReviewSessionRead,
     ReviewSummaryPayload,
 )
-from app.services.access_check import build_access_status_counts
+from app.services.access_analysis import build_access_summary
+from app.services.canvas_client import CanvasClient, CanvasCredentials
 from app.services.course_structure import (
     build_fallback_course_structure,
     filter_course_structure,
@@ -38,8 +39,10 @@ from app.services.course_structure import (
 )
 from app.services.jobs import (
     create_job_record,
+    prepare_access_analysis_retry,
     prepare_retry_job,
     process_job,
+    rerun_access_analysis,
     serialize_job,
 )
 from app.services.jobs import (
@@ -63,9 +66,18 @@ from app.services.storage import (
     save_upload_file,
     validate_extension,
 )
+from app.services.url_check import URLCheckService
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = logging.getLogger("accessiblecourse.review")
+
+
+def _canvas_client_factory(credentials: CanvasCredentials, settings: Settings) -> CanvasClient:
+    return CanvasClient(credentials, timeout_seconds=settings.canvas_timeout_seconds)
+
+
+def _url_check_factory(settings: Settings) -> URLCheckService:
+    return URLCheckService(timeout_seconds=settings.url_check_timeout_seconds, max_urls=settings.url_check_max_urls)
 
 
 def _review_session_read(review_session: ReviewSession) -> ReviewSessionRead:
@@ -86,6 +98,7 @@ def _resource_read(
     file_path = inventory_item.file_path if inventory_item is not None else resource.path
     module_path = inventory_item.course_path if inventory_item is not None else resource.course_path
     item_path = inventory_item.item_path if inventory_item is not None else None
+    parent_resource_id = inventory_item.parent_resource_id if inventory_item is not None else None
     return ResourceListItemRead(
         id=resource.id,
         jobId=resource.job_id,
@@ -107,7 +120,19 @@ def _resource_read(
         canAccess=inventory_item.can_access if inventory_item is not None else resource.can_access,
         accessStatus=inventory_item.access_status if inventory_item is not None else resource.access_status,
         httpStatus=inventory_item.http_status if inventory_item is not None else resource.http_status,
+        accessStatusCode=(
+            inventory_item.access_status_code if inventory_item is not None else resource.access_status_code
+        ),
         canDownload=inventory_item.can_download if inventory_item is not None else resource.can_download,
+        downloadStatusCode=(
+            inventory_item.download_status_code if inventory_item is not None else resource.download_status_code
+        ),
+        discoveredChildrenCount=(
+            inventory_item.discovered_children_count
+            if inventory_item is not None
+            else resource.discovered_children_count
+        ),
+        parentResourceId=parent_resource_id,
         errorMessage=inventory_item.error_message if inventory_item is not None else resource.error_message,
         notes=resource.notes,
         reviewState=resource.review_state,
@@ -137,27 +162,33 @@ def _is_broken_inventory_resource(resource: Resource, inventory_item) -> bool:
 
 def _build_access_summary(session: Session, job_id: str) -> AccessSummaryRead:
     resources = session.exec(select(Resource).where(Resource.job_id == job_id)).all()
-    by_status = build_access_status_counts()
-    accessible = 0
-    downloadable = 0
-
-    for resource in resources:
-        accessible += int(resource.can_access)
-        downloadable += int(resource.can_download)
-        status_key = (
-            resource.access_status.value
+    job = get_processing_job_or_404(session, job_id)
+    resource_payload = [
+        {
+            "id": resource.id,
+            "title": resource.title,
+            "type": resource.type.value if hasattr(resource.type, "value") else str(resource.type),
+            "modulePath": resource.course_path,
+            "coursePath": resource.course_path,
+            "canAccess": resource.can_access,
+            "accessStatus": resource.access_status.value
             if hasattr(resource.access_status, "value")
-            else str(resource.access_status or "ERROR")
-        )
-        by_status.setdefault(status_key, 0)
-        by_status[status_key] += 1
-
-    return AccessSummaryRead(
-        total=len(resources),
-        accessible=accessible,
-        downloadable=downloadable,
-        byStatus=by_status,
+            else str(resource.access_status),
+            "canDownload": resource.can_download,
+            "accessStatusCode": resource.access_status_code,
+            "downloadStatusCode": resource.download_status_code,
+        }
+        for resource in resources
+    ]
+    summary = build_access_summary(
+        job_id=job_id,
+        resources=resource_payload,
+        progress=job.progress,
+        status=job.status,
     )
+    summary["downloadableAccessible"] = sum(1 for resource in resources if resource.can_access and resource.can_download)
+    summary["discovered"] = sum(resource.discovered_children_count for resource in resources)
+    return AccessSummaryRead.model_validate(summary)
 
 
 def _ensure_review_inventory(session: Session, settings: Settings, job_id: str) -> None:
@@ -211,6 +242,8 @@ def _build_summary_response(session: Session, settings: Settings, job_id: str) -
         jobId=job_id,
         totalResources=review_summary.total_resources,
         totalFailItems=review_summary.total_fail_items,
+        accessibleResources=review_summary.accessible_resources,
+        downloadableResources=review_summary.downloadable_resources,
         lastUpdated=review_summary.last_updated,
         reviewSession=_review_session_read(review_session),
         resources=[
@@ -412,6 +445,28 @@ def get_access_summary(
 ) -> AccessSummaryRead:
     _ensure_review_inventory(session, settings, job_id)
     return _build_access_summary(session, job_id)
+
+
+@router.post("/{job_id}/access-analysis/retry", response_model=JobStatusResponse, status_code=status.HTTP_202_ACCEPTED)
+def retry_access_analysis(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    engine=Depends(get_engine),
+) -> JobStatusResponse:
+    response = prepare_access_analysis_retry(session, settings, job_id)
+    background_tasks.add_task(
+        rerun_access_analysis,
+        engine,
+        settings,
+        request.app.state.online_job_contexts,
+        job_id,
+        _canvas_client_factory,
+        _url_check_factory,
+    )
+    return response
 
 
 @router.get("/{job_id}/resources/{resource_id}/download")

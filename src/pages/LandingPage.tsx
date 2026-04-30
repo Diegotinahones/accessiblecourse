@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import type { AppMode } from '../lib/types';
@@ -40,26 +40,38 @@ function resolveInitialMode(value: string | null): AppMode {
 export function LandingPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const initialModeParam = searchParams.get('mode');
   const [selectedMode, setSelectedMode] = useState<AppMode>(() =>
-    resolveInitialMode(searchParams.get('mode')),
+    resolveInitialMode(initialModeParam),
+  );
+  const lastSyncedModeRef = useRef<AppMode | null>(
+    isAppMode(initialModeParam) ? initialModeParam : null,
   );
   const modeParam = searchParams.get('mode');
 
   useEffect(() => {
     const nextMode = isAppMode(modeParam) ? modeParam : null;
 
-    if (nextMode && nextMode !== selectedMode) {
-      setSelectedMode(nextMode);
-      rememberAppMode(nextMode);
+    if (!nextMode) {
+      lastSyncedModeRef.current = selectedMode;
+      setSearchParams({ mode: selectedMode }, { replace: true });
+      rememberAppMode(selectedMode);
       return;
     }
 
-    rememberAppMode(selectedMode);
-
-    if (nextMode !== selectedMode) {
-      setSearchParams({ mode: selectedMode }, { replace: true });
+    if (nextMode !== lastSyncedModeRef.current) {
+      lastSyncedModeRef.current = nextMode;
+      setSelectedMode(nextMode);
+      rememberAppMode(nextMode);
     }
   }, [modeParam, selectedMode, setSearchParams]);
+
+  const handleModeChange = (mode: AppMode) => {
+    lastSyncedModeRef.current = mode;
+    setSelectedMode(mode);
+    rememberAppMode(mode);
+    setSearchParams({ mode }, { replace: true });
+  };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -84,38 +96,45 @@ export function LandingPage() {
 
           <div className="space-y-4">
             {MODE_OPTIONS.map((option) => {
+              const inputId = `analysis-mode-${option.mode}`;
               const descriptionId = `mode-${option.mode}-description`;
               const isSelected = selectedMode === option.mode;
 
               return (
-                <label
+                <div
                   key={option.mode}
                   className={classNames(
-                    'block cursor-pointer rounded-3xl border p-5 transition sm:p-6',
+                    'rounded-2xl border p-4 transition sm:p-5',
                     isSelected
                       ? 'border-ink bg-[#f7faf7]'
                       : 'border-line bg-white hover:border-[#9cb3a2]',
                   )}
                 >
-                  <div className="flex items-start gap-4">
+                  <div className="grid grid-cols-[auto_1fr] items-start gap-4">
                     <input
                       aria-describedby={descriptionId}
                       checked={isSelected}
                       className="mt-1 h-5 w-5 accent-[#205e3c]"
+                      id={inputId}
                       name="analysis-mode"
-                      onChange={() => setSelectedMode(option.mode)}
+                      onChange={() => handleModeChange(option.mode)}
                       type="radio"
                       value={option.mode}
                     />
 
                     <div className="space-y-2">
-                      <p className="text-lg font-semibold text-ink">{option.label}</p>
+                      <label
+                        className="block cursor-pointer text-lg font-semibold text-ink"
+                        htmlFor={inputId}
+                      >
+                        {option.label}
+                      </label>
                       <p className="text-sm leading-6 text-subtle" id={descriptionId}>
                         {option.description}
                       </p>
                     </div>
                   </div>
-                </label>
+                </div>
               );
             })}
           </div>

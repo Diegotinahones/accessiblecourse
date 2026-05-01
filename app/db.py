@@ -28,11 +28,14 @@ def _apply_sqlite_schema_updates(engine) -> None:
         "access_status": "ALTER TABLE resources ADD COLUMN access_status VARCHAR(32) NOT NULL DEFAULT 'NO_ACCEDE'",
         "http_status": "ALTER TABLE resources ADD COLUMN http_status INTEGER",
         "access_status_code": "ALTER TABLE resources ADD COLUMN access_status_code INTEGER",
+        "reason_code": "ALTER TABLE resources ADD COLUMN reason_code VARCHAR(64)",
+        "reason_detail": "ALTER TABLE resources ADD COLUMN reason_detail TEXT",
         "can_download": "ALTER TABLE resources ADD COLUMN can_download BOOLEAN NOT NULL DEFAULT 0",
         "download_url": "ALTER TABLE resources ADD COLUMN download_url VARCHAR(2000)",
         "download_status": "ALTER TABLE resources ADD COLUMN download_status VARCHAR(64)",
         "download_status_code": "ALTER TABLE resources ADD COLUMN download_status_code INTEGER",
         "discovered_children_count": "ALTER TABLE resources ADD COLUMN discovered_children_count INTEGER NOT NULL DEFAULT 0",
+        "parent_resource_id": "ALTER TABLE resources ADD COLUMN parent_resource_id VARCHAR(255)",
         "access_note": "ALTER TABLE resources ADD COLUMN access_note TEXT",
         "error_message": "ALTER TABLE resources ADD COLUMN error_message TEXT",
     }
@@ -75,6 +78,9 @@ def _apply_postgres_schema_updates(engine) -> None:
     resource_columns = (
         "ALTER TABLE resources ADD COLUMN IF NOT EXISTS download_url VARCHAR(2000)",
         "ALTER TABLE resources ADD COLUMN IF NOT EXISTS download_status VARCHAR(64)",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS reason_code VARCHAR(64)",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS reason_detail TEXT",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS parent_resource_id VARCHAR(255)",
         "ALTER TABLE resources ADD COLUMN IF NOT EXISTS access_note TEXT",
     )
 

@@ -179,6 +179,7 @@ class ResourceListItemRead(StrictModel):
     title: str
     type: ReviewResourceType
     origin: str | None = None
+    source: str | None = None
     url: str | None = None
     sourceUrl: str | None = None
     downloadUrl: str | None = None
@@ -198,11 +199,15 @@ class ResourceListItemRead(StrictModel):
     accessStatus: ReviewResourceAccessStatus = ReviewResourceAccessStatus.NO_ACCEDE
     httpStatus: int | None = None
     accessStatusCode: int | None = None
+    reasonCode: str | None = None
+    reasonDetail: str | None = None
     canDownload: bool = False
     downloadStatus: str | None = None
     downloadStatusCode: int | None = None
     discoveredChildrenCount: int = 0
     parentResourceId: str | None = None
+    parentId: str | None = None
+    childrenCount: int = 0
     discovered: bool = False
     accessNote: str | None = None
     errorMessage: str | None = None
@@ -222,6 +227,8 @@ class AccessSummaryResourceRead(StrictModel):
     downloadStatus: str | None = None
     accessStatusCode: int | None = None
     downloadStatusCode: int | None = None
+    reasonCode: str | None = None
+    reasonDetail: str | None = None
     discovered: bool = False
     accessNote: str | None = None
     badge: dict[str, str]

@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     max_extracted_files: int = 2000
     max_extracted_mb: int = 1024
     offline_excluded_extensions: list[str] = Field(
-        default_factory=lambda: [".xml", ".xsd", ".dtd", ".qti", ".imsmanifest"]
+        default_factory=lambda: [".xml"]
     )
     log_level: str = "INFO"
     log_json: bool = False

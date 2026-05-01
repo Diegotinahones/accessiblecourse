@@ -19,6 +19,7 @@ DEFAULT_MAX_ARCHIVE_MEMBERS = 2000
 DEFAULT_MAX_ARCHIVE_MEMBER_SIZE = 256 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_TOTAL_SIZE = 1024 * 1024 * 1024
 HTML_DISCOVERY_NAMESPACE = uuid5(NAMESPACE_URL, "accessiblecourse.imscc.html-discovery")
+DEFAULT_HTML_DISCOVERY_MAX_DEPTH = 2
 HTML_RESOURCE_EXTENSIONS = {".html", ".htm"}
 HTML_REFERENCE_ATTRIBUTES = (
     ("a", "href"),
@@ -39,6 +40,11 @@ EXCLUDED_METADATA_EXTENSIONS = {
     ".qti",
     ".imsmanifest",
 }
+IGNORED_SYSTEM_FILENAMES = {".ds_store", "thumbs.db", "desktop.ini"}
+IGNORED_SYSTEM_SEGMENTS = {"__macosx"}
+LTI_TYPE_MARKERS = ("lti", "learningtool", "learning_tool", "externaltool")
+LTI_TITLE_MARKERS = ("learning tools", "learning tool", "herramientas externas", "herramientas lti")
+LTI_PATH_MARKERS = ("lti_resource_links", "/lti/", "external_tools")
 
 
 class ParserError(Exception):
@@ -261,7 +267,13 @@ class IMSCCParser:
             raise ParserError("No se encontró 'imsmanifest.xml' dentro del paquete IMSCC.")
         return candidates[0]
 
-    def parse_manifest(self, manifest_path: Path, extracted_root: Path) -> ParsedManifest:
+    def parse_manifest(
+        self,
+        manifest_path: Path,
+        extracted_root: Path,
+        *,
+        excluded_extensions: set[str] | None = None,
+    ) -> ParsedManifest:
         try:
             tree = ET.parse(manifest_path)
         except ET.ParseError as exc:
@@ -269,7 +281,10 @@ class IMSCCParser:
 
         root = tree.getroot()
         course_title = self._extract_course_title(root) or manifest_path.parent.name or "Course"
-        resources: list[ManifestResource] = []
+        effective_excluded_extensions = {
+            extension.lower() for extension in (excluded_extensions or EXCLUDED_METADATA_EXTENSIONS)
+        }
+        raw_resources: list[ManifestResource] = []
         manifest_dir = manifest_path.parent
         for resources_node in self._find_children(root, "resources"):
             for resource in self._find_children(resources_node, "resource"):
@@ -301,7 +316,32 @@ class IMSCCParser:
                     manifest_dir=manifest_dir,
                     extracted_root=extracted_root,
                 )
-                resources.append(manifest_resource)
+                raw_resources.append(manifest_resource)
+
+        resources: list[ManifestResource] = []
+        ignored_resource_ids: set[str] = set()
+        for resource in raw_resources:
+            candidate_reference = next(
+                (
+                    normalized
+                    for normalized in (
+                        self._normalize_reference(reference) for reference in [resource.href, *resource.files]
+                    )
+                    if normalized and not self._is_external_url(normalized)
+                ),
+                None,
+            )
+            if should_ignore_offline_resource(
+                file_path=candidate_reference,
+                source_url=resource.external_url,
+                title=resource.title,
+                manifest_type=resource.resource_type,
+                excluded_extensions=effective_excluded_extensions,
+            ):
+                if resource.identifier:
+                    ignored_resource_ids.add(resource.identifier)
+                continue
+            resources.append(resource)
 
         resource_titles = {
             resource.identifier: resource.title for resource in resources if resource.identifier and resource.title
@@ -314,12 +354,13 @@ class IMSCCParser:
                     for item_index, item in enumerate(self._find_children(organization, "item"))
                 ]
                 resolved_children = [self._resolve_item_titles(item, resource_titles) for item in parsed_children]
+                filtered_children = self._filter_ignored_items(resolved_children, ignored_resource_ids)
                 organization_title = (
                     self._normalize_title(self._direct_child_text(organization, "title"))
                     or course_title
                     or "Estructura del curso"
                 )
-                children = [self._build_item_node(item, []) for item in resolved_children]
+                children = [self._build_item_node(item, []) for item in filtered_children]
                 organization_nodes.append(
                     {
                         "nodeId": f"organization:{organizations_index}:{organization_index}",
@@ -352,7 +393,7 @@ class IMSCCParser:
         unplaced_resource_ids = [
             resource.identifier
             for resource in resources
-            if resource.identifier and resource.identifier not in item_map
+            if resource.identifier and resource.identifier not in item_map and resource.identifier not in ignored_resource_ids
         ]
 
         return ParsedManifest(
@@ -405,11 +446,10 @@ class IMSCCParser:
 
             path: str | None = None
             url: str | None = None
-            origin = "internal"
             declared_href = self._normalize_reference(resource.href)
+            origin = infer_offline_origin(file_path=declared_href, source_url=external_url)
 
             if external_url:
-                origin = "external"
                 url = external_url
                 primary_reference = external_url
             else:
@@ -442,20 +482,22 @@ class IMSCCParser:
             title = (item_ref.title if item_ref else None) or resource.title or _derive_title(primary_reference) or "Sin título"
             module_title = _module_title_from_item_ref(item_ref)
             section_title = _section_title_from_item_ref(item_ref, fallback_title=title)
-            downloadable = bool(origin == "internal" and path and Path(path).suffix.lower() not in HTML_RESOURCE_EXTENSIONS)
+            origin = infer_offline_origin(file_path=path, source_url=url)
+            downloadable = bool(origin == "internal_file")
 
             inventory.append(
                 {
                     "id": resource.identifier,
                     "identifier": resource.identifier,
                     "title": title,
-                    "type": classify_resource(url if origin == "external" else path, is_external=origin == "external"),
+                    "type": classify_resource(url if origin == "external_url" else path, is_external=origin == "external_url"),
                     "origin": origin,
                     "url": url,
                     "sourceUrl": url,
-                    "path": path if origin == "internal" else None,
-                    "filePath": path if origin == "internal" else None,
-                    "localPath": path if origin == "internal" else None,
+                    "source": url or path,
+                    "path": path if origin != "external_url" else None,
+                    "filePath": path if origin != "external_url" else None,
+                    "localPath": path if origin != "external_url" else None,
                     "href": resource.href,
                     "files": resolved_file_refs or declared_files,
                     "dependencies": resource.dependencies,
@@ -482,10 +524,14 @@ class IMSCCParser:
         filtered_inventory = [
             resource
             for resource in inventory
-            if not _should_skip_metadata_resource(
-                resource.get("filePath") if isinstance(resource.get("filePath"), str) else None,
-                resource.get("sourceUrl") if isinstance(resource.get("sourceUrl"), str) else None,
-                effective_excluded_extensions,
+            if not should_ignore_offline_resource(
+                file_path=resource.get("filePath") if isinstance(resource.get("filePath"), str) else None,
+                source_url=resource.get("sourceUrl") if isinstance(resource.get("sourceUrl"), str) else None,
+                title=resource.get("title") if isinstance(resource.get("title"), str) else None,
+                manifest_type=resource.get("details", {}).get("manifestResourceType")
+                if isinstance(resource.get("details"), dict)
+                else None,
+                excluded_extensions=effective_excluded_extensions,
             )
         ]
         return self._order_inventory_by_structure(filtered_inventory, parsed_manifest)
@@ -496,6 +542,7 @@ class IMSCCParser:
         extracted_root: Path,
         *,
         excluded_extensions: set[str] | None = None,
+        max_depth: int = DEFAULT_HTML_DISCOVERY_MAX_DEPTH,
     ) -> list[dict[str, Any]]:
         effective_excluded_extensions = {
             extension.lower() for extension in (excluded_extensions or EXCLUDED_METADATA_EXTENSIONS)
@@ -513,14 +560,27 @@ class IMSCCParser:
 
         parent_child_ids: dict[str, list[str]] = {}
         discovered_resources: list[dict[str, Any]] = []
-
+        html_queue: list[tuple[str, dict[str, Any] | None, int]] = []
         for html_relative_path in self._collect_html_targets(inventory, extracted_root):
+            parent_resource = resources_by_path.get(html_relative_path) or _find_context_resource_for_html(
+                html_relative_path,
+                resources_by_path,
+            )
+            html_queue.append((html_relative_path, parent_resource, 0))
+
+        visited_html: set[tuple[str | None, str]] = set()
+        while html_queue:
+            html_relative_path, parent_resource, depth = html_queue.pop(0)
+            parent_resource_id = str(parent_resource.get("id")) if parent_resource and parent_resource.get("id") else None
+            visit_key = (parent_resource_id, html_relative_path)
+            if visit_key in visited_html or depth > max_depth:
+                continue
+            visited_html.add(visit_key)
+
             html_path = _resolve_relative_path(extracted_root, html_relative_path)
             if html_path is None or not html_path.exists() or not html_path.is_file():
                 continue
 
-            parent_resource = resources_by_path.get(html_relative_path)
-            context_resource = parent_resource or _find_context_resource_for_html(html_relative_path, resources_by_path)
             for candidate in self.extract_html_links(html_path, extracted_root):
                 if candidate["kind"] == "external":
                     source_url = str(candidate["url"])
@@ -530,7 +590,7 @@ class IMSCCParser:
                         child_resource = self._build_discovered_html_resource(
                             candidate,
                             parent_resource=parent_resource,
-                            context_resource=context_resource,
+                            context_resource=parent_resource,
                             parent_html_path=html_relative_path,
                         )
                         resources_by_url[_normalize_external_url(source_url)] = child_resource
@@ -540,8 +600,19 @@ class IMSCCParser:
 
                 relative_path = str(candidate["path"])
                 if Path(relative_path).suffix.lower() in HTML_RESOURCE_EXTENSIONS:
+                    if depth < max_depth:
+                        next_parent = resources_by_path.get(relative_path) or parent_resource or _find_context_resource_for_html(
+                            relative_path,
+                            resources_by_path,
+                        )
+                        html_queue.append((relative_path, next_parent, depth + 1))
                     continue
-                if _should_skip_metadata_resource(relative_path, None, effective_excluded_extensions):
+                if should_ignore_offline_resource(
+                    file_path=relative_path,
+                    source_url=None,
+                    title=candidate.get("title"),
+                    excluded_extensions=effective_excluded_extensions,
+                ):
                     continue
 
                 existing_resource = resources_by_path.get(relative_path)
@@ -550,7 +621,7 @@ class IMSCCParser:
                     child_resource = self._build_discovered_html_resource(
                         candidate,
                         parent_resource=parent_resource,
-                        context_resource=context_resource,
+                        context_resource=parent_resource,
                         parent_html_path=html_relative_path,
                     )
                     resources_by_path[relative_path] = child_resource
@@ -580,7 +651,12 @@ class IMSCCParser:
                 if self._is_external_url(reference):
                     source_url = reference.strip()
                     normalized_url = _normalize_external_url(source_url)
-                    if _looks_like_xml_reference(source_url) or normalized_url in external_seen:
+                    if should_ignore_offline_resource(
+                        file_path=None,
+                        source_url=source_url,
+                        title=title,
+                        excluded_extensions=EXCLUDED_METADATA_EXTENSIONS,
+                    ) or normalized_url in external_seen:
                         continue
                     external_seen.add(normalized_url)
                     discovered.append(
@@ -600,7 +676,12 @@ class IMSCCParser:
                     continue
 
                 relative_path = resolved_path.resolve().relative_to(extracted_root.resolve()).as_posix()
-                if _looks_like_xml_reference(relative_path) or relative_path in local_seen:
+                if should_ignore_offline_resource(
+                    file_path=relative_path,
+                    source_url=None,
+                    title=title,
+                    excluded_extensions=EXCLUDED_METADATA_EXTENSIONS,
+                ) or relative_path in local_seen:
                     continue
                 local_seen.add(relative_path)
                 discovered.append(
@@ -647,6 +728,19 @@ class IMSCCParser:
             ordered_inventory.append(resource)
 
         return ordered_inventory
+
+    def dedupe_inventory(self, inventory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+
+        for resource in inventory:
+            dedupe_key = _inventory_dedupe_key(resource)
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            deduped.append(resource)
+
+        return deduped
 
     def resolve_html_reference(self, reference: str | None, html_path: Path, extracted_root: Path) -> Path | None:
         raw_reference = (reference or "").strip().replace("\\", "/")
@@ -721,6 +815,31 @@ class IMSCCParser:
             "resourceId": item.resource_identifier,
             "children": [self._build_item_node(child, current_path) for child in item.children],
         }
+
+    def _filter_ignored_items(
+        self,
+        items: list[ResolvedManifestItem],
+        ignored_resource_ids: set[str],
+    ) -> list[ResolvedManifestItem]:
+        filtered_items: list[ResolvedManifestItem] = []
+        for item in items:
+            filtered_children = self._filter_ignored_items(item.children, ignored_resource_ids)
+            ignored_self = (
+                (item.resource_identifier in ignored_resource_ids if item.resource_identifier else False)
+                or _looks_like_lti_title(item.title)
+            )
+            if ignored_self and not filtered_children:
+                continue
+            filtered_items.append(
+                ResolvedManifestItem(
+                    node_id=item.node_id,
+                    identifier=item.identifier,
+                    title=item.title,
+                    resource_identifier=None if ignored_self else item.resource_identifier,
+                    children=filtered_children,
+                )
+            )
+        return filtered_items
 
     def _register_item_paths(
         self,
@@ -909,7 +1028,8 @@ class IMSCCParser:
             "identifier": resource_id,
             "title": title,
             "type": classify_resource(primary_reference, is_external=is_external),
-            "origin": "external" if is_external else "internal",
+            "origin": "external_url" if is_external else infer_offline_origin(file_path=primary_reference, source_url=None),
+            "source": primary_reference,
             "url": primary_reference if is_external else None,
             "sourceUrl": primary_reference if is_external else None,
             "path": None if is_external else primary_reference,
@@ -935,7 +1055,7 @@ class IMSCCParser:
             "notes": None,
             "localFile": not is_external,
             "local_file": not is_external,
-            "downloadable": not is_external,
+            "downloadable": not is_external and not is_internal_html_path(primary_reference),
             "external": is_external,
             "details": details,
         }
@@ -1054,19 +1174,41 @@ def _unique_preserving_order(values: list[str]) -> list[str]:
     return unique
 
 
-def _should_skip_metadata_resource(
+def should_ignore_offline_resource(
+    *,
     file_path: str | None,
     source_url: str | None,
-    excluded_extensions: set[str],
+    title: str | None = None,
+    manifest_type: str | None = None,
+    excluded_extensions: set[str] | None = None,
 ) -> bool:
+    effective_extensions = {extension.lower() for extension in (excluded_extensions or EXCLUDED_METADATA_EXTENSIONS)}
+    if _looks_like_lti_resource(title=title, manifest_type=manifest_type, reference=file_path or source_url):
+        return True
     if source_url:
         return False
     if not file_path:
         return False
+    if _looks_like_system_noise_path(file_path):
+        return True
     normalized_name = Path(_strip_query_and_fragment(file_path)).name.lower()
     if normalized_name == "imsmanifest.xml":
         return True
-    return Path(normalized_name).suffix.lower() in excluded_extensions
+    return Path(normalized_name).suffix.lower() in effective_extensions
+
+
+def infer_offline_origin(*, file_path: str | None, source_url: str | None) -> str:
+    if source_url:
+        return "external_url"
+    if is_internal_html_path(file_path):
+        return "internal_page"
+    return "internal_file"
+
+
+def is_internal_html_path(file_path: str | None) -> bool:
+    if not file_path:
+        return False
+    return Path(_strip_query_and_fragment(file_path)).suffix.lower() in HTML_RESOURCE_EXTENSIONS | {".xhtml"}
 
 
 def _inventory_file_path(resource: dict[str, Any] | None) -> str | None:
@@ -1083,10 +1225,12 @@ def _inventory_file_path(resource: dict[str, Any] | None) -> str | None:
 def _inventory_source_url(resource: dict[str, Any] | None) -> str | None:
     if not isinstance(resource, dict):
         return None
-    for key in ("sourceUrl", "url"):
+    for key in ("source", "sourceUrl", "url"):
         value = resource.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            stripped = value.strip()
+            if stripped.startswith(("http://", "https://")):
+                return stripped
     return None
 
 
@@ -1094,6 +1238,16 @@ def _normalize_external_url(reference: str) -> str:
     stripped = reference.strip()
     without_fragment = stripped.split("#", 1)[0].rstrip("/")
     return without_fragment.lower()
+
+
+def _inventory_source(resource: dict[str, Any] | None) -> str | None:
+    if not isinstance(resource, dict):
+        return None
+    for key in ("source", "filePath", "localPath", "path", "sourceUrl", "url"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().replace("\\", "/")
+    return None
 
 
 def _inventory_item_path(resource: dict[str, Any] | None) -> str | None:
@@ -1237,6 +1391,56 @@ def _resolve_relative_path(extracted_root: Path, relative_path: str) -> Path | N
 
 def _looks_like_xml_reference(reference: str) -> bool:
     return Path(_strip_query_and_fragment(reference)).suffix.lower() == ".xml"
+
+
+def _looks_like_lti_resource(*, title: str | None, manifest_type: str | None, reference: str | None) -> bool:
+    if _looks_like_lti_title(title):
+        return True
+    if isinstance(manifest_type, str):
+        normalized_type = manifest_type.strip().lower()
+        if any(marker in normalized_type for marker in LTI_TYPE_MARKERS):
+            return True
+    if not reference:
+        return False
+    normalized_reference = _strip_query_and_fragment(reference).replace("\\", "/").lower()
+    return any(marker in normalized_reference for marker in LTI_PATH_MARKERS)
+
+
+def _looks_like_lti_title(title: str | None) -> bool:
+    if not isinstance(title, str):
+        return False
+    normalized_title = " ".join(title.lower().split())
+    return any(marker in normalized_title for marker in LTI_TITLE_MARKERS)
+
+
+def _looks_like_system_noise_path(reference: str) -> bool:
+    normalized_reference = _strip_query_and_fragment(reference).replace("\\", "/").lower()
+    parts = [part for part in PurePosixPath(normalized_reference).parts if part not in {"", "."}]
+    if any(part in IGNORED_SYSTEM_SEGMENTS for part in parts):
+        return True
+    filename = Path(normalized_reference).name.lower()
+    return filename in IGNORED_SYSTEM_FILENAMES
+
+
+def _inventory_dedupe_key(resource: dict[str, Any]) -> tuple[str, str]:
+    source_url = _inventory_source_url(resource)
+    if source_url:
+        return ("url", _normalize_external_url(source_url))
+
+    file_path = _inventory_file_path(resource)
+    if file_path:
+        normalized_path = _strip_query_and_fragment(file_path).replace("\\", "/").lower()
+        return ("path", normalized_path)
+
+    source = _inventory_source(resource)
+    if source:
+        return ("source", source.lower())
+
+    course_path = resource.get("coursePath") or resource.get("course_path")
+    if isinstance(course_path, str) and course_path.strip():
+        return ("course_path", course_path.strip().lower())
+
+    return ("id", str(resource.get("id")))
 
 
 def _extract_html_reference_title(element: Any, reference: str) -> str | None:

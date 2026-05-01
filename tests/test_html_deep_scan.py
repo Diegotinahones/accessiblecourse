@@ -135,3 +135,35 @@ def test_discover_html_linked_resources_extracts_and_dedupes_nested_links() -> N
         assert references["course/downloads/guide.pdf"]["sectionTitle"] == "Módulo 1"
         assert inventory[0]["discoveredChildrenCount"] == 4
         assert inventory[1]["discoveredChildrenCount"] == 1
+
+
+def test_dedupe_inventory_keeps_unique_sources_but_preserves_same_title_with_different_paths() -> None:
+    parser = IMSCCParser()
+
+    deduped = parser.dedupe_inventory(
+        [
+            {
+                "id": "res-1",
+                "title": "Guía",
+                "coursePath": "Módulo 1",
+                "filePath": "course/docs/guide.pdf",
+                "source": "course/docs/guide.pdf",
+            },
+            {
+                "id": "res-2",
+                "title": "Guía duplicada",
+                "coursePath": "Módulo 1",
+                "filePath": "course/docs/guide.pdf",
+                "source": "course/docs/guide.pdf",
+            },
+            {
+                "id": "res-3",
+                "title": "Guía",
+                "coursePath": "Módulo 1",
+                "filePath": "course/docs/guide-v2.pdf",
+                "source": "course/docs/guide-v2.pdf",
+            },
+        ]
+    )
+
+    assert [resource["id"] for resource in deduped] == ["res-1", "res-3"]

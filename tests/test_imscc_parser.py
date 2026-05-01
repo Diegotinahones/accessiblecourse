@@ -93,6 +93,34 @@ MANIFEST_WITH_METADATA_RESOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+MANIFEST_WITH_LTI_RESOURCE = """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1" identifier="lti-course">
+  <organizations>
+    <organization identifier="org-1">
+      <title>Curso con LTI</title>
+      <item identifier="module-1">
+        <title>Módulo 1</title>
+        <item identifier="item-lti" identifierref="res-lti">
+          <title>Learning Tools</title>
+        </item>
+        <item identifier="item-pdf" identifierref="res-pdf">
+          <title>Apunte PDF</title>
+        </item>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-lti" type="associatedcontent/imscc_xmlv1p1/learning-application-resource" href="lti_resource_links/tool.xml">
+      <file href="lti_resource_links/tool.xml" />
+    </resource>
+    <resource identifier="res-pdf" type="webcontent" href="docs/apunte.pdf">
+      <file href="docs/apunte.pdf" />
+    </resource>
+  </resources>
+</manifest>
+"""
+
+
 MANIFEST_WITH_TITLE_FALLBACKS = """<?xml version="1.0" encoding="UTF-8"?>
 <manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1" identifier="title-fallbacks">
   <metadata>
@@ -167,11 +195,12 @@ class IMSCCParserTests(unittest.TestCase):
 
             by_identifier = {resource["identifier"]: resource for resource in resources}
             self.assertEqual(by_identifier["res-html"]["type"], "WEB")
+            self.assertEqual(by_identifier["res-html"]["origin"], "internal_page")
             self.assertEqual(by_identifier["res-html"]["path"], "course/module1/page.html")
             self.assertEqual(by_identifier["res-html"]["coursePath"], "Módulo 1")
             self.assertEqual(by_identifier["res-html"]["modulePath"], "Módulo 1")
             self.assertEqual(by_identifier["res-html"]["itemPath"], "Módulo 1 > Página HTML")
-            self.assertEqual(by_identifier["res-video"]["origin"], "external")
+            self.assertEqual(by_identifier["res-video"]["origin"], "external_url")
             self.assertEqual(by_identifier["res-video"]["url"], "https://www.youtube.com/watch?v=demo123")
             self.assertEqual(by_identifier["res-video"]["modulePath"], "Módulo 1")
             self.assertEqual(by_identifier["res-video"]["type"], "VIDEO")
@@ -221,6 +250,30 @@ class IMSCCParserTests(unittest.TestCase):
             resources = self.parser.build_resource_inventory(parsed_manifest, manifest_path, destination)
 
             self.assertEqual(resources, [])
+
+    def test_ignores_lti_resources_and_learning_tools_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            archive_path = temp_path / "lti.imscc"
+            destination = temp_path / "extract"
+            self._build_archive(
+                archive_path,
+                {
+                    "imsmanifest.xml": MANIFEST_WITH_LTI_RESOURCE,
+                    "lti_resource_links/tool.xml": "<tool />",
+                    "docs/apunte.pdf": b"%PDF-1.4\n",
+                },
+            )
+
+            self.parser.safe_extract_archive(archive_path, destination)
+            manifest_path = self.parser.find_manifest(destination)
+            parsed_manifest = self.parser.parse_manifest(manifest_path, destination)
+            resources = self.parser.build_resource_inventory(parsed_manifest, manifest_path, destination)
+
+            self.assertEqual([resource["identifier"] for resource in resources], ["res-pdf"])
+            organization = parsed_manifest.structure["organizations"][0]
+            self.assertEqual(organization["children"][0]["title"], "Módulo 1")
+            self.assertEqual([child["resourceId"] for child in organization["children"][0]["children"]], ["res-pdf"])
 
     def test_resolves_titles_from_resource_or_child_and_keeps_unmapped_resources_outside_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

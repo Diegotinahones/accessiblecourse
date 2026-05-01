@@ -109,6 +109,8 @@ def _internal_access_payload(resource: dict[str, Any], extracted_dir: Path) -> d
             access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=None,
             can_download=False,
+            reason_code="UNKNOWN",
+            reason_detail="El recurso no tiene un fichero asociado dentro del paquete.",
             error_message="El recurso no tiene un fichero asociado dentro del paquete.",
         )
     if resolved_path is None:
@@ -117,6 +119,8 @@ def _internal_access_payload(resource: dict[str, Any], extracted_dir: Path) -> d
             access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=None,
             can_download=False,
+            reason_code="UNKNOWN",
+            reason_detail="La ruta del recurso no es válida dentro del paquete extraído.",
             error_message="La ruta del recurso no es válida dentro del paquete extraído.",
         )
     if not resolved_path.exists() or not resolved_path.is_file():
@@ -125,13 +129,17 @@ def _internal_access_payload(resource: dict[str, Any], extracted_dir: Path) -> d
             access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=None,
             can_download=False,
+            reason_code="NOT_FOUND",
+            reason_detail="No se ha encontrado el fichero extraído para este recurso.",
             error_message="No se ha encontrado el fichero extraído para este recurso.",
         )
     return _build_access_payload(
         can_access=True,
         access_status=ACCESS_STATUS_OK,
         http_status=200,
-        can_download=True,
+        can_download=not _is_html_reference(relative_path),
+        reason_code="OK",
+        reason_detail="Recurso incluido dentro del paquete.",
         error_message=None,
     )
 
@@ -143,41 +151,51 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
             access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=None,
             can_download=False,
+            reason_code="UNKNOWN",
+            reason_detail="No se ha podido verificar la URL externa.",
             error_message="No se ha podido verificar la URL externa.",
         )
 
     checked_at = result.checked_at.isoformat() if result.checked_at else None
 
-    if result.reason == "timeout":
+    reason_code = getattr(result, "reason_code", None) or _reason_code_from_legacy_result(result)
+
+    if reason_code == "TIMEOUT":
         return _build_access_payload(
             can_access=False,
             access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
+            reason_code=reason_code,
+            reason_detail=getattr(result, "reason_detail", None),
             error_message=result.error_message or "La URL ha excedido el tiempo de espera.",
             url_status=result.url_status,
             final_url=result.final_url,
             checked_at=checked_at,
         )
 
-    if result.reason == "404_not_found":
+    if reason_code == "NOT_FOUND":
         return _build_access_payload(
             can_access=False,
             access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
+            reason_code=reason_code,
+            reason_detail=getattr(result, "reason_detail", None),
             error_message=result.error_message or "La URL devolvió 404.",
             url_status=result.url_status,
             final_url=result.final_url,
             checked_at=checked_at,
         )
 
-    if result.reason in {"forbidden", "canvas_auth_required"} or result.status_code in {401, 403}:
+    if reason_code in {"AUTH_REQUIRED", "FORBIDDEN"}:
         return _build_access_payload(
             can_access=False,
             access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
+            reason_code=reason_code,
+            reason_detail=getattr(result, "reason_detail", None),
             error_message=result.error_message or "La URL no permite acceso directo.",
             url_status=result.url_status,
             final_url=result.final_url,
@@ -190,6 +208,8 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
             access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
+            reason_code=reason_code,
+            reason_detail=getattr(result, "reason_detail", None),
             error_message=result.error_message or "No se ha podido acceder a la URL.",
             url_status=result.url_status,
             final_url=result.final_url,
@@ -201,11 +221,13 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
         can_access=True,
         access_status=ACCESS_STATUS_OK,
         http_status=result.status_code,
-        can_download=_looks_downloadable_url(
+        can_download=bool(getattr(result, "downloadable_guess", False)) or _looks_downloadable_url(
             final_reference=final_reference,
             content_type=result.content_type,
             content_disposition=result.content_disposition,
         ),
+        reason_code="OK",
+        reason_detail=getattr(result, "reason_detail", None),
         error_message=None,
         url_status=result.url_status,
         final_url=result.final_url,
@@ -219,6 +241,8 @@ def _build_access_payload(
     access_status: str,
     http_status: int | None,
     can_download: bool,
+    reason_code: str,
+    reason_detail: str | None,
     error_message: str | None,
     url_status: str | None = None,
     final_url: str | None = None,
@@ -228,6 +252,8 @@ def _build_access_payload(
         "canAccess": can_access,
         "accessStatus": access_status,
         "httpStatus": http_status,
+        "reasonCode": reason_code,
+        "reasonDetail": reason_detail,
         "canDownload": can_download,
         "errorMessage": error_message,
         "urlStatus": url_status,
@@ -245,6 +271,10 @@ def _merge_access_payload(resource: dict[str, Any], access_payload: dict[str, An
     resource["http_status"] = access_payload["httpStatus"]
     resource["accessStatusCode"] = access_payload["httpStatus"]
     resource["access_status_code"] = access_payload["httpStatus"]
+    resource["reasonCode"] = access_payload["reasonCode"]
+    resource["reason_code"] = access_payload["reasonCode"]
+    resource["reasonDetail"] = access_payload["reasonDetail"]
+    resource["reason_detail"] = access_payload["reasonDetail"]
     resource["canDownload"] = access_payload["canDownload"]
     resource["can_download"] = access_payload["canDownload"]
     resource["downloadStatus"] = "OK" if access_payload["canDownload"] else "NO_DESCARGABLE"
@@ -267,6 +297,8 @@ def _merge_access_payload(resource: dict[str, Any], access_payload: dict[str, An
     details["accessCheck"] = {
         "canAccess": access_payload["canAccess"],
         "accessStatus": access_payload["accessStatus"],
+        "reasonCode": access_payload["reasonCode"],
+        "reasonDetail": access_payload["reasonDetail"],
         "httpStatus": access_payload["httpStatus"],
         "canDownload": access_payload["canDownload"],
         "errorMessage": access_payload["errorMessage"],
@@ -320,6 +352,26 @@ def _looks_downloadable_url(
     if normalized_content_type.startswith("text/html"):
         return False
     return normalized_content_type.startswith(DOWNLOADABLE_CONTENT_PREFIXES)
+
+
+def _is_html_reference(reference: str | None) -> bool:
+    if not reference:
+        return False
+    return Path(urlparse(reference).path or reference).suffix.lower() in {".html", ".htm", ".xhtml"}
+
+
+def _reason_code_from_legacy_result(result: UrlCheckResult) -> str:
+    if result.reason == "404_not_found" or result.status_code == 404:
+        return "NOT_FOUND"
+    if result.reason in {"auth_required", "canvas_auth_required"} or result.status_code == 401:
+        return "AUTH_REQUIRED"
+    if result.reason == "forbidden" or result.status_code == 403:
+        return "FORBIDDEN"
+    if result.reason == "timeout":
+        return "TIMEOUT"
+    if result.broken_link or not result.checked:
+        return "UNKNOWN"
+    return "OK"
 
 
 def _broken_link_note(access_payload: dict[str, Any]) -> str | None:

@@ -34,9 +34,15 @@ from app.services.access_analysis import OfflineAccessAdapter, OnlineAccessAdapt
 from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContextStore
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
-from app.services.course_structure import build_fallback_course_structure
+from app.services.course_structure import build_fallback_course_structure, filter_course_structure
 from app.services.imscc import build_resources_from_extracted
-from app.services.imscc_parser import IMSCCParser, ParserError
+from app.services.imscc_parser import (
+    IMSCCParser,
+    ParserError,
+    infer_offline_origin,
+    is_internal_html_path,
+    should_ignore_offline_resource,
+)
 from app.services.review_service import sync_job_inventory_from_payload
 from app.services.storage import (
     get_extracted_dir,
@@ -203,14 +209,16 @@ def _build_review_inventory(
             continue
 
         module_path = _derive_course_path(file_path or source_url)
+        origin = infer_offline_origin(file_path=file_path, source_url=source_url)
         inventory.append(
             {
                 "id": parsed_resource.resource_id,
                 "title": parsed_resource.title,
                 "type": RESOURCE_TYPE_TO_REVIEW_TYPE.get(parsed_resource.resource_type, "OTHER"),
-                "origin": _normalize_origin(parsed_resource.origin, source_url=source_url),
+                "origin": origin,
                 "url": source_url,
                 "sourceUrl": source_url,
+                "source": source_url or file_path,
                 "path": file_path,
                 "filePath": file_path,
                 "localPath": file_path,
@@ -218,6 +226,7 @@ def _build_review_inventory(
                 "coursePath": module_path,
                 "module_path": module_path,
                 "modulePath": module_path,
+                "downloadable": origin == "internal_file",
                 "status": RESOURCE_STATUS_TO_REVIEW_STATUS.get(parsed_resource.status, "WARN"),
                 "notes": None,
             }
@@ -301,21 +310,18 @@ def _should_skip_metadata_resource(
     source_url: str | None,
     excluded_extensions: set[str],
 ) -> bool:
-    if source_url:
-        return False
-    if not file_path:
-        return False
-    normalized_name = Path(file_path.split("#", 1)[0].split("?", 1)[0]).name.lower()
-    if normalized_name == "imsmanifest.xml":
-        return True
-    return Path(normalized_name).suffix.lower() in excluded_extensions
+    return should_ignore_offline_resource(
+        file_path=file_path,
+        source_url=source_url,
+        excluded_extensions=excluded_extensions,
+    )
 
 
-def _normalize_origin(origin: str | None, *, source_url: str | None) -> str:
+def _normalize_origin(origin: str | None, *, source_url: str | None, file_path: str | None) -> str:
     normalized = (origin or "").strip().lower()
-    if normalized in {"external", "externo"} or source_url:
-        return "externo"
-    return "interno"
+    if normalized in {"external_url", "internal_page", "internal_file"}:
+        return normalized
+    return infer_offline_origin(file_path=file_path, source_url=source_url)
 
 
 def _normalize_offline_inventory(
@@ -327,11 +333,16 @@ def _normalize_offline_inventory(
     normalized_resources: list[dict[str, Any]] = []
     for resource in inventory:
         source_url = resource.get("sourceUrl") or resource.get("url")
+        source = resource.get("source")
         file_path = resource.get("filePath") or resource.get("localPath") or resource.get("path")
         if isinstance(source_url, str):
             source_url = source_url.strip() or None
         else:
             source_url = None
+        if isinstance(source, str):
+            source = source.strip() or None
+        else:
+            source = None
         if isinstance(file_path, str):
             file_path = file_path.strip() or None
         else:
@@ -390,9 +401,11 @@ def _normalize_offline_inventory(
         normalized["origin"] = _normalize_origin(
             resource.get("origin") if isinstance(resource.get("origin"), str) else None,
             source_url=source_url,
+            file_path=file_path,
         )
         normalized["url"] = source_url
         normalized["sourceUrl"] = source_url
+        normalized["source"] = source_url or file_path or source
         normalized["path"] = file_path
         normalized["filePath"] = file_path
         normalized["localPath"] = file_path
@@ -406,11 +419,11 @@ def _normalize_offline_inventory(
         normalized["moduleTitle"] = module_title
         normalized["section_title"] = section_title
         normalized["sectionTitle"] = section_title
-        normalized["downloadable"] = downloadable
+        normalized["downloadable"] = downloadable and not is_internal_html_path(file_path)
         normalized.setdefault("details", {})
         normalized_resources.append(normalized)
 
-    return normalized_resources
+    return IMSCCParser().dedupe_inventory(normalized_resources)
 
 
 def _assign_generic_module_paths(resources: list[dict[str, Any]], module_title: str = DEFAULT_GENERIC_MODULE_TITLE) -> None:
@@ -438,9 +451,13 @@ def _build_manifest_review_inventory(
     settings: Settings,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     parser = IMSCCParser()
-    manifest_path = parser.find_manifest(extracted_dir)
-    parsed_manifest = parser.parse_manifest(manifest_path, extracted_dir)
     excluded_extensions = _normalized_excluded_extensions(settings)
+    manifest_path = parser.find_manifest(extracted_dir)
+    parsed_manifest = parser.parse_manifest(
+        manifest_path,
+        extracted_dir,
+        excluded_extensions=excluded_extensions,
+    )
     inventory = parser.build_resource_inventory(
         parsed_manifest,
         manifest_path,
@@ -463,16 +480,19 @@ def _build_manifest_review_inventory(
         for resource in normalized_inventory
         if isinstance(resource.get("id"), str) and resource.get("id")
     }
-    course_structure = {
-        **parsed_manifest.structure,
-        "unplacedResourceIds": [
-            resource.identifier
-            for resource in parsed_manifest.resources
-            if resource.identifier
-            and resource.identifier in visible_resource_ids
-            and resource.identifier not in parsed_manifest.item_map
-        ],
-    }
+    course_structure = filter_course_structure(
+        {
+            **parsed_manifest.structure,
+            "unplacedResourceIds": [
+                resource.identifier
+                for resource in parsed_manifest.resources
+                if resource.identifier
+                and resource.identifier in visible_resource_ids
+                and resource.identifier not in parsed_manifest.item_map
+            ],
+        },
+        visible_resource_ids=visible_resource_ids,
+    )
     return (
         normalized_inventory,
         course_structure,

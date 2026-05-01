@@ -394,11 +394,15 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     assert pdf_resource["canAccess"] is True
     assert pdf_resource["canDownload"] is True
     assert pdf_resource["accessStatus"] == "OK"
+    assert pdf_resource["origin"] == "internal_file"
+    assert pdf_resource["reasonCode"] == "OK"
 
     broken_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Video externo")
     assert broken_resource["status"] == "ERROR"
     assert "broken_link" in broken_resource["notes"]
     assert broken_resource["accessStatus"] == "NO_ACCEDE"
+    assert broken_resource["origin"] == "external_url"
+    assert broken_resource["reasonCode"] == "NOT_FOUND"
 
     assignment_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Entrega final")
     assert assignment_resource["status"] == "OK"
@@ -414,12 +418,15 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     ralti_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "RALTI")
     assert ralti_resource["status"] == "WARN"
     assert ralti_resource["accessStatus"] == "REQUIERE_SSO"
+    assert ralti_resource["reasonCode"] == "AUTH_REQUIRED"
     assert "requires_sso" in ralti_resource["notes"]
 
     page_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Bienvenida")
     assert page_resource["canAccess"] is True
     assert page_resource["canDownload"] is False
     assert page_resource["discoveredChildrenCount"] == 2
+    assert page_resource["origin"] == "internal_page"
+    assert page_resource["childrenCount"] == 2
 
     discovered_file = next(resource for resource in resources_payload["resources"] if resource["title"] == "Plantilla accesible.docx")
     assert discovered_file["canAccess"] is True
@@ -427,6 +434,7 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     assert discovered_file["downloadStatus"] == "OK"
     assert discovered_file["downloadStatusCode"] == 200
     assert discovered_file["parentResourceId"] == page_resource["id"]
+    assert discovered_file["parentId"] == page_resource["id"]
 
     assignment_file = next(resource for resource in resources_payload["resources"] if resource["title"] == "PEC1.pdf")
     assert assignment_file["canAccess"] is True

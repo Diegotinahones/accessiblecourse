@@ -178,6 +178,42 @@ def build_imscc_with_offline_deep_scan() -> bytes:
     return buffer.getvalue()
 
 
+def build_imscc_with_duplicate_manifest_resources() -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "imsmanifest.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+  <organizations>
+    <organization identifier="org-1">
+      <title>Curso duplicado</title>
+      <item identifier="module-1">
+        <title>Unidad 1</title>
+        <item identifier="item-1" identifierref="res-guide-a">
+          <title>Guía A</title>
+        </item>
+        <item identifier="item-2" identifierref="res-guide-b">
+          <title>Guía B</title>
+        </item>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-guide-a" type="webcontent" href="course/shared/guide.pdf">
+      <file href="course/shared/guide.pdf" />
+    </resource>
+    <resource identifier="res-guide-b" type="webcontent" href="course/shared/guide.pdf">
+      <file href="course/shared/guide.pdf" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        )
+        archive.writestr("course/shared/guide.pdf", b"%PDF-1.4\n")
+    return buffer.getvalue()
+
+
 def test_bootstrap_inventory_and_persist_checklist(client, test_settings) -> None:
     job_id = "job-thread4-bootstrap"
     write_inventory(
@@ -404,6 +440,10 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert pdf_resource["sourceUrl"] is None
     assert pdf_resource["canAccess"] is True
     assert pdf_resource["accessStatus"] == "OK"
+    assert pdf_resource["reasonCode"] == "OK"
+    assert pdf_resource["origin"] == "internal_file"
+    assert pdf_resource["parentId"] is None
+    assert pdf_resource["childrenCount"] == 0
     assert pdf_resource["httpStatus"] == 200
     assert pdf_resource["accessStatusCode"] == 200
     assert pdf_resource["canDownload"] is True
@@ -418,6 +458,10 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert link_resource["finalUrl"] == "https://example.com/broken-link"
     assert link_resource["canAccess"] is False
     assert link_resource["accessStatus"] == "NO_ACCEDE"
+    assert link_resource["reasonCode"] == "NOT_FOUND"
+    assert link_resource["origin"] == "external_url"
+    assert link_resource["parentId"] is None
+    assert link_resource["childrenCount"] == 0
     assert link_resource["httpStatus"] == 404
     assert link_resource["canDownload"] is False
     assert link_resource["errorMessage"] == "La URL devolvió 404."
@@ -444,6 +488,12 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
         "REQUIERE_SSO": 0,
     }
     assert access_summary["groups"][0]["modulePath"] == "Tema 1"
+    summary_link_resource = next(
+        resource
+        for resource in access_summary["groups"][0]["resources"]
+        if resource["title"] == "Enlace externo"
+    )
+    assert summary_link_resource["reasonCode"] == "NOT_FOUND"
 
     access_response = client.get(f"/api/jobs/{job_id}/access")
     assert access_response.status_code == 200, access_response.text
@@ -495,6 +545,32 @@ def test_offline_inventory_returns_unmapped_resources_without_technical_grouping
     assert unmapped_resource["itemPath"] is None
 
 
+def test_offline_inventory_dedupes_duplicate_manifest_sources(client) -> None:
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_imscc_with_duplicate_manifest_resources(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    payload = resources_response.json()
+    resources = payload["resources"]
+
+    assert len(resources) == 1
+    assert resources[0]["title"] == "Guía A"
+    assert resources[0]["filePath"] == "course/shared/guide.pdf"
+    assert resources[0]["source"] == "course/shared/guide.pdf"
+    assert resources[0]["origin"] == "internal_file"
+
+    organization = payload["structure"]["organizations"][0]
+    assert organization["title"] == "Curso duplicado"
+    assert organization["children"][0]["title"] == "Unidad 1"
+    assert [child["resourceId"] for child in organization["children"][0]["children"]] == ["res-guide-a"]
+
+
 def test_offline_deep_scan_discovers_nested_local_and_external_resources(client, monkeypatch) -> None:
     class StubURLChecker:
         def check_url(self, url: str):
@@ -542,38 +618,53 @@ def test_offline_deep_scan_discovers_nested_local_and_external_resources(client,
     assert worksheet["accessStatusCode"] == 200
     assert worksheet["canDownload"] is True
     assert worksheet["parentResourceId"] == "res-html"
+    assert worksheet["parentId"] == "res-html"
+    assert worksheet["reasonCode"] == "OK"
+    assert worksheet["childrenCount"] == 0
+    assert worksheet["origin"] == "internal_file"
     assert worksheet["modulePath"] == "Unidad 1"
+    assert worksheet["source"] == "course/downloads/worksheet.docx"
     assert worksheet["moduleTitle"] == "Unidad 1"
     assert worksheet["sectionTitle"] == "Unidad 1"
 
     assert slides["canAccess"] is True
     assert slides["canDownload"] is True
+    assert slides["parentResourceId"] == "res-html"
+    assert slides["origin"] == "internal_file"
     assert slides["modulePath"] == "Unidad 1"
     assert slides["moduleTitle"] == "Unidad 1"
     assert slides["sectionTitle"] == "Unidad 1"
     assert image["type"] == "IMAGE"
     assert image["canAccess"] is True
     assert image["canDownload"] is True
+    assert image["origin"] == "internal_file"
     assert web["type"] == "WEB"
     assert web["canAccess"] is True
     assert web["canDownload"] is False
+    assert web["origin"] == "external_url"
+    assert web["reasonCode"] == "OK"
     assert video["type"] == "VIDEO"
     assert video["canAccess"] is True
     assert video["canDownload"] is False
-    assert html_page["discoveredChildrenCount"] == 4
+    assert video["origin"] == "external_url"
+    assert html_page["origin"] == "internal_page"
+    assert html_page["discoveredChildrenCount"] == 5
+    assert html_page["childrenCount"] == 5
+    assert html_page["canDownload"] is False
+    assert html_page["reasonCode"] == "OK"
 
     summary_response = client.get(f"/api/jobs/{job_id}/summary")
     assert summary_response.status_code == 200, summary_response.text
     summary_payload = summary_response.json()
     assert summary_payload["totalResources"] == 6
     assert summary_payload["accessibleResources"] == 6
-    assert summary_payload["downloadableResources"] == 4
+    assert summary_payload["downloadableResources"] == 3
 
     access_summary_response = client.get(f"/api/jobs/{job_id}/access-summary")
     assert access_summary_response.status_code == 200, access_summary_response.text
     access_summary = access_summary_response.json()
     assert access_summary["accessible"] == 6
-    assert access_summary["downloadable"] == 4
+    assert access_summary["downloadable"] == 3
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

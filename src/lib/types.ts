@@ -92,6 +92,7 @@ export interface ResourceListItem {
   title: string;
   type: ReviewResourceType;
   origin: string | null;
+  source: string | null;
   url: string | null;
   sourceUrl: string | null;
   downloadUrl: string | null;
@@ -100,6 +101,8 @@ export interface ResourceListItem {
   filePath: string | null;
   coursePath: string | null;
   modulePath: string | null;
+  moduleTitle: string | null;
+  sectionTitle: string | null;
   itemPath: string | null;
   status: ReviewResourceHealthStatus;
   urlStatus: string | null;
@@ -122,6 +125,8 @@ export interface ResourceListItem {
   downloadStatusCode: number | null;
   discoveredChildrenCount: number;
   parentResourceId: string | null;
+  parentId: string | null;
+  childrenCount: number;
   discovered: boolean;
   accessNote: string | null;
   errorMessage: string | null;

@@ -103,14 +103,23 @@ def _resource_read(
     module_path = inventory_item.course_path if inventory_item is not None else resource.course_path
     module_title = inventory_item.module_title if inventory_item is not None else None
     section_title = inventory_item.section_title if inventory_item is not None else None
+    source = inventory_item.source if inventory_item is not None else (source_url or file_path)
     item_path = inventory_item.item_path if inventory_item is not None else None
-    parent_resource_id = inventory_item.parent_resource_id if inventory_item is not None else None
+    parent_resource_id = (
+        inventory_item.parent_resource_id if inventory_item is not None else resource.parent_resource_id
+    )
+    children_count = (
+        inventory_item.discovered_children_count
+        if inventory_item is not None
+        else resource.discovered_children_count
+    )
     return ResourceListItemRead(
         id=resource.id,
         jobId=resource.job_id,
         title=resource.title,
         type=resource.type,
         origin=resource.origin,
+        source=source,
         url=source_url,
         sourceUrl=source_url,
         downloadUrl=download_url,
@@ -132,17 +141,17 @@ def _resource_read(
         accessStatusCode=(
             inventory_item.access_status_code if inventory_item is not None else resource.access_status_code
         ),
+        reasonCode=inventory_item.reason_code if inventory_item is not None else resource.reason_code,
+        reasonDetail=inventory_item.reason_detail if inventory_item is not None else resource.reason_detail,
         canDownload=inventory_item.can_download if inventory_item is not None else resource.can_download,
         downloadStatus=inventory_item.download_status if inventory_item is not None else resource.download_status,
         downloadStatusCode=(
             inventory_item.download_status_code if inventory_item is not None else resource.download_status_code
         ),
-        discoveredChildrenCount=(
-            inventory_item.discovered_children_count
-            if inventory_item is not None
-            else resource.discovered_children_count
-        ),
+        discoveredChildrenCount=children_count,
         parentResourceId=parent_resource_id,
+        parentId=parent_resource_id,
+        childrenCount=children_count,
         discovered=inventory_item.discovered if inventory_item is not None else False,
         accessNote=inventory_item.access_note if inventory_item is not None else resource.access_note,
         errorMessage=inventory_item.error_message if inventory_item is not None else resource.error_message,
@@ -188,6 +197,8 @@ def _build_access_summary(session: Session, job_id: str) -> AccessSummaryRead:
             else str(resource.access_status),
             "canDownload": resource.can_download,
             "downloadStatus": resource.download_status,
+            "reasonCode": resource.reason_code,
+            "reasonDetail": resource.reason_detail,
             "accessStatusCode": resource.access_status_code,
             "downloadStatusCode": resource.download_status_code,
             "accessNote": resource.access_note or resource.error_message,

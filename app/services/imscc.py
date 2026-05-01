@@ -7,6 +7,7 @@ from xml.etree import ElementTree
 
 from app.core.errors import AppError
 from app.services.catalog import infer_origin, infer_status, infer_type
+from app.services.imscc_parser import infer_offline_origin, should_ignore_offline_resource
 
 
 @dataclass(slots=True)
@@ -73,13 +74,15 @@ def build_resources_from_extracted(extracted_dir: Path) -> list[ParsedResource]:
     if manifest_path.exists():
         for manifest_resource in parse_manifest(manifest_path):
             href = manifest_resource.get("href")
+            if should_ignore_offline_resource(file_path=href, source_url=None):
+                continue
             extracted_path = None
             if href:
                 candidate = (extracted_dir / Path(href)).resolve()
                 if candidate.exists() and str(candidate).startswith(str(extracted_root)):
                     extracted_path = str(candidate.relative_to(extracted_root))
             resource_type = infer_type(href)
-            origin = infer_origin(href)
+            origin = infer_offline_origin(file_path=extracted_path or href, source_url=href if href and href.startswith(("http://", "https://")) else None)
             resources.append(
                 ParsedResource(
                     resource_id=str(uuid4()),
@@ -87,8 +90,8 @@ def build_resources_from_extracted(extracted_dir: Path) -> list[ParsedResource]:
                     href=href,
                     extracted_path=extracted_path,
                     resource_type=resource_type.value,
-                    origin=origin.value,
-                    status=infer_status(resource_type, origin).value,
+                    origin=origin,
+                    status=infer_status(resource_type, infer_origin(href)).value,
                 )
             )
 
@@ -99,8 +102,10 @@ def build_resources_from_extracted(extracted_dir: Path) -> list[ParsedResource]:
         if not path.is_file() or path.name == "imsmanifest.xml":
             continue
         relative_path = str(path.relative_to(extracted_dir))
+        if should_ignore_offline_resource(file_path=relative_path, source_url=None):
+            continue
         resource_type = infer_type(relative_path)
-        origin = infer_origin(relative_path)
+        origin = infer_offline_origin(file_path=relative_path, source_url=None)
         resources.append(
             ParsedResource(
                 resource_id=str(uuid4()),
@@ -108,8 +113,8 @@ def build_resources_from_extracted(extracted_dir: Path) -> list[ParsedResource]:
                 href=relative_path,
                 extracted_path=relative_path,
                 resource_type=resource_type.value,
-                origin=origin.value,
-                status=infer_status(resource_type, origin).value,
+                origin=origin,
+                status=infer_status(resource_type, infer_origin(relative_path)).value,
             )
         )
 

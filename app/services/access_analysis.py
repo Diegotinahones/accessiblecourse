@@ -13,6 +13,14 @@ from app.core.config import Settings
 from app.core.errors import AppError
 from app.models.entities import ResourceHealthStatus
 from app.services.access_check import build_access_status_counts
+from app.services.access_probe import (
+    REASON_AUTH_REQUIRED,
+    REASON_FORBIDDEN,
+    REASON_NOT_FOUND,
+    REASON_OK,
+    REASON_TIMEOUT,
+    REASON_UNKNOWN,
+)
 from app.services.canvas_client import CanvasClient, CanvasCredentials
 from app.services.canvas_deep_scan import extract_canvas_links
 from app.services.imscc_parser import IMSCCParser
@@ -62,6 +70,8 @@ class AccessProbeResult:
     can_access: bool
     access_status: str
     http_status: int | None = None
+    reason_code: str = REASON_OK
+    reason_detail: str | None = None
     error_message: str | None = None
     url_status: str | None = None
     final_url: str | None = None
@@ -233,6 +243,8 @@ def build_access_summary(
                 "canAccess": bool(resource.get("canAccess")),
                 "canDownload": bool(resource.get("canDownload")),
                 "downloadStatus": resource.get("downloadStatus"),
+                "reasonCode": resource.get("reasonCode"),
+                "reasonDetail": resource.get("reasonDetail"),
                 "accessStatusCode": resource.get("accessStatusCode"),
                 "downloadStatusCode": resource.get("downloadStatusCode"),
                 "discovered": _is_discovered_resource(resource),
@@ -292,6 +304,8 @@ class OfflineAccessAdapter:
             return AccessProbeResult(
                 can_access=False,
                 access_status=ACCESS_STATUS_ERROR,
+                reason_code=REASON_UNKNOWN,
+                reason_detail="El recurso no tiene un fichero asociado dentro del paquete.",
                 error_message="El recurso no tiene un fichero asociado dentro del paquete.",
             )
 
@@ -301,6 +315,8 @@ class OfflineAccessAdapter:
             return AccessProbeResult(
                 can_access=False,
                 access_status=ACCESS_STATUS_ERROR,
+                reason_code=REASON_UNKNOWN,
+                reason_detail="La ruta del recurso no es valida dentro del paquete extraido.",
                 error_message="La ruta del recurso no es valida dentro del paquete extraido.",
             )
 
@@ -308,10 +324,20 @@ class OfflineAccessAdapter:
             return AccessProbeResult(
                 can_access=False,
                 access_status=ACCESS_STATUS_NO_ACCEDE,
+                reason_code=REASON_NOT_FOUND,
+                reason_detail="No se ha encontrado el fichero extraido para este recurso.",
                 error_message="No se ha encontrado el fichero extraido para este recurso.",
             )
 
-        return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+        is_page = _is_html_reference(relative_path)
+        reason_detail = "Pagina interna incluida en el paquete." if is_page else "Archivo incluido en el paquete."
+        return AccessProbeResult(
+            can_access=True,
+            access_status=ACCESS_STATUS_OK,
+            http_status=200,
+            reason_code=REASON_OK,
+            reason_detail=reason_detail,
+        )
 
     def probe_download(self, resource: dict[str, Any], access: AccessProbeResult) -> DownloadProbeResult:
         source_url = _resource_source_url(resource)
@@ -327,7 +353,8 @@ class OfflineAccessAdapter:
             )
 
         return DownloadProbeResult(
-            can_download=access.access_status == ACCESS_STATUS_OK,
+            can_download=access.access_status == ACCESS_STATUS_OK
+            and not _is_html_reference(_resource_file_path(resource) or ""),
             http_status=200 if access.access_status == ACCESS_STATUS_OK else None,
         )
 
@@ -485,7 +512,13 @@ class OnlineAccessAdapter:
                 _merge_discovered_file(resource, canvas_file)
             except AppError as exc:
                 return _access_from_app_error(exc)
-            return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+            return AccessProbeResult(
+                can_access=True,
+                access_status=ACCESS_STATUS_OK,
+                http_status=200,
+                reason_code=REASON_OK,
+                reason_detail="Archivo Canvas accesible via API.",
+            )
 
         if canvas_type == "Assignment":
             return self._probe_canvas_api_resource(resource, cache_name="assignment")
@@ -506,14 +539,26 @@ class OnlineAccessAdapter:
                 self._get_page(str(resource["pageId"]))
             except AppError as exc:
                 return _access_from_app_error(exc)
-            return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+            return AccessProbeResult(
+                can_access=True,
+                access_status=ACCESS_STATUS_OK,
+                http_status=200,
+                reason_code=REASON_OK,
+                reason_detail="Pagina Canvas accesible via API.",
+            )
 
         if resource.get("pageId"):
             try:
                 self._get_page(str(resource["pageId"]))
             except AppError as exc:
                 return _access_from_app_error(exc)
-            return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+            return AccessProbeResult(
+                can_access=True,
+                access_status=ACCESS_STATUS_OK,
+                http_status=200,
+                reason_code=REASON_OK,
+                reason_detail="Pagina Canvas accesible via API.",
+            )
 
         target_url = _download_url(resource) or source_url
         if target_url:
@@ -522,6 +567,8 @@ class OnlineAccessAdapter:
         return AccessProbeResult(
             can_access=False,
             access_status=ACCESS_STATUS_ERROR,
+            reason_code=REASON_UNKNOWN,
+            reason_detail="No hemos podido resolver una URL o referencia Canvas para este recurso.",
             error_message="No hemos podido resolver una URL o referencia Canvas para este recurso.",
         )
 
@@ -670,7 +717,13 @@ class OnlineAccessAdapter:
                     message=exc.message,
                 )
             return _access_from_app_error(exc)
-        return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+        return AccessProbeResult(
+            can_access=True,
+            access_status=ACCESS_STATUS_OK,
+            http_status=200,
+            reason_code=REASON_OK,
+            reason_detail="Recurso Canvas accesible via API.",
+        )
 
     def _probe_quiz(self, resource: dict[str, Any]) -> AccessProbeResult:
         try:
@@ -679,7 +732,13 @@ class OnlineAccessAdapter:
             if exc.status_code in {401, 403, 404}:
                 return _requires_interaction_result("Quiz", http_status=exc.status_code, message=exc.message)
             return _access_from_app_error(exc)
-        return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+        return AccessProbeResult(
+            can_access=True,
+            access_status=ACCESS_STATUS_OK,
+            http_status=200,
+            reason_code=REASON_OK,
+            reason_detail="Recurso Canvas accesible via API.",
+        )
 
     def _get_cached_canvas_payload(
         self,
@@ -789,6 +848,10 @@ def _merge_analysis(
     resource["can_access"] = access.can_access
     resource["accessStatus"] = access.access_status
     resource["access_status"] = access.access_status
+    resource["reasonCode"] = access.reason_code
+    resource["reason_code"] = access.reason_code
+    resource["reasonDetail"] = access.reason_detail
+    resource["reason_detail"] = access.reason_detail
     resource["httpStatus"] = http_status
     resource["http_status"] = http_status
     resource["accessStatusCode"] = access.http_status
@@ -802,6 +865,14 @@ def _merge_analysis(
     if _download_url(resource):
         resource["downloadUrl"] = _download_url(resource)
         resource["download_url"] = resource["downloadUrl"]
+    access_origin = _access_origin(resource)
+    resource["origin"] = access_origin
+    resource["accessOrigin"] = access_origin
+    resource["access_origin"] = access_origin
+    resource["parentId"] = resource.get("parentResourceId") or resource.get("parent_resource_id")
+    resource["parent_id"] = resource["parentId"]
+    resource["childrenCount"] = resource.get("discoveredChildrenCount", 0)
+    resource["children_count"] = resource["childrenCount"]
     resource["errorMessage"] = error_message
     resource["error_message"] = error_message
     resource["accessNote"] = error_message
@@ -819,6 +890,8 @@ def _merge_analysis(
         "mode": mode,
         "canAccess": access.can_access,
         "accessStatus": access.access_status,
+        "reasonCode": access.reason_code,
+        "reasonDetail": access.reason_detail,
         "httpStatus": http_status,
         "canDownload": download.can_download,
         "errorMessage": error_message,
@@ -830,7 +903,7 @@ def _merge_analysis(
     if access.access_status == ACCESS_STATUS_NO_ACCEDE:
         details["broken_link"] = {
             "url": resource.get("sourceUrl") or resource.get("url"),
-            "reason": access.access_status,
+            "reason": access.reason_code,
             "statusCode": http_status,
         }
         _append_note(resource, _broken_link_note(access.access_status, http_status))
@@ -844,32 +917,42 @@ def _merge_analysis(
 
 def _access_from_url_result(result: UrlCheckResult, *, allow_canvas_forbidden: bool) -> AccessProbeResult:
     access_status = ACCESS_STATUS_OK
+    reason_code = getattr(result, "reason_code", None) or _reason_code_from_legacy_result(result)
     if _is_sso_url(result.final_url) or _is_sso_url(result.redirect_location) or _is_sso_url(result.url):
         access_status = ACCESS_STATUS_REQUIRES_SSO
-    elif result.reason in {"timeout", "404_not_found", "forbidden", "canvas_auth_required"}:
-        access_status = ACCESS_STATUS_NO_ACCEDE
-    elif result.status_code in {401, 403, 404}:
-        access_status = ACCESS_STATUS_NO_ACCEDE
-    elif result.broken_link or not result.checked:
+        reason_code = REASON_AUTH_REQUIRED
+    elif reason_code != REASON_OK:
         access_status = ACCESS_STATUS_NO_ACCEDE
 
     return AccessProbeResult(
         can_access=access_status == ACCESS_STATUS_OK,
         access_status=access_status,
         http_status=result.status_code,
+        reason_code=reason_code,
+        reason_detail=getattr(result, "reason_detail", None) or _url_result_message(result, access_status),
         error_message=result.error_message or _url_result_message(result, access_status),
         url_status=result.url_status,
         final_url=result.final_url,
         checked_at=result.checked_at,
-        details={"url": result.url, "reason": result.reason, "checked": result.checked},
+        details={
+            "url": result.url,
+            "reason": result.reason,
+            "reasonCode": reason_code,
+            "reasonDetail": getattr(result, "reason_detail", None),
+            "checked": result.checked,
+            "downloadableGuess": getattr(result, "downloadable_guess", False),
+        },
     )
 
 
 def _access_from_app_error(exc: AppError) -> AccessProbeResult:
+    reason_code = _reason_code_from_app_error(exc)
     return AccessProbeResult(
         can_access=False,
         access_status=ACCESS_STATUS_NO_ACCEDE,
         http_status=exc.status_code if exc.status_code >= 400 else None,
+        reason_code=reason_code,
+        reason_detail=exc.message,
         error_message=exc.message,
         details={"code": exc.code},
     )
@@ -889,6 +972,35 @@ def _url_result_message(result: UrlCheckResult, access_status: str) -> str | Non
     if result.status_code is not None:
         return f"La URL devolvió {result.status_code}."
     return "No se ha podido acceder a la URL."
+
+
+def _reason_code_from_legacy_result(result: UrlCheckResult) -> str:
+    existing_reason_code = getattr(result, "reason_code", None)
+    if existing_reason_code:
+        return existing_reason_code
+    if result.reason == "404_not_found" or result.status_code == 404:
+        return REASON_NOT_FOUND
+    if result.reason in {"canvas_auth_required", "auth_required"} or result.status_code == 401:
+        return REASON_AUTH_REQUIRED
+    if result.reason == "forbidden" or result.status_code == 403:
+        return REASON_FORBIDDEN
+    if result.reason == "timeout":
+        return REASON_TIMEOUT
+    if result.broken_link or not result.checked:
+        return REASON_UNKNOWN
+    return REASON_OK
+
+
+def _reason_code_from_app_error(exc: AppError) -> str:
+    if exc.status_code == 404:
+        return REASON_NOT_FOUND
+    if exc.status_code == 401:
+        return REASON_AUTH_REQUIRED
+    if exc.status_code == 403:
+        return REASON_FORBIDDEN
+    if exc.status_code == 504 or exc.code.endswith("timeout"):
+        return REASON_TIMEOUT
+    return REASON_UNKNOWN
 
 
 def _build_discovered_resource(
@@ -933,10 +1045,18 @@ def _build_discovered_resource(
         "itemPath": f"{module_path} > {resolved_title}",
         "parentResourceId": parent_id,
         "parent_resource_id": parent_id,
+        "parentId": parent_id,
+        "parent_id": parent_id,
         "discovered": True,
         "discoveredChildrenCount": 0,
         "discovered_children_count": 0,
+        "childrenCount": 0,
+        "children_count": 0,
         "status": ResourceHealthStatus.WARN.value,
+        "reasonCode": None,
+        "reason_code": None,
+        "reasonDetail": None,
+        "reason_detail": None,
         "accessNote": None,
         "access_note": None,
         "errorMessage": None,
@@ -981,8 +1101,16 @@ def _normalize_resource_defaults(resource: dict[str, Any]) -> None:
     resource.setdefault("status", ResourceHealthStatus.WARN.value)
     resource.setdefault("discoveredChildrenCount", 0)
     resource.setdefault("discovered_children_count", resource.get("discoveredChildrenCount", 0))
+    resource.setdefault("childrenCount", resource.get("discoveredChildrenCount", 0))
+    resource.setdefault("children_count", resource.get("childrenCount", 0))
     resource.setdefault("details", {})
     resource.setdefault("discovered", _is_discovered_resource(resource))
+    resource.setdefault("parentId", resource.get("parentResourceId") or resource.get("parent_resource_id"))
+    resource.setdefault("parent_id", resource.get("parentId"))
+    resource.setdefault("reasonCode", REASON_OK if resource.get("canAccess") is True else None)
+    resource.setdefault("reason_code", resource.get("reasonCode"))
+    resource.setdefault("reasonDetail", resource.get("accessNote") or resource.get("errorMessage"))
+    resource.setdefault("reason_detail", resource.get("reasonDetail"))
     module_path = _module_path(resource)
     resource.setdefault("coursePath", module_path)
     resource.setdefault("modulePath", module_path)
@@ -1016,10 +1144,14 @@ def _attach_discovered_children(resources: list[dict[str, Any]], parent_children
         if not child_ids:
             resource.setdefault("discoveredChildrenCount", 0)
             resource.setdefault("discovered_children_count", resource.get("discoveredChildrenCount", 0))
+            resource.setdefault("childrenCount", resource.get("discoveredChildrenCount", 0))
+            resource.setdefault("children_count", resource.get("childrenCount", 0))
             continue
 
         resource["discoveredChildrenCount"] = len(child_ids)
         resource["discovered_children_count"] = len(child_ids)
+        resource["childrenCount"] = len(child_ids)
+        resource["children_count"] = len(child_ids)
         details = dict(resource.get("details") or {})
         deep_scan = dict(details.get("deepScan") or {})
         deep_scan["children"] = child_ids
@@ -1042,6 +1174,21 @@ def _resource_file_path(resource: dict[str, Any]) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _access_origin(resource: dict[str, Any]) -> str:
+    canvas_type = _canvas_type(resource)
+    file_path = _resource_file_path(resource)
+    source_url = _resource_source_url(resource)
+    if file_path:
+        return "internal_page" if _is_html_reference(file_path) else "internal_file"
+    if canvas_type == "File" or resource.get("fileId") or _download_url(resource):
+        return "internal_file"
+    if canvas_type in {"Page", "Assignment", "Discussion", "Quiz"} or resource.get("pageId"):
+        return "internal_page"
+    if source_url:
+        return "external_url"
+    return "internal_page"
 
 
 def _download_url(resource: dict[str, Any]) -> str | None:
@@ -1085,7 +1232,14 @@ def _extract_canvas_file_id(url: str) -> str | None:
 
 
 def _download_result_is_ok(result: UrlCheckResult) -> bool:
-    return result.checked and not result.broken_link and result.status_code is not None and 200 <= result.status_code < 300
+    if not result.checked or result.broken_link:
+        return False
+    reason_code = getattr(result, "reason_code", None)
+    if reason_code and reason_code != REASON_OK:
+        return False
+    if getattr(result, "downloadable_guess", False):
+        return result.status_code is None or 200 <= result.status_code < 400
+    return result.status_code is not None and 200 <= result.status_code < 300
 
 
 def _url_probe_details(result: UrlCheckResult) -> dict[str, Any]:
@@ -1096,6 +1250,9 @@ def _url_probe_details(result: UrlCheckResult) -> dict[str, Any]:
         "urlStatus": result.url_status,
         "finalUrl": result.final_url,
         "reason": result.reason,
+        "reasonCode": getattr(result, "reason_code", None),
+        "reasonDetail": getattr(result, "reason_detail", None),
+        "downloadableGuess": getattr(result, "downloadable_guess", False),
         "contentType": result.content_type,
         "contentDisposition": result.content_disposition,
         "redirected": result.redirected,
@@ -1204,6 +1361,8 @@ def _requires_interaction_result(
         can_access=False,
         access_status=ACCESS_STATUS_REQUIRES_INTERACTION,
         http_status=http_status,
+        reason_code=REASON_AUTH_REQUIRED if http_status in {401, 403} else REASON_UNKNOWN,
+        reason_detail=message or "Este recurso requiere una interacción o sesión de navegador.",
         error_message=message or "Este recurso existe en Canvas, pero requiere una interacción o sesión de navegador.",
         details={"requiresInteraction": True, "canvasType": canvas_type},
     )

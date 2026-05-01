@@ -35,6 +35,7 @@ class InventoryResourceSeed(BaseModel):
     title: str
     type: ResourceType
     origin: str | None = None
+    source: str | None = None
     source_url: str | None = Field(default=None, validation_alias=AliasChoices("source_url", "sourceUrl", "url"))
     file_path: str | None = Field(default=None, validation_alias=AliasChoices("file_path", "filePath", "localPath", "path"))
     course_path: str | None = Field(
@@ -69,6 +70,8 @@ class InventoryResourceSeed(BaseModel):
         default=None,
         validation_alias=AliasChoices("access_status_code", "accessStatusCode"),
     )
+    reason_code: str | None = Field(default=None, validation_alias=AliasChoices("reason_code", "reasonCode"))
+    reason_detail: str | None = Field(default=None, validation_alias=AliasChoices("reason_detail", "reasonDetail"))
     can_download: bool = Field(
         default=False,
         validation_alias=AliasChoices("can_download", "canDownload", "downloadable"),
@@ -166,10 +169,13 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
                 access_status=item.access_status,
                 http_status=item.http_status,
                 access_status_code=item.access_status_code,
+                reason_code=item.reason_code,
+                reason_detail=item.reason_detail,
                 can_download=item.can_download,
                 download_status=item.download_status,
                 download_status_code=item.download_status_code,
                 discovered_children_count=item.discovered_children_count,
+                parent_resource_id=item.parent_resource_id,
                 access_note=item.access_note,
                 error_message=item.error_message,
                 notes=item.notes,
@@ -220,10 +226,13 @@ def sync_job_inventory_from_payload(session: Session, job_id: str, resources: li
         resource.access_status = item.access_status
         resource.http_status = item.http_status
         resource.access_status_code = item.access_status_code
+        resource.reason_code = item.reason_code
+        resource.reason_detail = item.reason_detail
         resource.can_download = item.can_download
         resource.download_status = item.download_status
         resource.download_status_code = item.download_status_code
         resource.discovered_children_count = item.discovered_children_count
+        resource.parent_resource_id = item.parent_resource_id
         resource.access_note = item.access_note
         resource.error_message = item.error_message
         resource.notes = item.notes

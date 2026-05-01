@@ -133,6 +133,7 @@ def _resource_read(
             inventory_item.access_status_code if inventory_item is not None else resource.access_status_code
         ),
         canDownload=inventory_item.can_download if inventory_item is not None else resource.can_download,
+        downloadStatus=inventory_item.download_status if inventory_item is not None else resource.download_status,
         downloadStatusCode=(
             inventory_item.download_status_code if inventory_item is not None else resource.download_status_code
         ),
@@ -186,6 +187,7 @@ def _build_access_summary(session: Session, job_id: str) -> AccessSummaryRead:
             if hasattr(resource.access_status, "value")
             else str(resource.access_status),
             "canDownload": resource.can_download,
+            "downloadStatus": resource.download_status,
             "accessStatusCode": resource.access_status_code,
             "downloadStatusCode": resource.download_status_code,
             "accessNote": resource.access_note or resource.error_message,
@@ -245,6 +247,7 @@ def _build_access_response(session: Session, settings: Settings, job_id: str) ->
             ok_count=group.ok_count,
             no_accede_count=group.no_accede_count,
             requiere_interaccion_count=group.requiere_interaccion_count,
+            requiere_sso_count=group.requiere_sso_count,
             downloadables_total=group.downloadables_total,
             downloadables_ok=group.downloadables_ok,
             byStatus=group.byStatus,

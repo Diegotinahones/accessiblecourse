@@ -9,7 +9,13 @@ from app.services.url_check import URLCheckService, UrlCheckResult
 ACCESS_STATUS_OK = "OK"
 ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
 ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
-ACCESS_STATUS_VALUES = (ACCESS_STATUS_OK, ACCESS_STATUS_NO_ACCEDE, ACCESS_STATUS_REQUIRES_INTERACTION)
+ACCESS_STATUS_REQUIRES_SSO = "REQUIERE_SSO"
+ACCESS_STATUS_VALUES = (
+    ACCESS_STATUS_OK,
+    ACCESS_STATUS_NO_ACCEDE,
+    ACCESS_STATUS_REQUIRES_INTERACTION,
+    ACCESS_STATUS_REQUIRES_SSO,
+)
 
 DOWNLOADABLE_EXTENSIONS = {
     ".pdf",
@@ -241,6 +247,8 @@ def _merge_access_payload(resource: dict[str, Any], access_payload: dict[str, An
     resource["access_status_code"] = access_payload["httpStatus"]
     resource["canDownload"] = access_payload["canDownload"]
     resource["can_download"] = access_payload["canDownload"]
+    resource["downloadStatus"] = "OK" if access_payload["canDownload"] else "NO_DESCARGABLE"
+    resource["download_status"] = resource["downloadStatus"]
     resource["downloadStatusCode"] = access_payload["httpStatus"] if access_payload["canDownload"] else None
     resource["download_status_code"] = resource["downloadStatusCode"]
     resource["errorMessage"] = access_payload["errorMessage"]

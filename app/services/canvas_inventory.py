@@ -30,8 +30,10 @@ SOURCE_CANVAS = "Canvas"
 ACCESS_STATUS_OK = "OK"
 ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
 ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
+ACCESS_STATUS_REQUIRES_SSO = "REQUIERE_SSO"
 ACCESS_STATUS_ERROR = ACCESS_STATUS_NO_ACCEDE
 RESOURCE_ID_NAMESPACE = uuid5(NAMESPACE_URL, "accessiblecourse.canvas.resource")
+SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu")
 
 
 @dataclass(slots=True, frozen=True)
@@ -269,7 +271,7 @@ def _build_non_file_resource(
 ) -> dict[str, Any] | None:
     resolved_url = item.external_url or item.html_url
     if item.type == "ExternalTool":
-        resolved_url = item.html_url or item.external_url
+        resolved_url = item.external_url or item.html_url
     if not resolved_url and item.type not in {"Assignment", "Discussion", "Page", "Quiz", "ExternalTool"}:
         return None
     if _should_skip_resource(resolved_url or item.title):
@@ -279,7 +281,7 @@ def _build_non_file_resource(
     if resource_type is None:
         return None
 
-    origin = ORIGIN_EXTERNO if item.type == "ExternalUrl" else ORIGIN_INTERNO
+    origin = ORIGIN_EXTERNO if item.type == "ExternalUrl" or (item.type == "ExternalTool" and item.external_url) else ORIGIN_INTERNO
     resource = _base_resource(
         course_id=course_id,
         module=module,
@@ -299,7 +301,7 @@ def _build_non_file_resource(
     if not verify_access:
         return resource
 
-    if item.type in {"Assignment", "Discussion", "Quiz", "ExternalTool"}:
+    if item.type in {"Assignment", "Discussion", "Quiz"}:
         _set_access_state(
             resource,
             can_access=False,
@@ -309,6 +311,26 @@ def _build_non_file_resource(
         )
         resource["status"] = ResourceHealthStatus.WARN.value
         _append_note(resource, "requires_interaction: recurso Canvas que requiere sesion o accion del usuario.")
+        return resource
+
+    if item.type == "ExternalTool":
+        if resolved_url and url_checker is not None:
+            _apply_url_result(
+                resource,
+                url_checker.check_url(resolved_url, credentials=None),
+                target_url=resolved_url,
+                allow_download=False,
+            )
+            return resource
+        _set_access_state(
+            resource,
+            can_access=False,
+            access_status=ACCESS_STATUS_REQUIRES_INTERACTION,
+            can_download=False,
+            error_message="Herramienta externa/LTI sin URL verificable; requiere sesion interactiva.",
+        )
+        resource["status"] = ResourceHealthStatus.WARN.value
+        _append_note(resource, "requires_interaction: herramienta externa o LTI.")
         return resource
 
     if url_checker is None and item.type == "ExternalUrl":
@@ -435,7 +457,9 @@ def _base_resource(
         "courseId": course_id,
         "moduleId": module.id,
         "moduleName": module.name,
+        "position": item.position,
         "itemId": item.id,
+        "contentId": item.content_id,
         "pageId": item.page_url,
         "fileId": item.content_id,
         "title": title,
@@ -466,6 +490,8 @@ def _base_resource(
         "access_status_code": None,
         "canDownload": False,
         "can_download": False,
+        "downloadStatus": None,
+        "download_status": None,
         "downloadStatusCode": None,
         "download_status_code": None,
         "discovered": False,
@@ -478,6 +504,15 @@ def _base_resource(
         "notes": None,
         "details": {
             "canvasType": item.type,
+            "contentId": item.content_id,
+            "courseId": course_id,
+            "moduleId": module.id,
+            "moduleName": module.name,
+            "position": item.position,
+            "htmlUrl": item.html_url,
+            "externalUrl": item.external_url,
+            "pageUrl": item.page_url,
+            "apiUrl": item.url,
         },
     }
 
@@ -550,6 +585,20 @@ def _apply_url_result(
     if result.reason:
         url_check_details["reason"] = result.reason
     details["urlCheck"] = url_check_details
+
+    if _is_sso_url(result.final_url) or _is_sso_url(result.redirect_location) or _is_sso_url(target_url):
+        _set_access_state(
+            resource,
+            can_access=False,
+            access_status=ACCESS_STATUS_REQUIRES_SSO,
+            http_status=result.status_code,
+            can_download=False,
+            error_message="Requiere autenticacion SSO de UOC.",
+        )
+        resource["status"] = ResourceHealthStatus.WARN.value
+        _append_note(resource, "requires_sso: el recurso redirige al SSO de UOC.")
+        resource["details"] = {**dict(resource.get("details") or {}), **details}
+        return
 
     if not result.checked:
         _set_access_state(
@@ -657,6 +706,8 @@ def _set_access_state(
     resource["access_status_code"] = http_status
     resource["canDownload"] = can_download
     resource["can_download"] = can_download
+    resource["downloadStatus"] = "OK" if can_download else "NO_DESCARGABLE"
+    resource["download_status"] = resource["downloadStatus"]
     resource["downloadStatusCode"] = http_status if can_download else None
     resource["download_status_code"] = resource["downloadStatusCode"]
     resource["errorMessage"] = error_message
@@ -674,7 +725,7 @@ def _set_access_state(
     resource["details"] = details
     if access_status == ACCESS_STATUS_OK:
         resource["status"] = ResourceHealthStatus.OK.value
-    elif access_status == ACCESS_STATUS_REQUIRES_INTERACTION:
+    elif access_status in {ACCESS_STATUS_REQUIRES_INTERACTION, ACCESS_STATUS_REQUIRES_SSO}:
         resource["status"] = ResourceHealthStatus.WARN.value
     else:
         resource["status"] = ResourceHealthStatus.ERROR.value
@@ -728,6 +779,13 @@ def _url_check_message(reason: str | None, *, status_code: int | None = None) ->
 
 def _broken_link_status(reason: str | None) -> str:
     return ACCESS_STATUS_NO_ACCEDE
+
+
+def _is_sso_url(url: str | None) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    host = urlparse(url).netloc.lower()
+    return any(marker in host for marker in SSO_HOST_MARKERS)
 
 
 def _build_course_path(module: str, subheader: str | None) -> str:

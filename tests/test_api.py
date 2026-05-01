@@ -441,6 +441,7 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
         "OK": 1,
         "NO_ACCEDE": 1,
         "REQUIERE_INTERACCION": 0,
+        "REQUIERE_SSO": 0,
     }
     assert access_summary["groups"][0]["modulePath"] == "Tema 1"
 

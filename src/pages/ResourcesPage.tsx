@@ -27,6 +27,9 @@ function getAccessLabel(resource: ResourceListItem) {
   if (resource.accessStatus === 'REQUIERE_INTERACCION') {
     return 'REQUIERE INTERACCIÓN';
   }
+  if (resource.accessStatus === 'REQUIERE_SSO') {
+    return 'REQUIERE SSO';
+  }
   return resource.canAccess && resource.accessStatus === 'OK' ? 'OK' : 'NO ACCEDE';
 }
 
@@ -36,6 +39,7 @@ function getAccessTone(resource: ResourceListItem): BadgeTone {
   }
   if (
     resource.accessStatus === 'REQUIERE_INTERACCION' ||
+    resource.accessStatus === 'REQUIERE_SSO' ||
     resource.accessStatus === 'FORBIDDEN' ||
     resource.accessStatus === 'TIMEOUT'
   ) {
@@ -262,6 +266,10 @@ export function ResourcesPage() {
     () => resources.filter((resource) => resource.accessStatus === 'REQUIERE_INTERACCION').length,
     [resources],
   );
+  const requiresSsoCount = useMemo(
+    () => resources.filter((resource) => resource.accessStatus === 'REQUIERE_SSO').length,
+    [resources],
+  );
   const downloadableCount = useMemo(
     () => resources.filter((resource) => resource.canDownload).length,
     [resources],
@@ -333,6 +341,9 @@ export function ResourcesPage() {
             </p>
             <p className="text-base text-ink">
               Requieren interacción: {requiresInteractionCount}.
+            </p>
+            <p className="text-base text-ink">
+              Requieren SSO: {requiresSsoCount}.
             </p>
             <p className="text-base text-ink">
               Descargables: {downloadableCount} ({accessibleDownloadableCount} accesibles).

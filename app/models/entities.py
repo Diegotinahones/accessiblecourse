@@ -35,6 +35,7 @@ class ResourceAccessStatus(str, Enum):
     OK = "OK"
     NO_ACCEDE = "NO_ACCEDE"
     REQUIERE_INTERACCION = "REQUIERE_INTERACCION"
+    REQUIERE_SSO = "REQUIERE_SSO"
     # Legacy values are kept so older persisted jobs remain readable.
     NOT_FOUND = "NOT_FOUND"
     FORBIDDEN = "FORBIDDEN"
@@ -93,6 +94,7 @@ class Resource(SQLModel, table=True):
     http_status: int | None = Field(default=None, nullable=True)
     access_status_code: int | None = Field(default=None, nullable=True)
     can_download: bool = Field(default=False, nullable=False)
+    download_status: str | None = Field(default=None, max_length=64)
     download_status_code: int | None = Field(default=None, nullable=True)
     discovered_children_count: int = Field(default=0, nullable=False)
     access_note: str | None = Field(default=None, sa_column=Column(Text, nullable=True))

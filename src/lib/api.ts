@@ -244,6 +244,7 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
     httpStatus: item.httpStatus ?? null,
     accessStatusCode: item.accessStatusCode ?? item.httpStatus ?? null,
     canDownload: item.canDownload ?? false,
+    downloadStatus: item.downloadStatus ?? (item.canDownload ? 'OK' : 'NO_DESCARGABLE'),
     downloadStatusCode: item.downloadStatusCode ?? null,
     discoveredChildrenCount: item.discoveredChildrenCount ?? 0,
     parentResourceId: item.parentResourceId ?? null,

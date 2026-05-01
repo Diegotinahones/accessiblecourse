@@ -73,6 +73,7 @@ class InventoryResourceSeed(BaseModel):
         default=False,
         validation_alias=AliasChoices("can_download", "canDownload", "downloadable"),
     )
+    download_status: str | None = Field(default=None, validation_alias=AliasChoices("download_status", "downloadStatus"))
     download_status_code: int | None = Field(
         default=None,
         validation_alias=AliasChoices("download_status_code", "downloadStatusCode"),
@@ -166,6 +167,7 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
                 http_status=item.http_status,
                 access_status_code=item.access_status_code,
                 can_download=item.can_download,
+                download_status=item.download_status,
                 download_status_code=item.download_status_code,
                 discovered_children_count=item.discovered_children_count,
                 access_note=item.access_note,
@@ -219,6 +221,7 @@ def sync_job_inventory_from_payload(session: Session, job_id: str, resources: li
         resource.http_status = item.http_status
         resource.access_status_code = item.access_status_code
         resource.can_download = item.can_download
+        resource.download_status = item.download_status
         resource.download_status_code = item.download_status_code
         resource.discovered_children_count = item.discovered_children_count
         resource.access_note = item.access_note

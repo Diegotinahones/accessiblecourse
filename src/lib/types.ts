@@ -110,6 +110,7 @@ export interface ResourceListItem {
     | 'OK'
     | 'NO_ACCEDE'
     | 'REQUIERE_INTERACCION'
+    | 'REQUIERE_SSO'
     | 'NOT_FOUND'
     | 'FORBIDDEN'
     | 'TIMEOUT'
@@ -117,6 +118,7 @@ export interface ResourceListItem {
   httpStatus: number | null;
   accessStatusCode: number | null;
   canDownload: boolean;
+  downloadStatus: string | null;
   downloadStatusCode: number | null;
   discoveredChildrenCount: number;
   parentResourceId: string | null;

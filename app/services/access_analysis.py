@@ -24,6 +24,7 @@ logger = logging.getLogger("accessiblecourse.access")
 ACCESS_STATUS_OK = "OK"
 ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
 ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
+ACCESS_STATUS_REQUIRES_SSO = "REQUIERE_SSO"
 ACCESS_STATUS_ERROR = ACCESS_STATUS_NO_ACCEDE
 DISCOVERED_BY_DEEP_SCAN = "access_deep_scan"
 
@@ -53,6 +54,7 @@ DOWNLOADABLE_EXTENSIONS = {
 
 HTML_EXTENSIONS = {".html", ".htm", ".xhtml"}
 IGNORED_DISCOVERY_EXTENSIONS = {".xml", ".xsd", ".dtd", ".qti", ".imsmanifest"}
+SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu")
 
 
 @dataclass(slots=True, frozen=True)
@@ -203,6 +205,7 @@ def build_access_summary(
                 "ok_count": 0,
                 "no_accede_count": 0,
                 "requiere_interaccion_count": 0,
+                "requiere_sso_count": 0,
                 "downloadables_total": 0,
                 "downloadables_ok": 0,
                 "byStatus": build_access_status_counts(),
@@ -216,6 +219,7 @@ def build_access_summary(
         group["ok_count"] += int(access_status == ACCESS_STATUS_OK)
         group["no_accede_count"] += int(access_status == ACCESS_STATUS_NO_ACCEDE)
         group["requiere_interaccion_count"] += int(access_status == ACCESS_STATUS_REQUIRES_INTERACTION)
+        group["requiere_sso_count"] += int(access_status == ACCESS_STATUS_REQUIRES_SSO)
         group["downloadables_total"] += int(bool(resource.get("canDownload")))
         group["downloadables_ok"] += int(bool(resource.get("canAccess")) and bool(resource.get("canDownload")))
         group["byStatus"].setdefault(access_status, 0)
@@ -228,6 +232,7 @@ def build_access_summary(
                 "accessStatus": access_status,
                 "canAccess": bool(resource.get("canAccess")),
                 "canDownload": bool(resource.get("canDownload")),
+                "downloadStatus": resource.get("downloadStatus"),
                 "accessStatusCode": resource.get("accessStatusCode"),
                 "downloadStatusCode": resource.get("downloadStatusCode"),
                 "discovered": _is_discovered_resource(resource),
@@ -242,6 +247,7 @@ def build_access_summary(
     requiere_interaccion_count = sum(
         1 for resource in resources if resource.get("accessStatus") == ACCESS_STATUS_REQUIRES_INTERACTION
     )
+    requiere_sso_count = sum(1 for resource in resources if resource.get("accessStatus") == ACCESS_STATUS_REQUIRES_SSO)
     downloadables_total = sum(1 for resource in resources if bool(resource.get("canDownload")))
     downloadables_ok = sum(
         1 for resource in resources if bool(resource.get("canAccess")) and bool(resource.get("canDownload"))
@@ -257,6 +263,7 @@ def build_access_summary(
         "ok_count": ok_count,
         "no_accede_count": no_accede_count,
         "requiere_interaccion_count": requiere_interaccion_count,
+        "requiere_sso_count": requiere_sso_count,
         "downloadables_total": downloadables_total,
         "downloadables_ok": downloadables_ok,
         "byStatus": by_status,
@@ -462,25 +469,37 @@ class OnlineAccessAdapter:
         self._url_cache: dict[str, UrlCheckResult] = {}
         self._download_cache: dict[str, UrlCheckResult] = {}
         self._page_cache: dict[str, dict[str, Any]] = {}
+        self._assignment_cache: dict[str, dict[str, Any]] = {}
+        self._discussion_cache: dict[str, dict[str, Any]] = {}
+        self._quiz_cache: dict[str, dict[str, Any]] = {}
 
     def probe_access(self, resource: dict[str, Any]) -> AccessProbeResult:
         canvas_type = _canvas_type(resource)
         source_url = _resource_source_url(resource)
-        if _is_deep_scan_child(resource) and source_url and not self.credentials.is_canvas_url(source_url):
-            return AccessProbeResult(
-                can_access=True,
-                access_status=ACCESS_STATUS_OK,
-                error_message="Enlace externo detectado en deep scan; se conserva sin seguirlo ni descargarlo.",
-                details={"external": True, "checked": False},
-            )
+        if source_url and not self.credentials.is_canvas_url(source_url):
+            return _access_from_url_result(self._check_url(source_url), allow_canvas_forbidden=False)
 
-        if canvas_type in {"Assignment", "Quiz", "Discussion", "ExternalTool"}:
-            return AccessProbeResult(
-                can_access=False,
-                access_status=ACCESS_STATUS_REQUIRES_INTERACTION,
-                error_message="Este recurso existe en Canvas, pero requiere una interacción o sesión de navegador.",
-                details={"requiresInteraction": True, "canvasType": canvas_type},
-            )
+        if canvas_type == "File" and resource.get("fileId"):
+            try:
+                canvas_file = self._get_file(str(resource["fileId"]))
+                _merge_discovered_file(resource, canvas_file)
+            except AppError as exc:
+                return _access_from_app_error(exc)
+            return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+
+        if canvas_type == "Assignment":
+            return self._probe_canvas_api_resource(resource, cache_name="assignment")
+
+        if canvas_type == "Discussion":
+            return self._probe_canvas_api_resource(resource, cache_name="discussion")
+
+        if canvas_type == "Quiz":
+            return self._probe_quiz(resource)
+
+        if canvas_type == "ExternalTool":
+            if source_url:
+                return _access_from_url_result(self._check_url(source_url), allow_canvas_forbidden=False)
+            return _requires_interaction_result(canvas_type)
 
         if canvas_type == "Page" and resource.get("pageId"):
             try:
@@ -539,12 +558,25 @@ class OnlineAccessAdapter:
         )
 
     def fetch_html(self, resource: dict[str, Any]) -> str | None:
-        if _canvas_type(resource) == "Page" and resource.get("pageId"):
+        canvas_type = _canvas_type(resource)
+        if canvas_type == "Page" and resource.get("pageId"):
             try:
                 payload = self._get_page(str(resource["pageId"]))
             except AppError:
                 return None
             body = payload.get("body") or payload.get("html")
+            return str(body) if isinstance(body, str) and body.strip() else None
+        if canvas_type == "Assignment":
+            payload = self._get_cached_canvas_payload(resource, cache_name="assignment")
+            body = payload.get("description") if payload else None
+            return str(body) if isinstance(body, str) and body.strip() else None
+        if canvas_type == "Discussion":
+            payload = self._get_cached_canvas_payload(resource, cache_name="discussion")
+            body = (payload.get("message") or payload.get("description")) if payload else None
+            return str(body) if isinstance(body, str) and body.strip() else None
+        if canvas_type == "Quiz":
+            payload = self._get_cached_canvas_payload(resource, cache_name="quiz")
+            body = payload.get("description") if payload else None
             return str(body) if isinstance(body, str) and body.strip() else None
         source_url = _resource_source_url(resource)
         if not source_url or not self.credentials.is_canvas_url(source_url):
@@ -593,7 +625,7 @@ class OnlineAccessAdapter:
             )
             if link.file_id:
                 try:
-                    canvas_file = self.client.get_file(self.course_id, link.file_id)
+                    canvas_file = self._get_file(link.file_id)
                     _merge_discovered_file(child, canvas_file)
                 except AppError as exc:
                     details = dict(child.get("details") or {})
@@ -609,21 +641,80 @@ class OnlineAccessAdapter:
 
     def _check_download_url(self, url: str) -> UrlCheckResult:
         if url not in self._download_cache:
-            check_without_redirects = getattr(self.url_checker, "check_url_no_redirects", None)
-            if callable(check_without_redirects):
-                self._download_cache[url] = check_without_redirects(url, credentials=self.credentials)
-            else:
-                self._download_cache[url] = _check_url_with_service(
-                    self.url_checker,
-                    url,
-                    credentials=self.credentials,
-                )
+            self._download_cache[url] = _check_url_with_service(
+                self.url_checker,
+                url,
+                credentials=self.credentials,
+            )
         return self._download_cache[url]
 
     def _get_page(self, page_id: str) -> dict[str, Any]:
         if page_id not in self._page_cache:
             self._page_cache[page_id] = self.client.get_page(self.course_id, page_id)
         return self._page_cache[page_id]
+
+    def _get_file(self, file_id: str):
+        get_file_by_id = getattr(self.client, "get_file_by_id", None)
+        if callable(get_file_by_id):
+            return get_file_by_id(file_id)
+        return self.client.get_file(self.course_id, file_id)
+
+    def _probe_canvas_api_resource(self, resource: dict[str, Any], *, cache_name: str) -> AccessProbeResult:
+        try:
+            self._get_cached_canvas_payload(resource, cache_name=cache_name, raise_errors=True)
+        except AppError as exc:
+            if exc.status_code in {401, 403, 404} and cache_name in {"assignment", "discussion"}:
+                return _requires_interaction_result(
+                    "Assignment" if cache_name == "assignment" else "Discussion",
+                    http_status=exc.status_code,
+                    message=exc.message,
+                )
+            return _access_from_app_error(exc)
+        return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+
+    def _probe_quiz(self, resource: dict[str, Any]) -> AccessProbeResult:
+        try:
+            self._get_cached_canvas_payload(resource, cache_name="quiz", raise_errors=True)
+        except AppError as exc:
+            if exc.status_code in {401, 403, 404}:
+                return _requires_interaction_result("Quiz", http_status=exc.status_code, message=exc.message)
+            return _access_from_app_error(exc)
+        return AccessProbeResult(can_access=True, access_status=ACCESS_STATUS_OK, http_status=200)
+
+    def _get_cached_canvas_payload(
+        self,
+        resource: dict[str, Any],
+        *,
+        cache_name: str,
+        raise_errors: bool = False,
+    ) -> dict[str, Any] | None:
+        resource_id = _canvas_content_id(resource)
+        api_url = _canvas_api_url(resource)
+        cache_key = resource_id or api_url
+        if not cache_key:
+            if raise_errors:
+                raise AppError(
+                    code="canvas_resource_id_missing",
+                    message="Canvas no ha devuelto un identificador API para este recurso.",
+                    status_code=409,
+                )
+            return None
+
+        cache = {
+            "assignment": self._assignment_cache,
+            "discussion": self._discussion_cache,
+            "quiz": self._quiz_cache,
+        }[cache_name]
+        if cache_key not in cache:
+            if api_url and not resource_id:
+                cache[cache_key] = self.client.get_json(api_url)
+            elif cache_name == "assignment":
+                cache[resource_id] = self.client.get_assignment(self.course_id, resource_id)
+            elif cache_name == "discussion":
+                cache[resource_id] = self.client.get_discussion_topic(self.course_id, resource_id)
+            else:
+                cache[resource_id] = self.client.get_quiz(self.course_id, resource_id)
+        return cache[cache_key]
 
 
 class _HTMLReferenceParser(HTMLParser):
@@ -706,6 +797,8 @@ def _merge_analysis(
     resource["can_download"] = download.can_download
     resource["downloadStatusCode"] = download.http_status
     resource["download_status_code"] = download.http_status
+    resource["downloadStatus"] = "OK" if download.can_download else "NO_DESCARGABLE"
+    resource["download_status"] = resource["downloadStatus"]
     if _download_url(resource):
         resource["downloadUrl"] = _download_url(resource)
         resource["download_url"] = resource["downloadUrl"]
@@ -743,13 +836,17 @@ def _merge_analysis(
         _append_note(resource, _broken_link_note(access.access_status, http_status))
     elif access.access_status == ACCESS_STATUS_REQUIRES_INTERACTION:
         _append_note(resource, "requires_interaction: recurso Canvas que requiere sesión o acción del usuario.")
+    elif access.access_status == ACCESS_STATUS_REQUIRES_SSO:
+        _append_note(resource, "requires_sso: el recurso redirige al SSO de UOC.")
     resource["details"] = details
     _log_access_result(resource)
 
 
 def _access_from_url_result(result: UrlCheckResult, *, allow_canvas_forbidden: bool) -> AccessProbeResult:
     access_status = ACCESS_STATUS_OK
-    if result.reason in {"timeout", "404_not_found", "forbidden", "canvas_auth_required"}:
+    if _is_sso_url(result.final_url) or _is_sso_url(result.redirect_location) or _is_sso_url(result.url):
+        access_status = ACCESS_STATUS_REQUIRES_SSO
+    elif result.reason in {"timeout", "404_not_found", "forbidden", "canvas_auth_required"}:
         access_status = ACCESS_STATUS_NO_ACCEDE
     elif result.status_code in {401, 403, 404}:
         access_status = ACCESS_STATUS_NO_ACCEDE
@@ -781,6 +878,8 @@ def _access_from_app_error(exc: AppError) -> AccessProbeResult:
 def _url_result_message(result: UrlCheckResult, access_status: str) -> str | None:
     if access_status == ACCESS_STATUS_OK:
         return None
+    if access_status == ACCESS_STATUS_REQUIRES_SSO:
+        return "Requiere autenticacion SSO de UOC."
     if result.reason == "404_not_found" or result.status_code == 404:
         return "La URL devolvió 404."
     if result.reason in {"forbidden", "canvas_auth_required"} or result.status_code in {401, 403}:
@@ -819,6 +918,8 @@ def _build_discovered_resource(
         "sourceUrl": source_url,
         "downloadUrl": None,
         "download_url": None,
+        "downloadStatus": None,
+        "download_status": None,
         "path": file_path,
         "filePath": file_path,
         "localPath": file_path,
@@ -944,9 +1045,10 @@ def _resource_file_path(resource: dict[str, Any]) -> str | None:
 
 
 def _download_url(resource: dict[str, Any]) -> str | None:
-    value = resource.get("downloadUrl")
-    if isinstance(value, str) and value.strip().startswith(("http://", "https://")):
-        return value.strip()
+    for key in ("downloadUrl", "download_url"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip().startswith(("http://", "https://")):
+            return value.strip()
     details = resource.get("details")
     if isinstance(details, dict):
         value = details.get("downloadUrl")
@@ -983,7 +1085,7 @@ def _extract_canvas_file_id(url: str) -> str | None:
 
 
 def _download_result_is_ok(result: UrlCheckResult) -> bool:
-    return result.checked and not result.broken_link and result.status_code is not None and 200 <= result.status_code < 400
+    return result.checked and not result.broken_link and result.status_code is not None and 200 <= result.status_code < 300
 
 
 def _url_probe_details(result: UrlCheckResult) -> dict[str, Any]:
@@ -1010,7 +1112,7 @@ def _should_deep_scan(resource: dict[str, Any]) -> bool:
     reference = str(resource.get("sourceUrl") or resource.get("url") or resource.get("filePath") or resource.get("path") or "")
     if resource.get("canDownload") is True and _canvas_type(resource) != "Page" and not _is_html_reference(reference):
         return False
-    return _canvas_type(resource) == "Page" or _is_html_reference(
+    return _canvas_type(resource) in {"Page", "Assignment", "Discussion"} or _is_html_reference(
         reference
     ) or "/courses/" in reference
 
@@ -1034,6 +1136,10 @@ def _dedupe_key(resource: dict[str, Any]) -> tuple[str, str]:
     file_id = resource.get("fileId")
     if file_id is not None and str(file_id).strip():
         return ("file", str(file_id).strip())
+
+    page_id = resource.get("pageId")
+    if page_id is not None and str(page_id).strip():
+        return ("page", str(page_id).strip().lower())
 
     source_url = _resource_source_url(resource)
     if source_url:
@@ -1063,11 +1169,13 @@ def _badge_for(access_status: str) -> dict[str, str]:
         ACCESS_STATUS_OK: "OK",
         ACCESS_STATUS_NO_ACCEDE: "NO ACCEDE",
         ACCESS_STATUS_REQUIRES_INTERACTION: "REQUIERE INTERACCION",
+        ACCESS_STATUS_REQUIRES_SSO: "REQUIERE SSO",
     }
     tones = {
         ACCESS_STATUS_OK: "success",
         ACCESS_STATUS_NO_ACCEDE: "danger",
         ACCESS_STATUS_REQUIRES_INTERACTION: "warning",
+        ACCESS_STATUS_REQUIRES_SSO: "warning",
     }
     return {"label": labels.get(access_status, "Error"), "tone": tones.get(access_status, "danger")}
 
@@ -1075,7 +1183,7 @@ def _badge_for(access_status: str) -> dict[str, str]:
 def _health_status_for(access_status: str) -> str:
     if access_status == ACCESS_STATUS_OK:
         return ResourceHealthStatus.OK.value
-    if access_status == ACCESS_STATUS_REQUIRES_INTERACTION:
+    if access_status in {ACCESS_STATUS_REQUIRES_INTERACTION, ACCESS_STATUS_REQUIRES_SSO}:
         return ResourceHealthStatus.WARN.value
     return ResourceHealthStatus.ERROR.value
 
@@ -1084,6 +1192,55 @@ def _broken_link_note(access_status: str, http_status: int | None) -> str:
     if http_status is not None:
         return f"broken_link: URL devuelve {http_status}."
     return "broken_link: no se pudo acceder al recurso."
+
+
+def _requires_interaction_result(
+    canvas_type: str,
+    *,
+    http_status: int | None = None,
+    message: str | None = None,
+) -> AccessProbeResult:
+    return AccessProbeResult(
+        can_access=False,
+        access_status=ACCESS_STATUS_REQUIRES_INTERACTION,
+        http_status=http_status,
+        error_message=message or "Este recurso existe en Canvas, pero requiere una interacción o sesión de navegador.",
+        details={"requiresInteraction": True, "canvasType": canvas_type},
+    )
+
+
+def _canvas_content_id(resource: dict[str, Any]) -> str | None:
+    for key in ("contentId", "content_id", "assignmentId", "discussionId", "quizId", "itemContentId", "fileId"):
+        value = resource.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    details = resource.get("details")
+    if isinstance(details, dict):
+        for key in ("contentId", "assignmentId", "discussionId", "quizId"):
+            value = details.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
+
+def _canvas_api_url(resource: dict[str, Any]) -> str | None:
+    for key in ("apiUrl", "api_url"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    details = resource.get("details")
+    if isinstance(details, dict):
+        value = details.get("apiUrl")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _is_sso_url(url: str | None) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    host = urlparse(url).netloc.lower()
+    return any(marker in host for marker in SSO_HOST_MARKERS)
 
 
 def _log_access_result(resource: dict[str, Any]) -> None:

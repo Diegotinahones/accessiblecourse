@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.core.errors import AppError
 from app.services.canvas_client import CanvasCourse, CanvasFile, CanvasModule, CanvasModuleItem
 from app.services.url_check import UrlCheckResult
 
@@ -93,6 +94,28 @@ class StubCanvasClient:
                     page_url=None,
                     url="https://canvas.example.edu/api/v1/courses/77/assignments/1",
                 ),
+                CanvasModuleItem(
+                    id="quiz-1",
+                    title="Quiz bloqueado",
+                    type="Quiz",
+                    position=5,
+                    content_id="q-1",
+                    html_url="https://canvas.example.edu/courses/77/quizzes/1",
+                    external_url=None,
+                    page_url=None,
+                    url="https://canvas.example.edu/api/v1/courses/77/quizzes/1",
+                ),
+                CanvasModuleItem(
+                    id="tool-1",
+                    title="RALTI",
+                    type="ExternalTool",
+                    position=6,
+                    content_id="tool-1",
+                    html_url="https://canvas.example.edu/courses/77/external_tools/1",
+                    external_url="https://ralti.uoc.edu/launch",
+                    page_url=None,
+                    url=None,
+                ),
             ]
         return [
             CanvasModuleItem(
@@ -109,6 +132,17 @@ class StubCanvasClient:
         ]
 
     def get_file(self, course_id: str, file_id: str) -> CanvasFile:
+        if file_id == "100":
+            return CanvasFile(
+                id=file_id,
+                display_name="PEC1.pdf",
+                filename="pec1.pdf",
+                content_type="application/pdf",
+                folder_full_name="course files/modulo-1",
+                url="https://canvas.example.edu/files/100/download",
+                html_url="https://canvas.example.edu/courses/77/files/100",
+                preview_url=None,
+            )
         if file_id == "99":
             return CanvasFile(
                 id=file_id,
@@ -147,6 +181,22 @@ class StubCanvasClient:
                 <p><a href="/courses/77/files/metadata.xml">Metadata XML</a></p>
             """,
         }
+
+    def get_assignment(self, course_id: str, assignment_id: str) -> dict[str, str]:
+        return {
+            "id": assignment_id,
+            "description": '<p><a href="/courses/77/files/100/download">Enunciado PEC1</a></p>',
+        }
+
+    def get_discussion_topic(self, course_id: str, topic_id: str) -> dict[str, str]:
+        return {"id": topic_id, "message": ""}
+
+    def get_quiz(self, course_id: str, quiz_id: str) -> dict[str, str]:
+        raise AppError(
+            code="canvas_quiz_forbidden",
+            message="Canvas no permite acceder a este quiz por API.",
+            status_code=403,
+        )
 
     def get_text(self, url: str):
         raise AssertionError(f"Unexpected HTML request: {url}")
@@ -228,6 +278,28 @@ class StubUrlChecker:
                 content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 content_disposition='attachment; filename="plantilla-accesible.docx"',
             )
+        if url == "https://canvas.example.edu/files/100/download":
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                status_code=200,
+                url_status="200",
+                final_url=url,
+                content_type="application/pdf",
+                content_disposition='attachment; filename="pec1.pdf"',
+            )
+        if url == "https://ralti.uoc.edu/launch":
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                reason="redirect",
+                status_code=200,
+                url_status="200",
+                final_url="https://ralti.uoc.edu/sso",
+                redirected=True,
+            )
         return UrlCheckResult(
             url=url,
             checked=True,
@@ -304,14 +376,15 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
     resources_payload = resources_response.json()
-    assert len(resources_payload["resources"]) == 6
+    assert len(resources_payload["resources"]) == 9
 
     access_response = client.get(f"/api/jobs/{job_id}/access")
     assert access_response.status_code == 200, access_response.text
     access_payload = access_response.json()
-    assert access_payload["summary"]["total"] == 6
-    assert access_payload["summary"]["accessible"] == 4
+    assert access_payload["summary"]["total"] == 9
+    assert access_payload["summary"]["accessible"] == 6
     assert access_payload["summary"]["requiere_interaccion_count"] == 1
+    assert access_payload["summary"]["requiere_sso_count"] == 1
     assert access_payload["modules"][0]["modulePath"] == "Modulo 1 > Recursos principales"
 
     pdf_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Guia docente.pdf")
@@ -328,10 +401,20 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     assert broken_resource["accessStatus"] == "NO_ACCEDE"
 
     assignment_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Entrega final")
-    assert assignment_resource["status"] == "WARN"
-    assert assignment_resource["accessStatus"] == "REQUIERE_INTERACCION"
+    assert assignment_resource["status"] == "OK"
+    assert assignment_resource["accessStatus"] == "OK"
     assert assignment_resource["canDownload"] is False
-    assert "requires_interaction" in assignment_resource["notes"]
+    assert assignment_resource["discoveredChildrenCount"] == 1
+
+    quiz_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Quiz bloqueado")
+    assert quiz_resource["status"] == "WARN"
+    assert quiz_resource["accessStatus"] == "REQUIERE_INTERACCION"
+    assert "requires_interaction" in quiz_resource["notes"]
+
+    ralti_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "RALTI")
+    assert ralti_resource["status"] == "WARN"
+    assert ralti_resource["accessStatus"] == "REQUIERE_SSO"
+    assert "requires_sso" in ralti_resource["notes"]
 
     page_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Bienvenida")
     assert page_resource["canAccess"] is True
@@ -341,8 +424,14 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     discovered_file = next(resource for resource in resources_payload["resources"] if resource["title"] == "Plantilla accesible.docx")
     assert discovered_file["canAccess"] is True
     assert discovered_file["canDownload"] is True
-    assert discovered_file["downloadStatusCode"] == 302
+    assert discovered_file["downloadStatus"] == "OK"
+    assert discovered_file["downloadStatusCode"] == 200
     assert discovered_file["parentResourceId"] == page_resource["id"]
+
+    assignment_file = next(resource for resource in resources_payload["resources"] if resource["title"] == "PEC1.pdf")
+    assert assignment_file["canAccess"] is True
+    assert assignment_file["canDownload"] is True
+    assert assignment_file["parentResourceId"] == assignment_resource["id"]
 
     detail_response = client.get(f"/api/jobs/{job_id}/resources/{pdf_resource['id']}")
     assert detail_response.status_code == 200, detail_response.text
@@ -362,4 +451,4 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
 
     report_response = client.post(f"/api/jobs/{job_id}/report")
     assert report_response.status_code == 200, report_response.text
-    assert report_response.json()["stats"]["resources"] == 6
+    assert report_response.json()["stats"]["resources"] == 9

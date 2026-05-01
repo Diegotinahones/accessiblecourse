@@ -275,6 +275,13 @@ class CanvasClient:
 
     def get_file(self, course_id: str, file_id: str) -> CanvasFile:
         payload = self._request_json("GET", f"api/v1/courses/{course_id}/files/{file_id}")
+        return self._parse_file(payload)
+
+    def get_file_by_id(self, file_id: str) -> CanvasFile:
+        payload = self._request_json("GET", f"api/v1/files/{file_id}")
+        return self._parse_file(payload)
+
+    def _parse_file(self, payload: Any) -> CanvasFile:
         if not isinstance(payload, dict):
             raise AppError(
                 code="canvas_file_invalid",
@@ -285,12 +292,21 @@ class CanvasClient:
             id=_require_string(payload, "id"),
             display_name=_require_string(payload, "display_name", fallback="Fichero sin titulo") or "Fichero sin titulo",
             filename=_require_string(payload, "filename", fallback="file") or "file",
-            content_type=_require_string(payload, "content-type") or None,
+            content_type=_require_string(payload, "content-type") or _require_string(payload, "content_type") or None,
             folder_full_name=_require_string(payload, "folder_full_name") or None,
             url=payload.get("url"),
             html_url=payload.get("html_url"),
             preview_url=payload.get("preview_url"),
         )
+
+    def get_assignment(self, course_id: str, assignment_id: str) -> dict[str, Any]:
+        return self.get_json(f"api/v1/courses/{course_id}/assignments/{assignment_id}")
+
+    def get_discussion_topic(self, course_id: str, topic_id: str) -> dict[str, Any]:
+        return self.get_json(f"api/v1/courses/{course_id}/discussion_topics/{topic_id}")
+
+    def get_quiz(self, course_id: str, quiz_id: str) -> dict[str, Any]:
+        return self.get_json(f"api/v1/courses/{course_id}/quizzes/{quiz_id}")
 
     def get_folder(self, folder_id: str | int) -> dict[str, Any]:
         payload = self._request_json("GET", f"api/v1/folders/{folder_id}")

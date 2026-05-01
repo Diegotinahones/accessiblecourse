@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import Settings
@@ -30,6 +30,7 @@ def _apply_sqlite_schema_updates(engine) -> None:
         "access_status_code": "ALTER TABLE resources ADD COLUMN access_status_code INTEGER",
         "can_download": "ALTER TABLE resources ADD COLUMN can_download BOOLEAN NOT NULL DEFAULT 0",
         "download_url": "ALTER TABLE resources ADD COLUMN download_url VARCHAR(2000)",
+        "download_status": "ALTER TABLE resources ADD COLUMN download_status VARCHAR(64)",
         "download_status_code": "ALTER TABLE resources ADD COLUMN download_status_code INTEGER",
         "discovered_children_count": "ALTER TABLE resources ADD COLUMN discovered_children_count INTEGER NOT NULL DEFAULT 0",
         "access_note": "ALTER TABLE resources ADD COLUMN access_note TEXT",
@@ -66,6 +67,28 @@ def _apply_sqlite_schema_updates(engine) -> None:
                     _exec_sqlite_ddl_if_missing(connection, ddl)
 
 
+def _apply_postgres_schema_updates(engine) -> None:
+    if engine.dialect.name != "postgresql":
+        return
+
+    enum_values = ("NO_ACCEDE", "REQUIERE_INTERACCION", "REQUIERE_SSO")
+    resource_columns = (
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS download_url VARCHAR(2000)",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS download_status VARCHAR(64)",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS access_note TEXT",
+    )
+
+    with engine.begin() as connection:
+        for value in enum_values:
+            try:
+                connection.exec_driver_sql(f"ALTER TYPE resourceaccessstatus ADD VALUE IF NOT EXISTS '{value}'")
+            except SQLAlchemyError:
+                # Fresh databases create the enum during SQLModel.create_all; existing ones may already have it.
+                pass
+        for ddl in resource_columns:
+            connection.exec_driver_sql(ddl)
+
+
 def _exec_sqlite_ddl_if_missing(connection, ddl: str) -> None:
     try:
         connection.exec_driver_sql(ddl)
@@ -77,5 +100,6 @@ def _exec_sqlite_ddl_if_missing(connection, ddl: str) -> None:
 def init_db(engine) -> None:
     SQLModel.metadata.create_all(engine)
     _apply_sqlite_schema_updates(engine)
+    _apply_postgres_schema_updates(engine)
     with Session(engine) as session:
         seed_templates(session)

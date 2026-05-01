@@ -199,6 +199,7 @@ class ResourceListItemRead(StrictModel):
     httpStatus: int | None = None
     accessStatusCode: int | None = None
     canDownload: bool = False
+    downloadStatus: str | None = None
     downloadStatusCode: int | None = None
     discoveredChildrenCount: int = 0
     parentResourceId: str | None = None
@@ -218,6 +219,7 @@ class AccessSummaryResourceRead(StrictModel):
     accessStatus: ReviewResourceAccessStatus
     canAccess: bool
     canDownload: bool
+    downloadStatus: str | None = None
     accessStatusCode: int | None = None
     downloadStatusCode: int | None = None
     discovered: bool = False
@@ -234,6 +236,7 @@ class AccessSummaryGroupRead(StrictModel):
     ok_count: int = 0
     no_accede_count: int = 0
     requiere_interaccion_count: int = 0
+    requiere_sso_count: int = 0
     downloadables_total: int = 0
     downloadables_ok: int = 0
     byStatus: dict[str, int]
@@ -251,6 +254,7 @@ class AccessSummaryRead(StrictModel):
     ok_count: int = 0
     no_accede_count: int = 0
     requiere_interaccion_count: int = 0
+    requiere_sso_count: int = 0
     downloadables_total: int = 0
     downloadables_ok: int = 0
     byStatus: dict[str, int]
@@ -268,6 +272,7 @@ class AccessModuleRead(StrictModel):
     ok_count: int = 0
     no_accede_count: int = 0
     requiere_interaccion_count: int = 0
+    requiere_sso_count: int = 0
     downloadables_total: int = 0
     downloadables_ok: int = 0
     byStatus: dict[str, int]

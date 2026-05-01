@@ -251,6 +251,8 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
     discovered: item.discovered ?? false,
     accessNote: item.accessNote ?? item.errorMessage ?? null,
     errorMessage: item.errorMessage ?? null,
+    reasonCode: item.reasonCode ?? null,
+    reasonDetail: item.reasonDetail ?? null,
     notes: item.notes ?? null,
     failCount: item.failCount ?? 0,
   };

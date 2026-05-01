@@ -3,7 +3,6 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { LayoutSimple } from '../components/LayoutSimple';
 import {
   fetchResources,
-  getResourceDownloadUrl,
   api,
 } from '../lib/api';
 import type { AppMode, CourseStructure, CourseStructureNode, ResourceListItem } from '../lib/types';
@@ -24,12 +23,6 @@ interface ResourceGroup {
 }
 
 function getAccessLabel(resource: ResourceListItem) {
-  if (resource.accessStatus === 'REQUIERE_INTERACCION') {
-    return 'REQUIERE INTERACCIÓN';
-  }
-  if (resource.accessStatus === 'REQUIERE_SSO') {
-    return 'REQUIERE SSO';
-  }
   return resource.canAccess && resource.accessStatus === 'OK' ? 'OK' : 'NO ACCEDE';
 }
 
@@ -37,19 +30,11 @@ function getAccessTone(resource: ResourceListItem): BadgeTone {
   if (resource.canAccess && resource.accessStatus === 'OK') {
     return 'ok';
   }
-  if (
-    resource.accessStatus === 'REQUIERE_INTERACCION' ||
-    resource.accessStatus === 'REQUIERE_SSO' ||
-    resource.accessStatus === 'FORBIDDEN' ||
-    resource.accessStatus === 'TIMEOUT'
-  ) {
-    return 'warning';
-  }
   return 'danger';
 }
 
 function getDownloadLabel(resource: ResourceListItem) {
-  return resource.canDownload ? 'DESCARGABLE' : 'NO DESCARGABLE';
+  return resource.canDownload ? 'sí' : 'no';
 }
 
 function getDownloadTone(resource: ResourceListItem): BadgeTone {
@@ -79,8 +64,63 @@ function getSectionLabel(resource: ResourceListItem) {
   return resource.modulePath || resource.coursePath || 'Sin sección';
 }
 
-function isDownloadable(resource: ResourceListItem, mode: AppMode) {
-  return mode === 'offline' && resource.canDownload && Boolean(resource.filePath || resource.localPath || resource.path);
+function isNoAccess(resource: ResourceListItem) {
+  return !(resource.canAccess && resource.accessStatus === 'OK');
+}
+
+function getReasonCode(resource: ResourceListItem) {
+  if (resource.reasonCode) {
+    return resource.reasonCode;
+  }
+
+  if (
+    resource.accessStatus === 'REQUIERE_INTERACCION' ||
+    resource.accessStatus === 'REQUIERE_SSO'
+  ) {
+    return resource.accessStatus;
+  }
+
+  const normalizedUrlStatus = resource.urlStatus?.trim().toLowerCase();
+  if (normalizedUrlStatus === 'timeout') {
+    return 'timeout';
+  }
+
+  const statusCode = resource.accessStatusCode ?? resource.httpStatus;
+  if (statusCode === 404 || normalizedUrlStatus === '404') {
+    return '404_not_found';
+  }
+  if (statusCode === 401 || statusCode === 403 || normalizedUrlStatus === '403') {
+    return 'forbidden';
+  }
+  if (statusCode) {
+    return `http_${statusCode}`;
+  }
+
+  if (resource.accessStatus && resource.accessStatus !== 'OK') {
+    return resource.accessStatus;
+  }
+
+  return 'no_accede';
+}
+
+function getReasonDetail(resource: ResourceListItem) {
+  return resource.reasonDetail ?? resource.errorMessage ?? resource.accessNote ?? resource.notes;
+}
+
+function isIgnoredOrNoiseResource(resource: ResourceListItem) {
+  const notes = resource.notes?.toLowerCase() ?? '';
+  const reference = (resource.sourceUrl ?? resource.url ?? resource.filePath ?? resource.path ?? '').trim().toLowerCase();
+
+  return (
+    notes.includes('ignored') ||
+    notes.includes('ignorado') ||
+    notes.includes('ruido') ||
+    reference.startsWith('#') ||
+    reference.startsWith('mailto:') ||
+    reference.startsWith('tel:') ||
+    reference.startsWith('javascript:') ||
+    reference.startsWith('data:')
+  );
 }
 
 function buildGroupsByPath(resources: ResourceListItem[]): ResourceGroup[] {
@@ -198,6 +238,8 @@ export function ResourcesPage() {
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [hideIgnoredResources, setHideIgnoredResources] = useState(true);
+  const [showOnlyNoAccess, setShowOnlyNoAccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const modeParam = searchParams.get('mode');
   const appMode: AppMode = isAppMode(modeParam)
@@ -251,32 +293,41 @@ export function ResourcesPage() {
     };
   }, [jobId]);
 
+  const visibleResources = useMemo(
+    () =>
+      resources.filter((resource) => {
+        if (hideIgnoredResources && isIgnoredOrNoiseResource(resource)) {
+          return false;
+        }
+
+        if (showOnlyNoAccess && !isNoAccess(resource)) {
+          return false;
+        }
+
+        return true;
+      }),
+    [hideIgnoredResources, resources, showOnlyNoAccess],
+  );
+
   const groups = useMemo(() => {
     if (structure) {
-      return buildGroupsFromStructure(structure, resources);
+      return buildGroupsFromStructure(structure, visibleResources);
     }
 
-    return buildGroupsByPath(resources);
-  }, [resources, structure]);
+    return buildGroupsByPath(visibleResources);
+  }, [structure, visibleResources]);
   const accessedCount = useMemo(
-    () => resources.filter((resource) => resource.accessStatus === 'OK').length,
-    [resources],
-  );
-  const requiresInteractionCount = useMemo(
-    () => resources.filter((resource) => resource.accessStatus === 'REQUIERE_INTERACCION').length,
-    [resources],
-  );
-  const requiresSsoCount = useMemo(
-    () => resources.filter((resource) => resource.accessStatus === 'REQUIERE_SSO').length,
-    [resources],
+    () => visibleResources.filter((resource) => !isNoAccess(resource)).length,
+    [visibleResources],
   );
   const downloadableCount = useMemo(
-    () => resources.filter((resource) => resource.canDownload).length,
-    [resources],
+    () => visibleResources.filter((resource) => resource.canDownload).length,
+    [visibleResources],
   );
-  const accessibleDownloadableCount = useMemo(
-    () => resources.filter((resource) => resource.canAccess && resource.canDownload).length,
-    [resources],
+  const summaryText = useMemo(
+    () =>
+      `Se ha accedido a ${accessedCount} de ${visibleResources.length} recursos. Descargables: ${downloadableCount}.`,
+    [accessedCount, downloadableCount, visibleResources.length],
   );
 
   const handleRetryAnalysis = async () => {
@@ -334,25 +385,34 @@ export function ResourcesPage() {
         </section>
       ) : (
         <div className="space-y-6">
-          <section className="card-panel space-y-3 p-5">
+          <section aria-atomic="true" aria-live="polite" className="card-panel space-y-3 p-5">
             <h2 className="text-lg font-semibold text-ink">Resumen del acceso</h2>
-            <p className="text-base text-ink">
-              Se ha accedido a {accessedCount} de {resources.length} recursos.
-            </p>
-            <p className="text-base text-ink">
-              Requieren interacción: {requiresInteractionCount}.
-            </p>
-            <p className="text-base text-ink">
-              Requieren SSO: {requiresSsoCount}.
-            </p>
-            <p className="text-base text-ink">
-              Descargables: {downloadableCount} ({accessibleDownloadableCount} accesibles).
-            </p>
+            <p className="text-base text-ink">{summaryText}</p>
           </section>
 
-          <section className="space-y-4">
-            <h2 className="text-xl font-semibold text-ink">Recursos por módulo o sección</h2>
+          <fieldset className="card-panel space-y-4 p-5">
+            <legend className="text-lg font-semibold text-ink">Filtros</legend>
+            <label className="flex items-start gap-3 text-base text-ink">
+              <input
+                checked={hideIgnoredResources}
+                className="mt-1 h-5 w-5 accent-[#205e3c]"
+                onChange={(event) => setHideIgnoredResources(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Ocultar recursos ignorados/ruido</span>
+            </label>
+            <label className="flex items-start gap-3 text-base text-ink">
+              <input
+                checked={showOnlyNoAccess}
+                className="mt-1 h-5 w-5 accent-[#205e3c]"
+                onChange={(event) => setShowOnlyNoAccess(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Mostrar solo NO ACCEDE</span>
+            </label>
+          </fieldset>
 
+          <section className="space-y-4">
             {groups.length === 0 ? (
               <div className="card-panel p-6 text-sm text-subtle">
                 No hay recursos para mostrar en este análisis.
@@ -364,7 +424,7 @@ export function ResourcesPage() {
 
                 return (
                   <section className="card-panel overflow-hidden" key={group.id}>
-                    <h3>
+                    <h2>
                       <button
                         aria-controls={sectionId}
                         aria-expanded={isExpanded}
@@ -377,7 +437,7 @@ export function ResourcesPage() {
                           {group.resources.length}
                         </span>
                       </button>
-                    </h3>
+                    </h2>
 
                     <div
                       className="border-t border-line"
@@ -388,50 +448,66 @@ export function ResourcesPage() {
                         {group.resources.map((resource) => {
                           const accessLabel = getAccessLabel(resource);
                           const downloadLabel = getDownloadLabel(resource);
-                          const downloadable = jobId
-                            ? isDownloadable(resource, appMode)
-                            : false;
+                          const noAccess = isNoAccess(resource);
+                          const reasonCode = noAccess ? getReasonCode(resource) : null;
+                          const reasonDetail = noAccess ? getReasonDetail(resource) : null;
 
                           return (
                             <li
-                              className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6"
+                              className="px-5 py-4 sm:px-6"
                               key={resource.id}
                             >
                               <div className="space-y-2">
-                                <p className="text-base font-semibold text-ink">
+                                <h3 className="text-base font-semibold text-ink">
                                   {resource.title}
-                                </p>
-                                <div className="flex flex-wrap gap-2 text-sm">
-                                  <span
-                                    aria-label={`Acceso ${accessLabel}`}
-                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getAccessTone(resource))}`}
-                                  >
-                                    {accessLabel}
-                                  </span>
-                                  <span
-                                    aria-label={`Descarga ${downloadLabel}`}
-                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getDownloadTone(resource))}`}
-                                  >
-                                    {downloadLabel}
-                                  </span>
-                                  <span
-                                    aria-label={`Tipo ${getReviewResourceTypeLabel(resource.type)}`}
-                                    className="inline-flex rounded-full border border-line bg-[#f7faf7] px-3 py-1 font-medium text-subtle"
-                                  >
-                                    {getReviewResourceTypeLabel(resource.type)}
-                                  </span>
-                                </div>
-                              </div>
+                                </h3>
+                                <dl className="grid gap-2 text-sm text-ink sm:grid-cols-3">
+                                  <div>
+                                    <dt className="font-semibold">Tipo</dt>
+                                    <dd>{getReviewResourceTypeLabel(resource.type)}</dd>
+                                  </div>
+                                  <div>
+                                    <dt className="font-semibold">Estado</dt>
+                                    <dd>
+                                      <span
+                                        className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getAccessTone(resource))}`}
+                                      >
+                                        {accessLabel}
+                                      </span>
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt className="font-semibold">Descargable</dt>
+                                    <dd>
+                                      <span
+                                        className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getDownloadTone(resource))}`}
+                                      >
+                                        {downloadLabel}
+                                      </span>
+                                    </dd>
+                                  </div>
+                                </dl>
 
-                              {downloadable && jobId ? (
-                                <a
-                                  aria-label={`Descargar ${resource.title}`}
-                                  className="button-secondary w-full sm:w-auto"
-                                  href={getResourceDownloadUrl(jobId, resource.id)}
-                                >
-                                  Descargar
-                                </a>
-                              ) : null}
+                                {noAccess && reasonCode ? (
+                                  <div className="space-y-2 text-sm text-ink">
+                                    <p>
+                                      <span className="font-semibold">Motivo:</span>{' '}
+                                      {reasonCode}
+                                    </p>
+                                    {reasonDetail ? (
+                                      <details className="rounded-xl border border-line bg-[#f7faf7] px-4 py-3">
+                                        <summary className="cursor-pointer font-semibold">
+                                          Más detalles
+                                        </summary>
+                                        <p className="mt-2 leading-6 text-subtle">
+                                          {reasonDetail}
+                                        </p>
+                                      </details>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+
+                              </div>
                             </li>
                           );
                         })}

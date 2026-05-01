@@ -125,6 +125,8 @@ export interface ResourceListItem {
   discovered: boolean;
   accessNote: string | null;
   errorMessage: string | null;
+  reasonCode: string | null;
+  reasonDetail: string | null;
   notes: string | null;
   reviewState: ReviewState;
   failCount: number;

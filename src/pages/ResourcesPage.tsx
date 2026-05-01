@@ -24,6 +24,9 @@ interface ResourceGroup {
 }
 
 function getAccessLabel(resource: ResourceListItem) {
+  if (resource.accessStatus === 'REQUIERE_INTERACCION') {
+    return 'REQUIERE INTERACCIÓN';
+  }
   return resource.canAccess && resource.accessStatus === 'OK' ? 'OK' : 'NO ACCEDE';
 }
 
@@ -31,7 +34,11 @@ function getAccessTone(resource: ResourceListItem): BadgeTone {
   if (resource.canAccess && resource.accessStatus === 'OK') {
     return 'ok';
   }
-  if (resource.accessStatus === 'FORBIDDEN' || resource.accessStatus === 'TIMEOUT') {
+  if (
+    resource.accessStatus === 'REQUIERE_INTERACCION' ||
+    resource.accessStatus === 'FORBIDDEN' ||
+    resource.accessStatus === 'TIMEOUT'
+  ) {
     return 'warning';
   }
   return 'danger';
@@ -248,7 +255,11 @@ export function ResourcesPage() {
     return buildGroupsByPath(resources);
   }, [resources, structure]);
   const accessedCount = useMemo(
-    () => resources.filter((resource) => resource.canAccess).length,
+    () => resources.filter((resource) => resource.accessStatus === 'OK').length,
+    [resources],
+  );
+  const requiresInteractionCount = useMemo(
+    () => resources.filter((resource) => resource.accessStatus === 'REQUIERE_INTERACCION').length,
     [resources],
   );
   const downloadableCount = useMemo(
@@ -319,6 +330,9 @@ export function ResourcesPage() {
             <h2 className="text-lg font-semibold text-ink">Resumen del acceso</h2>
             <p className="text-base text-ink">
               Se ha accedido a {accessedCount} de {resources.length} recursos.
+            </p>
+            <p className="text-base text-ink">
+              Requieren interacción: {requiresInteractionCount}.
             </p>
             <p className="text-base text-ink">
               Descargables: {downloadableCount} ({accessibleDownloadableCount} accesibles).

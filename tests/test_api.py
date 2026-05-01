@@ -375,11 +375,16 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert create_response.status_code == 201, create_response.text
     job_id = create_response.json()["jobId"]
 
+    status_response = client.get(f"/api/jobs/{job_id}")
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["phase"] == "DONE"
+
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
     resources_payload = resources_response.json()
     resources = resources_payload["resources"]
     assert len(resources) == 2
+    assert [resource["title"] for resource in resources] == ["Guía", "Enlace externo"]
 
     pdf_resource = next(resource for resource in resources if resource["title"] == "Guía")
     link_resource = next(resource for resource in resources if resource["title"] == "Enlace externo")
@@ -412,7 +417,7 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert link_resource["urlStatus"] == "404"
     assert link_resource["finalUrl"] == "https://example.com/broken-link"
     assert link_resource["canAccess"] is False
-    assert link_resource["accessStatus"] == "NOT_FOUND"
+    assert link_resource["accessStatus"] == "NO_ACCEDE"
     assert link_resource["httpStatus"] == 404
     assert link_resource["canDownload"] is False
     assert link_resource["errorMessage"] == "La URL devolvió 404."
@@ -434,12 +439,23 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert access_summary["downloadable"] == 1
     assert access_summary["byStatus"] == {
         "OK": 1,
-        "NOT_FOUND": 1,
-        "FORBIDDEN": 0,
-        "TIMEOUT": 0,
-        "ERROR": 0,
+        "NO_ACCEDE": 1,
+        "REQUIERE_INTERACCION": 0,
     }
     assert access_summary["groups"][0]["modulePath"] == "Tema 1"
+
+    access_response = client.get(f"/api/jobs/{job_id}/access")
+    assert access_response.status_code == 200, access_response.text
+    access_payload = access_response.json()
+    assert access_payload["jobId"] == job_id
+    assert access_payload["phase"] == "DONE"
+    assert access_payload["summary"]["accessible"] == 1
+    assert access_payload["summary"]["downloadable"] == 1
+    assert access_payload["modules"][0]["modulePath"] == "Tema 1"
+    assert [resource["title"] for resource in access_payload["modules"][0]["resources"]] == [
+        "Guía",
+        "Enlace externo",
+    ]
 
     download_pdf_response = client.get(f"/api/jobs/{job_id}/resources/res-pdf/download")
     assert download_pdf_response.status_code == 200, download_pdf_response.text
@@ -525,9 +541,15 @@ def test_offline_deep_scan_discovers_nested_local_and_external_resources(client,
     assert worksheet["accessStatusCode"] == 200
     assert worksheet["canDownload"] is True
     assert worksheet["parentResourceId"] == "res-html"
+    assert worksheet["modulePath"] == "Unidad 1"
+    assert worksheet["moduleTitle"] == "Unidad 1"
+    assert worksheet["sectionTitle"] == "Unidad 1"
 
     assert slides["canAccess"] is True
     assert slides["canDownload"] is True
+    assert slides["modulePath"] == "Unidad 1"
+    assert slides["moduleTitle"] == "Unidad 1"
+    assert slides["sectionTitle"] == "Unidad 1"
     assert image["type"] == "IMAGE"
     assert image["canAccess"] is True
     assert image["canDownload"] is True

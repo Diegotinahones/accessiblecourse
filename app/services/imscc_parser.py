@@ -11,6 +11,8 @@ from uuid import NAMESPACE_URL, uuid5
 from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 
+from bs4 import BeautifulSoup
+
 from app.services.course_structure import normalize_course_structure
 
 DEFAULT_MAX_ARCHIVE_MEMBERS = 2000
@@ -400,7 +402,6 @@ class IMSCCParser:
             )
 
             external_url = resource.external_url
-            external_title = resource.title
 
             path: str | None = None
             url: str | None = None
@@ -439,6 +440,9 @@ class IMSCCParser:
                 primary_reference = path or declared_href or resource.href
 
             title = (item_ref.title if item_ref else None) or resource.title or _derive_title(primary_reference) or "Sin título"
+            module_title = _module_title_from_item_ref(item_ref)
+            section_title = _section_title_from_item_ref(item_ref, fallback_title=title)
+            downloadable = bool(origin == "internal" and path and Path(path).suffix.lower() not in HTML_RESOURCE_EXTENSIONS)
 
             inventory.append(
                 {
@@ -451,6 +455,7 @@ class IMSCCParser:
                     "sourceUrl": url,
                     "path": path if origin == "internal" else None,
                     "filePath": path if origin == "internal" else None,
+                    "localPath": path if origin == "internal" else None,
                     "href": resource.href,
                     "files": resolved_file_refs or declared_files,
                     "dependencies": resource.dependencies,
@@ -460,6 +465,11 @@ class IMSCCParser:
                     "module_path": item_ref.module_path if item_ref else None,
                     "itemPath": item_ref.course_path if item_ref else None,
                     "item_path": item_ref.course_path if item_ref else None,
+                    "moduleTitle": module_title,
+                    "module_title": module_title,
+                    "sectionTitle": section_title,
+                    "section_title": section_title,
+                    "downloadable": downloadable,
                     "details": {
                         "mappedToCourseStructure": bool(item_ref),
                         "manifestResourceType": resource.resource_type,
@@ -469,7 +479,7 @@ class IMSCCParser:
                 }
             )
 
-        return [
+        filtered_inventory = [
             resource
             for resource in inventory
             if not _should_skip_metadata_resource(
@@ -478,6 +488,7 @@ class IMSCCParser:
                 effective_excluded_extensions,
             )
         ]
+        return self._order_inventory_by_structure(filtered_inventory, parsed_manifest)
 
     def discover_html_linked_resources(
         self,
@@ -509,6 +520,7 @@ class IMSCCParser:
                 continue
 
             parent_resource = resources_by_path.get(html_relative_path)
+            context_resource = parent_resource or _find_context_resource_for_html(html_relative_path, resources_by_path)
             for candidate in self.extract_html_links(html_path, extracted_root):
                 if candidate["kind"] == "external":
                     source_url = str(candidate["url"])
@@ -518,6 +530,7 @@ class IMSCCParser:
                         child_resource = self._build_discovered_html_resource(
                             candidate,
                             parent_resource=parent_resource,
+                            context_resource=context_resource,
                             parent_html_path=html_relative_path,
                         )
                         resources_by_url[_normalize_external_url(source_url)] = child_resource
@@ -537,6 +550,7 @@ class IMSCCParser:
                     child_resource = self._build_discovered_html_resource(
                         candidate,
                         parent_resource=parent_resource,
+                        context_resource=context_resource,
                         parent_html_path=html_relative_path,
                     )
                     resources_by_path[relative_path] = child_resource
@@ -548,55 +562,91 @@ class IMSCCParser:
 
     def extract_html_links(self, html_path: Path, extracted_root: Path) -> list[dict[str, str]]:
         relative_html_path = html_path.resolve().relative_to(extracted_root.resolve()).as_posix()
-        parser = HTMLReferenceParser()
-        parser.feed(html_path.read_text(encoding="utf-8", errors="ignore"))
+        soup = BeautifulSoup(html_path.read_text(encoding="utf-8", errors="ignore"), "html.parser")
         discovered: list[dict[str, str]] = []
         local_seen: set[str] = set()
         external_seen: set[str] = set()
 
-        for html_reference in parser.references:
-            reference = html_reference.reference
-            if not reference or reference.startswith("#") or self._should_skip_html_reference(reference):
-                continue
-
-            if self._is_external_url(reference):
-                source_url = reference.strip()
-                normalized_url = _normalize_external_url(source_url)
-                if _looks_like_xml_reference(source_url) or normalized_url in external_seen:
+        for tag_name, attribute_name in HTML_REFERENCE_ATTRIBUTES:
+            for element in soup.find_all(tag_name):
+                raw_reference = element.get(attribute_name)
+                if not isinstance(raw_reference, str):
                     continue
-                external_seen.add(normalized_url)
+                reference = raw_reference.strip()
+                if not reference or reference.startswith("#") or self._should_skip_html_reference(reference):
+                    continue
+
+                title = _extract_html_reference_title(element, reference)
+                if self._is_external_url(reference):
+                    source_url = reference.strip()
+                    normalized_url = _normalize_external_url(source_url)
+                    if _looks_like_xml_reference(source_url) or normalized_url in external_seen:
+                        continue
+                    external_seen.add(normalized_url)
+                    discovered.append(
+                        {
+                            "kind": "external",
+                            "url": source_url,
+                            "title": title or _derive_title(source_url),
+                            "tag": tag_name,
+                            "attribute": attribute_name,
+                            "parentHtmlPath": relative_html_path,
+                        }
+                    )
+                    continue
+
+                resolved_path = self.resolve_html_reference(reference, html_path, extracted_root)
+                if resolved_path is None or not resolved_path.exists() or not resolved_path.is_file():
+                    continue
+
+                relative_path = resolved_path.resolve().relative_to(extracted_root.resolve()).as_posix()
+                if _looks_like_xml_reference(relative_path) or relative_path in local_seen:
+                    continue
+                local_seen.add(relative_path)
                 discovered.append(
                     {
-                        "kind": "external",
-                        "url": source_url,
-                        "title": html_reference.title or _derive_title(source_url),
-                        "tag": html_reference.tag,
-                        "attribute": html_reference.attribute,
+                        "kind": "local",
+                        "path": relative_path,
+                        "title": title or _derive_title(relative_path),
+                        "tag": tag_name,
+                        "attribute": attribute_name,
                         "parentHtmlPath": relative_html_path,
                     }
                 )
-                continue
-
-            resolved_path = self.resolve_html_reference(reference, html_path, extracted_root)
-            if resolved_path is None or not resolved_path.exists() or not resolved_path.is_file():
-                continue
-
-            relative_path = resolved_path.resolve().relative_to(extracted_root.resolve()).as_posix()
-            if _looks_like_xml_reference(relative_path) or relative_path in local_seen:
-                continue
-            local_seen.add(relative_path)
-            discovered.append(
-                {
-                    "kind": "local",
-                    "path": relative_path,
-                    "title": html_reference.title or _derive_title(relative_path),
-                    "tag": html_reference.tag,
-                    "attribute": html_reference.attribute,
-                    "parentHtmlPath": relative_html_path,
-                }
-            )
 
         return discovered
+
+    def _order_inventory_by_structure(
+        self,
+        inventory: list[dict[str, Any]],
+        parsed_manifest: ParsedManifest,
+    ) -> list[dict[str, Any]]:
+        ordered_ids = list(_iter_structure_resource_ids(parsed_manifest.structure))
+        if not ordered_ids:
+            return inventory
+
+        resources_by_id = {
+            str(resource.get("id")): resource
+            for resource in inventory
+            if isinstance(resource.get("id"), str) and resource.get("id")
+        }
+        ordered_inventory: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for resource_id in ordered_ids:
+            resource = resources_by_id.get(resource_id)
+            if resource is None or resource_id in seen_ids:
+                continue
+            seen_ids.add(resource_id)
+            ordered_inventory.append(resource)
+
+        for resource in inventory:
+            resource_id = resource.get("id")
+            if isinstance(resource_id, str) and resource_id in seen_ids:
+                continue
+            ordered_inventory.append(resource)
+
+        return ordered_inventory
 
     def resolve_html_reference(self, reference: str | None, html_path: Path, extracted_root: Path) -> Path | None:
         raw_reference = (reference or "").strip().replace("\\", "/")
@@ -829,19 +879,24 @@ class IMSCCParser:
         candidate: dict[str, str],
         *,
         parent_resource: dict[str, Any] | None,
+        context_resource: dict[str, Any] | None,
         parent_html_path: str,
     ) -> dict[str, Any]:
         is_external = candidate["kind"] == "external"
         primary_reference = candidate["url"] if is_external else candidate["path"]
         title = candidate.get("title") or _derive_title(primary_reference) or "Sin título"
-        module_path = _inherit_html_course_path(parent_resource, parent_html_path)
+        module_context = parent_resource or context_resource
+        module_path = _inherit_html_course_path(module_context, parent_html_path)
+        module_title = _module_title_from_resource(module_context, fallback_path=module_path)
+        section_title = _section_title_from_resource(module_context) or module_title
         parent_item_path = _inventory_item_path(parent_resource)
-        item_path = f"{parent_item_path} > {title}" if parent_item_path else title
+        item_path = f"{parent_item_path} > {title}" if parent_item_path else f"{module_path} > {title}" if module_path else title
 
         details = {
             "htmlDiscovery": {
                 "discovered": True,
                 "parentResourceId": str(parent_resource.get("id")) if parent_resource and parent_resource.get("id") else None,
+                "contextResourceId": str(context_resource.get("id")) if context_resource and context_resource.get("id") else None,
                 "parentHtmlPath": parent_html_path,
                 "tag": candidate["tag"],
                 "attribute": candidate["attribute"],
@@ -866,6 +921,10 @@ class IMSCCParser:
             "module_path": module_path,
             "itemPath": item_path,
             "item_path": item_path,
+            "moduleTitle": module_title,
+            "module_title": module_title,
+            "sectionTitle": section_title,
+            "section_title": section_title,
             "status": "OK",
             "files": [primary_reference] if not is_external else [],
             "dependencies": [],
@@ -876,6 +935,7 @@ class IMSCCParser:
             "notes": None,
             "localFile": not is_external,
             "local_file": not is_external,
+            "downloadable": not is_external,
             "external": is_external,
             "details": details,
         }
@@ -1046,6 +1106,48 @@ def _inventory_item_path(resource: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _module_title_from_item_ref(item_ref: ItemReference | None) -> str | None:
+    if item_ref is None:
+        return None
+    return _first_path_segment(item_ref.module_path or item_ref.course_path)
+
+
+def _section_title_from_item_ref(item_ref: ItemReference | None, *, fallback_title: str | None = None) -> str | None:
+    if item_ref is None:
+        return fallback_title
+    parent_path = item_ref.course_path
+    parts = _split_course_path(parent_path)
+    if len(parts) >= 2:
+        return parts[-2]
+    return _last_path_segment(item_ref.module_path) or fallback_title
+
+
+def _module_title_from_resource(resource: dict[str, Any] | None, *, fallback_path: str | None = None) -> str | None:
+    if isinstance(resource, dict):
+        for key in ("moduleTitle", "module_title"):
+            value = resource.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for key in ("modulePath", "module_path", "coursePath", "course_path"):
+            value = resource.get(key)
+            if isinstance(value, str) and value.strip():
+                return _first_path_segment(value)
+    return _first_path_segment(fallback_path)
+
+
+def _section_title_from_resource(resource: dict[str, Any] | None) -> str | None:
+    if not isinstance(resource, dict):
+        return None
+    for key in ("sectionTitle", "section_title"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    parts = _split_course_path(_inventory_item_path(resource))
+    if len(parts) >= 2:
+        return parts[-2]
+    return _last_path_segment(resource.get("modulePath") if isinstance(resource.get("modulePath"), str) else None)
+
+
 def _inherit_html_course_path(parent_resource: dict[str, Any] | None, parent_html_path: str) -> str | None:
     if isinstance(parent_resource, dict):
         for key in ("modulePath", "module_path", "coursePath", "course_path"):
@@ -1057,6 +1159,69 @@ def _inherit_html_course_path(parent_resource: dict[str, Any] | None, parent_htm
     if parent.as_posix() in {"", "."}:
         return None
     return parent.as_posix()
+
+
+def _split_course_path(value: str | None) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return [part.strip() for part in value.split(">") if part.strip()]
+
+
+def _first_path_segment(value: str | None) -> str | None:
+    parts = _split_course_path(value)
+    return parts[0] if parts else None
+
+
+def _last_path_segment(value: str | None) -> str | None:
+    parts = _split_course_path(value)
+    return parts[-1] if parts else None
+
+
+def _iter_structure_resource_ids(structure: dict[str, Any]) -> list[str]:
+    ordered_ids: list[str] = []
+
+    def visit(node: dict[str, Any]) -> None:
+        resource_id = node.get("resourceId")
+        if isinstance(resource_id, str) and resource_id:
+            ordered_ids.append(resource_id)
+        for child in node.get("children", []):
+            if isinstance(child, dict):
+                visit(child)
+
+    for organization in structure.get("organizations", []):
+        if not isinstance(organization, dict):
+            continue
+        for child in organization.get("children", []):
+            if isinstance(child, dict):
+                visit(child)
+    return ordered_ids
+
+
+def _find_context_resource_for_html(
+    html_relative_path: str,
+    resources_by_path: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    target_parent = PurePosixPath(html_relative_path).parent
+    best_match: dict[str, Any] | None = None
+    best_score: tuple[int, int, int] | None = None
+
+    for candidate_path, resource in resources_by_path.items():
+        candidate_parent = PurePosixPath(candidate_path).parent
+        shared_parts = 0
+        for target_part, candidate_part in zip(target_parent.parts, candidate_parent.parts):
+            if target_part != candidate_part:
+                break
+            shared_parts += 1
+        if shared_parts == 0:
+            continue
+
+        resource_is_html = int(Path(candidate_path).suffix.lower() in HTML_RESOURCE_EXTENSIONS)
+        score = (shared_parts, resource_is_html, -abs(len(target_parent.parts) - len(candidate_parent.parts)))
+        if best_score is None or score > best_score:
+            best_match = resource
+            best_score = score
+
+    return best_match
 
 
 def _resolve_relative_path(extracted_root: Path, relative_path: str) -> Path | None:

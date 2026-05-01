@@ -6,7 +6,10 @@ from urllib.parse import urlparse
 
 from app.services.url_check import URLCheckService, UrlCheckResult
 
-ACCESS_STATUS_VALUES = ("OK", "NOT_FOUND", "FORBIDDEN", "TIMEOUT", "ERROR")
+ACCESS_STATUS_OK = "OK"
+ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
+ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
+ACCESS_STATUS_VALUES = (ACCESS_STATUS_OK, ACCESS_STATUS_NO_ACCEDE, ACCESS_STATUS_REQUIRES_INTERACTION)
 
 DOWNLOADABLE_EXTENSIONS = {
     ".pdf",
@@ -97,7 +100,7 @@ def _internal_access_payload(resource: dict[str, Any], extracted_dir: Path) -> d
     if relative_path is None:
         return _build_access_payload(
             can_access=False,
-            access_status="ERROR",
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=None,
             can_download=False,
             error_message="El recurso no tiene un fichero asociado dentro del paquete.",
@@ -105,7 +108,7 @@ def _internal_access_payload(resource: dict[str, Any], extracted_dir: Path) -> d
     if resolved_path is None:
         return _build_access_payload(
             can_access=False,
-            access_status="ERROR",
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=None,
             can_download=False,
             error_message="La ruta del recurso no es válida dentro del paquete extraído.",
@@ -113,14 +116,14 @@ def _internal_access_payload(resource: dict[str, Any], extracted_dir: Path) -> d
     if not resolved_path.exists() or not resolved_path.is_file():
         return _build_access_payload(
             can_access=False,
-            access_status="NOT_FOUND",
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=None,
             can_download=False,
             error_message="No se ha encontrado el fichero extraído para este recurso.",
         )
     return _build_access_payload(
         can_access=True,
-        access_status="OK",
+        access_status=ACCESS_STATUS_OK,
         http_status=200,
         can_download=True,
         error_message=None,
@@ -131,7 +134,7 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
     if result is None:
         return _build_access_payload(
             can_access=False,
-            access_status="ERROR",
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=None,
             can_download=False,
             error_message="No se ha podido verificar la URL externa.",
@@ -142,7 +145,7 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
     if result.reason == "timeout":
         return _build_access_payload(
             can_access=False,
-            access_status="TIMEOUT",
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
             error_message=result.error_message or "La URL ha excedido el tiempo de espera.",
@@ -154,7 +157,7 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
     if result.reason == "404_not_found":
         return _build_access_payload(
             can_access=False,
-            access_status="NOT_FOUND",
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
             error_message=result.error_message or "La URL devolvió 404.",
@@ -166,7 +169,7 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
     if result.reason in {"forbidden", "canvas_auth_required"} or result.status_code in {401, 403}:
         return _build_access_payload(
             can_access=False,
-            access_status="FORBIDDEN",
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
             error_message=result.error_message or "La URL no permite acceso directo.",
@@ -178,7 +181,7 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
     if result.broken_link or not result.checked:
         return _build_access_payload(
             can_access=False,
-            access_status="ERROR",
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
             error_message=result.error_message or "No se ha podido acceder a la URL.",
@@ -190,7 +193,7 @@ def _external_access_payload(resource: dict[str, Any], result: UrlCheckResult | 
     final_reference = result.final_url or _resource_source_url(resource)
     return _build_access_payload(
         can_access=True,
-        access_status="OK",
+        access_status=ACCESS_STATUS_OK,
         http_status=result.status_code,
         can_download=_looks_downloadable_url(
             final_reference=final_reference,
@@ -242,6 +245,8 @@ def _merge_access_payload(resource: dict[str, Any], access_payload: dict[str, An
     resource["download_status_code"] = resource["downloadStatusCode"]
     resource["errorMessage"] = access_payload["errorMessage"]
     resource["error_message"] = access_payload["errorMessage"]
+    resource["accessNote"] = access_payload["errorMessage"]
+    resource["access_note"] = access_payload["errorMessage"]
 
     if access_payload.get("urlStatus") is not None:
         resource["urlStatus"] = access_payload["urlStatus"]
@@ -264,7 +269,7 @@ def _merge_access_payload(resource: dict[str, Any], access_payload: dict[str, An
         details["accessCheck"]["checkedAt"] = access_payload["checkedAt"]
     resource["details"] = details
 
-    if access_payload["accessStatus"] != "OK":
+    if access_payload["accessStatus"] == ACCESS_STATUS_NO_ACCEDE:
         resource["status"] = "ERROR"
         note = _broken_link_note(access_payload)
         if note:
@@ -312,13 +317,10 @@ def _looks_downloadable_url(
 def _broken_link_note(access_payload: dict[str, Any]) -> str | None:
     access_status = str(access_payload["accessStatus"])
     http_status = access_payload.get("httpStatus")
-    if access_status == "NOT_FOUND":
-        return "broken_link: URL devuelve 404."
-    if access_status == "FORBIDDEN":
-        return f"broken_link: URL devuelve {http_status or 403}."
-    if access_status == "TIMEOUT":
-        return "broken_link: la URL ha excedido el tiempo de espera."
-    if access_status == "ERROR":
+    if access_status == ACCESS_STATUS_NO_ACCEDE:
+        error_message = access_payload.get("errorMessage")
+        if isinstance(error_message, str) and error_message.strip():
+            return f"broken_link: {error_message.strip()}"
         if isinstance(http_status, int):
             return f"broken_link: URL devuelve {http_status}."
         return "broken_link: no se pudo acceder a la URL."

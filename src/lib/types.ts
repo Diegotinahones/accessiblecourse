@@ -2,6 +2,7 @@ export type ResourceType = 'PDF' | 'Web' | 'Video' | 'Notebook' | 'Other';
 export type ResourceOrigin = 'interno' | 'externo';
 export type ResourceState = 'OK' | 'AVISO' | 'ERROR';
 export type JobLifecycleStatus = 'pending' | 'running' | 'processing' | 'done' | 'error';
+export type JobPhase = 'UPLOAD' | 'INVENTORY' | 'ACCESS_SCAN' | 'DONE' | 'ERROR';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
 export type AnalysisMode = 'offline' | 'online';
 export type AppMode = 'online' | 'offline';
@@ -25,6 +26,7 @@ export type ChecklistState = Record<string, ResourceChecklistState>;
 
 export interface JobStatus {
   status: JobLifecycleStatus;
+  phase: JobPhase;
   progress: number;
   message: string;
   currentStep: number;
@@ -92,6 +94,7 @@ export interface ResourceListItem {
   origin: string | null;
   url: string | null;
   sourceUrl: string | null;
+  downloadUrl: string | null;
   path: string | null;
   localPath: string | null;
   filePath: string | null;
@@ -103,13 +106,22 @@ export interface ResourceListItem {
   finalUrl: string | null;
   checkedAt: string | null;
   canAccess: boolean;
-  accessStatus: 'OK' | 'NOT_FOUND' | 'FORBIDDEN' | 'TIMEOUT' | 'ERROR';
+  accessStatus:
+    | 'OK'
+    | 'NO_ACCEDE'
+    | 'REQUIERE_INTERACCION'
+    | 'NOT_FOUND'
+    | 'FORBIDDEN'
+    | 'TIMEOUT'
+    | 'ERROR';
   httpStatus: number | null;
   accessStatusCode: number | null;
   canDownload: boolean;
   downloadStatusCode: number | null;
   discoveredChildrenCount: number;
   parentResourceId: string | null;
+  discovered: boolean;
+  accessNote: string | null;
   errorMessage: string | null;
   notes: string | null;
   reviewState: ReviewState;

@@ -18,7 +18,10 @@ from app.schemas import (
     ChecklistItemRead,
     ChecklistSaveRequest,
     ChecklistSaveResult,
+    AccessModuleRead,
     JobCreatedResponse,
+    JobAccessRead,
+    JobPhase,
     JobReportRead,
     JobStatusResponse,
     ReportGenerateRequest,
@@ -95,8 +98,11 @@ def _resource_read(
     inventory_item=None,
 ) -> ResourceListItemRead:
     source_url = inventory_item.source_url if inventory_item is not None else resource.url
+    download_url = inventory_item.download_url if inventory_item is not None else resource.download_url
     file_path = inventory_item.file_path if inventory_item is not None else resource.path
     module_path = inventory_item.course_path if inventory_item is not None else resource.course_path
+    module_title = inventory_item.module_title if inventory_item is not None else None
+    section_title = inventory_item.section_title if inventory_item is not None else None
     item_path = inventory_item.item_path if inventory_item is not None else None
     parent_resource_id = inventory_item.parent_resource_id if inventory_item is not None else None
     return ResourceListItemRead(
@@ -107,11 +113,14 @@ def _resource_read(
         origin=resource.origin,
         url=source_url,
         sourceUrl=source_url,
+        downloadUrl=download_url,
         path=file_path,
         localPath=file_path,
         filePath=file_path,
         coursePath=module_path,
         modulePath=module_path,
+        moduleTitle=module_title,
+        sectionTitle=section_title,
         itemPath=item_path,
         status=resource.status,
         urlStatus=inventory_item.url_status if inventory_item is not None else None,
@@ -133,6 +142,8 @@ def _resource_read(
             else resource.discovered_children_count
         ),
         parentResourceId=parent_resource_id,
+        discovered=inventory_item.discovered if inventory_item is not None else False,
+        accessNote=inventory_item.access_note if inventory_item is not None else resource.access_note,
         errorMessage=inventory_item.error_message if inventory_item is not None else resource.error_message,
         notes=resource.notes,
         reviewState=resource.review_state,
@@ -144,7 +155,7 @@ def _resource_read(
 def _is_broken_inventory_resource(resource: Resource, inventory_item) -> bool:
     access_status = inventory_item.access_status if inventory_item is not None else resource.access_status
     normalized_access_status = access_status.value if hasattr(access_status, "value") else str(access_status or "")
-    if normalized_access_status.upper() != "OK":
+    if normalized_access_status.upper() in {"NO_ACCEDE", "NOT_FOUND", "FORBIDDEN", "TIMEOUT", "ERROR"}:
         return True
 
     url_status = inventory_item.url_status if inventory_item is not None else None
@@ -177,6 +188,7 @@ def _build_access_summary(session: Session, job_id: str) -> AccessSummaryRead:
             "canDownload": resource.can_download,
             "accessStatusCode": resource.access_status_code,
             "downloadStatusCode": resource.download_status_code,
+            "accessNote": resource.access_note or resource.error_message,
         }
         for resource in resources
     ]
@@ -189,6 +201,65 @@ def _build_access_summary(session: Session, job_id: str) -> AccessSummaryRead:
     summary["downloadableAccessible"] = sum(1 for resource in resources if resource.can_access and resource.can_download)
     summary["discovered"] = sum(resource.discovered_children_count for resource in resources)
     return AccessSummaryRead.model_validate(summary)
+
+
+def _coerce_job_phase(value: str | None) -> JobPhase:
+    if value in {phase.value for phase in JobPhase}:
+        return JobPhase(str(value))
+    return JobPhase.ERROR
+
+
+def _build_access_response(session: Session, settings: Settings, job_id: str) -> JobAccessRead:
+    _ensure_review_inventory(session, settings, job_id)
+    job = get_processing_job_or_404(session, job_id)
+    summary = _build_access_summary(session, job_id)
+    inventory_items = _load_inventory_items_or_empty(settings, job_id)
+    inventory_index = {item.id: item for item in inventory_items}
+    inventory_order = {item.id: index for index, item in enumerate(inventory_items)}
+
+    resources = []
+    for resource in session.exec(select(Resource).where(Resource.job_id == job_id)).all():
+        inventory_item = inventory_index.get(resource.id)
+        resources.append(_resource_read(resource, 0, inventory_item))
+    resources.sort(
+        key=lambda resource: (
+            inventory_order.get(resource.id, len(inventory_order)),
+            (resource.modulePath or resource.coursePath or "").lower(),
+            resource.title.lower(),
+            resource.id,
+        )
+    )
+
+    resources_by_module: dict[str, list[ResourceListItemRead]] = {}
+    for resource in resources:
+        module_path = resource.modulePath or resource.coursePath or "Modulo general"
+        resources_by_module.setdefault(module_path, []).append(resource)
+
+    modules = [
+        AccessModuleRead(
+            modulePath=group.modulePath,
+            total=group.total,
+            accessible=group.accessible,
+            downloadable=group.downloadable,
+            downloadableAccessible=group.downloadableAccessible,
+            ok_count=group.ok_count,
+            no_accede_count=group.no_accede_count,
+            requiere_interaccion_count=group.requiere_interaccion_count,
+            downloadables_total=group.downloadables_total,
+            downloadables_ok=group.downloadables_ok,
+            byStatus=group.byStatus,
+            resources=resources_by_module.get(group.modulePath, []),
+        )
+        for group in summary.groups
+    ]
+    return JobAccessRead(
+        jobId=job_id,
+        status=job.status,
+        phase=_coerce_job_phase(job.phase),
+        progress=job.progress,
+        summary=summary,
+        modules=modules,
+    )
 
 
 def _ensure_review_inventory(session: Session, settings: Settings, job_id: str) -> None:
@@ -445,6 +516,15 @@ def get_access_summary(
 ) -> AccessSummaryRead:
     _ensure_review_inventory(session, settings, job_id)
     return _build_access_summary(session, job_id)
+
+
+@router.get("/{job_id}/access", response_model=JobAccessRead)
+def get_job_access(
+    job_id: str,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> JobAccessRead:
+    return _build_access_response(session, settings, job_id)
 
 
 @router.post("/{job_id}/access-analysis/retry", response_model=JobStatusResponse, status_code=status.HTTP_202_ACCEPTED)

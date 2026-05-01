@@ -84,6 +84,8 @@ def test_discover_html_linked_resources_extracts_and_dedupes_nested_links() -> N
                 "localPath": "course/module/page.html",
                 "coursePath": "Módulo 1",
                 "modulePath": "Módulo 1",
+                "moduleTitle": "Módulo 1",
+                "sectionTitle": "Módulo 1",
                 "itemPath": "Módulo 1 > Página 1",
                 "status": "OK",
                 "details": {},
@@ -97,6 +99,8 @@ def test_discover_html_linked_resources_extracts_and_dedupes_nested_links() -> N
                 "localPath": "course/module/nested/page2.html",
                 "coursePath": "Módulo 1",
                 "modulePath": "Módulo 1",
+                "moduleTitle": "Módulo 1",
+                "sectionTitle": "Módulo 1",
                 "itemPath": "Módulo 1 > Página 2",
                 "status": "OK",
                 "details": {},
@@ -127,5 +131,7 @@ def test_discover_html_linked_resources_extracts_and_dedupes_nested_links() -> N
         assert references["course/images/chart.png"]["title"] == "Gráfico resumen"
         assert references["course/downloads/guide.pdf"]["parentResourceId"] == "html-1"
         assert references["course/downloads/guide.pdf"]["coursePath"] == "Módulo 1"
+        assert references["course/downloads/guide.pdf"]["moduleTitle"] == "Módulo 1"
+        assert references["course/downloads/guide.pdf"]["sectionTitle"] == "Módulo 1"
         assert inventory[0]["discoveredChildrenCount"] == 4
         assert inventory[1]["discoveredChildrenCount"] == 1

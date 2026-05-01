@@ -33,6 +33,14 @@ class JobLifecycleStatus(str, Enum):
     ERROR = "error"
 
 
+class JobPhase(str, Enum):
+    UPLOAD = "UPLOAD"
+    INVENTORY = "INVENTORY"
+    ACCESS_SCAN = "ACCESS_SCAN"
+    DONE = "DONE"
+    ERROR = "ERROR"
+
+
 class ResourceType(str, Enum):
     PDF = "PDF"
     WEB = "Web"
@@ -80,6 +88,7 @@ class JobCreatedResponse(BaseModel):
 class JobStatusResponse(BaseModel):
     jobId: str
     status: JobLifecycleStatus
+    phase: JobPhase = JobPhase.UPLOAD
     progress: int
     message: str
     currentStep: int
@@ -172,24 +181,29 @@ class ResourceListItemRead(StrictModel):
     origin: str | None = None
     url: str | None = None
     sourceUrl: str | None = None
+    downloadUrl: str | None = None
     path: str | None = None
     localPath: str | None = None
     filePath: str | None = None
     coursePath: str | None = None
     modulePath: str | None = None
+    moduleTitle: str | None = None
+    sectionTitle: str | None = None
     itemPath: str | None = None
     status: ReviewResourceHealthStatus
     urlStatus: str | None = None
     finalUrl: str | None = None
     checkedAt: datetime | None = None
     canAccess: bool = False
-    accessStatus: ReviewResourceAccessStatus = ReviewResourceAccessStatus.ERROR
+    accessStatus: ReviewResourceAccessStatus = ReviewResourceAccessStatus.NO_ACCEDE
     httpStatus: int | None = None
     accessStatusCode: int | None = None
     canDownload: bool = False
     downloadStatusCode: int | None = None
     discoveredChildrenCount: int = 0
     parentResourceId: str | None = None
+    discovered: bool = False
+    accessNote: str | None = None
     errorMessage: str | None = None
     notes: str | None = None
     reviewState: ReviewStateEnum
@@ -206,6 +220,8 @@ class AccessSummaryResourceRead(StrictModel):
     canDownload: bool
     accessStatusCode: int | None = None
     downloadStatusCode: int | None = None
+    discovered: bool = False
+    accessNote: str | None = None
     badge: dict[str, str]
 
 
@@ -215,6 +231,11 @@ class AccessSummaryGroupRead(StrictModel):
     accessible: int
     downloadable: int
     downloadableAccessible: int = 0
+    ok_count: int = 0
+    no_accede_count: int = 0
+    requiere_interaccion_count: int = 0
+    downloadables_total: int = 0
+    downloadables_ok: int = 0
     byStatus: dict[str, int]
     resources: list[AccessSummaryResourceRead] = Field(default_factory=list)
 
@@ -227,10 +248,39 @@ class AccessSummaryRead(StrictModel):
     accessible: int
     downloadable: int
     downloadableAccessible: int = 0
+    ok_count: int = 0
+    no_accede_count: int = 0
+    requiere_interaccion_count: int = 0
+    downloadables_total: int = 0
+    downloadables_ok: int = 0
     byStatus: dict[str, int]
     groups: list[AccessSummaryGroupRead] = Field(default_factory=list)
     discovered: int = 0
     deepScan: dict[str, Any] | None = None
+
+
+class AccessModuleRead(StrictModel):
+    modulePath: str
+    total: int
+    accessible: int
+    downloadable: int
+    downloadableAccessible: int = 0
+    ok_count: int = 0
+    no_accede_count: int = 0
+    requiere_interaccion_count: int = 0
+    downloadables_total: int = 0
+    downloadables_ok: int = 0
+    byStatus: dict[str, int]
+    resources: list[ResourceListItemRead] = Field(default_factory=list)
+
+
+class JobAccessRead(StrictModel):
+    jobId: str
+    status: str
+    phase: JobPhase
+    progress: int
+    summary: AccessSummaryRead
+    modules: list[AccessModuleRead] = Field(default_factory=list)
 
 
 class ResourceListPayload(StrictModel):

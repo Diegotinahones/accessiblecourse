@@ -25,22 +25,34 @@ def _apply_sqlite_schema_updates(engine) -> None:
 
     resource_column_updates = {
         "can_access": "ALTER TABLE resources ADD COLUMN can_access BOOLEAN NOT NULL DEFAULT 0",
-        "access_status": "ALTER TABLE resources ADD COLUMN access_status VARCHAR(32) NOT NULL DEFAULT 'ERROR'",
+        "access_status": "ALTER TABLE resources ADD COLUMN access_status VARCHAR(32) NOT NULL DEFAULT 'NO_ACCEDE'",
         "http_status": "ALTER TABLE resources ADD COLUMN http_status INTEGER",
         "access_status_code": "ALTER TABLE resources ADD COLUMN access_status_code INTEGER",
         "can_download": "ALTER TABLE resources ADD COLUMN can_download BOOLEAN NOT NULL DEFAULT 0",
+        "download_url": "ALTER TABLE resources ADD COLUMN download_url VARCHAR(2000)",
         "download_status_code": "ALTER TABLE resources ADD COLUMN download_status_code INTEGER",
         "discovered_children_count": "ALTER TABLE resources ADD COLUMN discovered_children_count INTEGER NOT NULL DEFAULT 0",
+        "access_note": "ALTER TABLE resources ADD COLUMN access_note TEXT",
         "error_message": "ALTER TABLE resources ADD COLUMN error_message TEXT",
     }
     review_summary_column_updates = {
         "accessible_resources": "ALTER TABLE review_summaries ADD COLUMN accessible_resources INTEGER NOT NULL DEFAULT 0",
         "downloadable_resources": "ALTER TABLE review_summaries ADD COLUMN downloadable_resources INTEGER NOT NULL DEFAULT 0",
     }
+    job_column_updates = {
+        "phase": "ALTER TABLE job ADD COLUMN phase VARCHAR(32) NOT NULL DEFAULT 'UPLOAD'",
+        "course_structure": "ALTER TABLE job ADD COLUMN course_structure JSON",
+    }
 
     with engine.begin() as connection:
         table_rows = connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").all()
         existing_tables = {str(row[0]) for row in table_rows}
+        if "job" in existing_tables:
+            existing_columns = _sqlite_existing_columns(connection, "job")
+            for column_name, ddl in job_column_updates.items():
+                if column_name not in existing_columns:
+                    _exec_sqlite_ddl_if_missing(connection, ddl)
+
         if "resources" in existing_tables:
             existing_columns = _sqlite_existing_columns(connection, "resources")
             for column_name, ddl in resource_column_updates.items():

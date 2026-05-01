@@ -41,18 +41,27 @@ class InventoryResourceSeed(BaseModel):
         default=None,
         validation_alias=AliasChoices("course_path", "coursePath", "module_path", "modulePath"),
     )
+    module_title: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("module_title", "moduleTitle"),
+    )
+    section_title: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("section_title", "sectionTitle"),
+    )
     status: ResourceHealthStatus = ResourceHealthStatus.OK
     notes: str | list[str] | None = None
     item_path: str | None = Field(default=None, validation_alias=AliasChoices("item_path", "itemPath"))
     url_status: str | None = Field(default=None, validation_alias=AliasChoices("url_status", "urlStatus"))
     final_url: str | None = Field(default=None, validation_alias=AliasChoices("final_url", "finalUrl"))
+    download_url: str | None = Field(default=None, validation_alias=AliasChoices("download_url", "downloadUrl"))
     checked_at: datetime | None = Field(default=None, validation_alias=AliasChoices("checked_at", "checkedAt"))
     can_access: bool = Field(
         default=False,
         validation_alias=AliasChoices("can_access", "canAccess", "accessible"),
     )
     access_status: ResourceAccessStatus = Field(
-        default=ResourceAccessStatus.ERROR,
+        default=ResourceAccessStatus.NO_ACCEDE,
         validation_alias=AliasChoices("access_status", "accessStatus"),
     )
     http_status: int | None = Field(default=None, validation_alias=AliasChoices("http_status", "httpStatus"))
@@ -76,10 +85,12 @@ class InventoryResourceSeed(BaseModel):
         default=None,
         validation_alias=AliasChoices("parent_resource_id", "parentResourceId"),
     )
+    discovered: bool = False
     error_message: str | None = Field(
         default=None,
         validation_alias=AliasChoices("error_message", "errorMessage"),
     )
+    access_note: str | None = Field(default=None, validation_alias=AliasChoices("access_note", "accessNote"))
     details: dict[str, Any] | None = None
 
     @field_validator("notes")
@@ -146,6 +157,7 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
                 type=item.type,
                 origin=item.origin,
                 url=item.source_url,
+                download_url=item.download_url,
                 path=item.file_path,
                 course_path=item.course_path,
                 status=item.status,
@@ -156,6 +168,7 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
                 can_download=item.can_download,
                 download_status_code=item.download_status_code,
                 discovered_children_count=item.discovered_children_count,
+                access_note=item.access_note,
                 error_message=item.error_message,
                 notes=item.notes,
                 review_state=ReviewState.IN_REVIEW,
@@ -197,6 +210,7 @@ def sync_job_inventory_from_payload(session: Session, job_id: str, resources: li
         resource.type = item.type
         resource.origin = item.origin
         resource.url = item.source_url
+        resource.download_url = item.download_url
         resource.path = item.file_path
         resource.course_path = item.course_path
         resource.status = item.status
@@ -207,6 +221,7 @@ def sync_job_inventory_from_payload(session: Session, job_id: str, resources: li
         resource.can_download = item.can_download
         resource.download_status_code = item.download_status_code
         resource.discovered_children_count = item.discovered_children_count
+        resource.access_note = item.access_note
         resource.error_message = item.error_message
         resource.notes = item.notes
         resource.updated_at = _utc_now()

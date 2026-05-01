@@ -33,6 +33,9 @@ class ResourceHealthStatus(str, Enum):
 
 class ResourceAccessStatus(str, Enum):
     OK = "OK"
+    NO_ACCEDE = "NO_ACCEDE"
+    REQUIERE_INTERACCION = "REQUIERE_INTERACCION"
+    # Legacy values are kept so older persisted jobs remain readable.
     NOT_FOUND = "NOT_FOUND"
     FORBIDDEN = "FORBIDDEN"
     TIMEOUT = "TIMEOUT"
@@ -75,6 +78,7 @@ class Resource(SQLModel, table=True):
     type: ResourceType = Field(sa_column=Column(SAEnum(ResourceType), nullable=False))
     origin: str | None = Field(default=None, max_length=255)
     url: str | None = Field(default=None, max_length=2000)
+    download_url: str | None = Field(default=None, max_length=2000)
     path: str | None = Field(default=None, max_length=2000)
     course_path: str | None = Field(default=None, max_length=2000)
     status: ResourceHealthStatus = Field(
@@ -83,7 +87,7 @@ class Resource(SQLModel, table=True):
     )
     can_access: bool = Field(default=False, nullable=False)
     access_status: ResourceAccessStatus = Field(
-        default=ResourceAccessStatus.ERROR,
+        default=ResourceAccessStatus.NO_ACCEDE,
         sa_column=Column(SAEnum(ResourceAccessStatus), nullable=False),
     )
     http_status: int | None = Field(default=None, nullable=True)
@@ -91,6 +95,7 @@ class Resource(SQLModel, table=True):
     can_download: bool = Field(default=False, nullable=False)
     download_status_code: int | None = Field(default=None, nullable=True)
     discovered_children_count: int = Field(default=0, nullable=False)
+    access_note: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     error_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     notes: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     review_state: ReviewState = Field(

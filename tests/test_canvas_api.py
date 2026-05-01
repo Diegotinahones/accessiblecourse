@@ -137,7 +137,7 @@ def test_canvas_job_uses_server_side_token(client, monkeypatch) -> None:
 
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
-    assert len(resources_response.json()["resources"]) == 5
+    assert len(resources_response.json()["resources"]) == 6
 
 
 def test_canvas_access_summary_groups_resources_by_module(client, monkeypatch) -> None:
@@ -158,12 +158,14 @@ def test_canvas_access_summary_groups_resources_by_module(client, monkeypatch) -
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["courseId"] == "77"
-    assert payload["total"] == 5
+    assert payload["total"] == 6
     assert payload["accessible"] == 4
+    assert payload["requiere_interaccion_count"] == 1
     assert payload["downloadable"] == 2
     assert payload["downloadableAccessible"] == 2
     assert payload["byStatus"]["OK"] == 4
-    assert payload["byStatus"]["NOT_FOUND"] == 1
+    assert payload["byStatus"]["NO_ACCEDE"] == 1
+    assert payload["byStatus"]["REQUIERE_INTERACCION"] == 1
     assert payload["deepScan"]["scannedPages"] == 2
     assert len(payload["modules"]) == 2
     assert payload["modules"][0]["moduleName"] == "Modulo 1 > Recursos principales"

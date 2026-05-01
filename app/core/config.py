@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     online_deep_scan_enabled: bool = True
     online_deep_scan_max_depth: int = 2
     online_deep_scan_max_pages: int = 50
+    canvas_crawl_depth: int = 2
+    canvas_max_discovered: int = 500
     url_check_timeout_seconds: float = 8.0
     url_check_max_urls: int = 250
 

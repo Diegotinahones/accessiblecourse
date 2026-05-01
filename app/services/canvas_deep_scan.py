@@ -4,11 +4,12 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from uuid import NAMESPACE_URL, uuid5
+
+from bs4 import BeautifulSoup
 
 from app.core.errors import AppError
 from app.models.entities import ResourceHealthStatus, ResourceType
@@ -22,10 +23,9 @@ EXCLUDED_EXTENSIONS = {".imscc", ".imsmanifest", ".xml", ".xsd", ".qti", ".dtd"}
 HTML_LINK_TAGS = ("a", "iframe", "source")
 HTML_LINK_ATTRIBUTES = ("href", "src", "data-api-endpoint", "data-url", "data-download-url")
 ACCESS_STATUS_OK = "OK"
-ACCESS_STATUS_NOT_FOUND = "NOT_FOUND"
-ACCESS_STATUS_FORBIDDEN = "FORBIDDEN"
-ACCESS_STATUS_TIMEOUT = "TIMEOUT"
-ACCESS_STATUS_ERROR = "ERROR"
+ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
+ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
+ACCESS_STATUS_ERROR = ACCESS_STATUS_NO_ACCEDE
 DEEP_SCAN_NAMESPACE = uuid5(NAMESPACE_URL, "accessiblecourse.canvas.deep-scan.resource")
 FILE_ID_PATTERN = re.compile(r"/files/([^/?#]+)(?:/download)?(?:[/?#]|$)")
 PAGE_URL_PATTERN = re.compile(r"/courses/([^/]+)/pages/([^/?#]+)")
@@ -51,54 +51,6 @@ class CanvasDeepScanResult:
     rate_limited: int
 
 
-@dataclass(slots=True)
-class _HTMLLinkCandidate:
-    tag: str
-    attrs: dict[str, str]
-    text_parts: list[str]
-
-    @property
-    def text(self) -> str:
-        return re.sub(r"\s+", " ", " ".join(part.strip() for part in self.text_parts if part.strip())).strip()
-
-
-class _CanvasLinkParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.candidates: list[_HTMLLinkCandidate] = []
-        self._open_candidates: list[_HTMLLinkCandidate] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self._start_candidate(tag, attrs, push=True)
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self._start_candidate(tag, attrs, push=False)
-
-    def handle_data(self, data: str) -> None:
-        for candidate in self._open_candidates:
-            candidate.text_parts.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        normalized_tag = tag.lower()
-        for index in range(len(self._open_candidates) - 1, -1, -1):
-            if self._open_candidates[index].tag == normalized_tag:
-                del self._open_candidates[index:]
-                return
-
-    def _start_candidate(self, tag: str, attrs: list[tuple[str, str | None]], *, push: bool) -> None:
-        normalized_tag = tag.lower()
-        if normalized_tag not in HTML_LINK_TAGS:
-            return
-        candidate = _HTMLLinkCandidate(
-            tag=normalized_tag,
-            attrs={name.lower(): value or "" for name, value in attrs if name},
-            text_parts=[],
-        )
-        self.candidates.append(candidate)
-        if push:
-            self._open_candidates.append(candidate)
-
-
 def extract_canvas_links(
     html: str,
     *,
@@ -106,16 +58,14 @@ def extract_canvas_links(
     course_id: str,
     allowed_host: str,
 ) -> list[DiscoveredCanvasLink]:
-    parser = _CanvasLinkParser()
-    parser.feed(html or "")
-    parser.close()
+    soup = BeautifulSoup(html or "", "html.parser")
 
     discovered: dict[str, DiscoveredCanvasLink] = {}
     seen_file_ids: set[str] = set()
 
-    for candidate in parser.candidates:
+    for candidate in soup.find_all(HTML_LINK_TAGS):
         for attribute in HTML_LINK_ATTRIBUTES:
-            raw_url = candidate.attrs.get(attribute)
+            raw_url = _html_attr(candidate, attribute)
             if not isinstance(raw_url, str) or not raw_url.strip():
                 continue
 
@@ -214,7 +164,6 @@ def deep_scan_canvas_resources(
         )
 
         for link in links:
-            dedupe_key = f"file:{link.file_id}" if link.file_id else f"url:{link.normalized_url}"
             if link.file_id and link.file_id in seen_file_ids:
                 continue
             if link.normalized_url in seen_urls:
@@ -334,11 +283,31 @@ def _infer_resource_type(url: str, *, is_downloadable_candidate: bool) -> Resour
     return ResourceType.OTHER
 
 
-def _extract_link_title(candidate: _HTMLLinkCandidate, url: str) -> str:
-    if candidate.text:
-        return candidate.text
+def _html_attr(candidate: Any, attribute: str) -> str | None:
+    get_attr = getattr(candidate, "get", None)
+    attrs = getattr(candidate, "attrs", None)
+    if callable(get_attr):
+        value = get_attr(attribute)
+    elif isinstance(attrs, dict):
+        value = attrs.get(attribute)
+    else:
+        return None
+
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value if str(item).strip()).strip() or None
+    return str(value).strip() if value is not None and str(value).strip() else None
+
+
+def _extract_link_title(candidate: Any, url: str) -> str:
+    text = getattr(candidate, "text", "")
+    if not isinstance(text, str):
+        get_text = getattr(candidate, "get_text", None)
+        text = get_text(" ", strip=True) if callable(get_text) else ""
+    text = re.sub(r"\s+", " ", text).strip()
+    if text:
+        return text
     for attribute in ("aria-label", "title", "download"):
-        value = candidate.attrs.get(attribute)
+        value = _html_attr(candidate, attribute)
         if isinstance(value, str) and value.strip():
             return value.strip()
     filename = Path(urlparse(url).path).name
@@ -446,6 +415,8 @@ def _build_discovered_resource(
         "source": "Canvas",
         "url": link.url,
         "sourceUrl": link.url,
+        "downloadUrl": None,
+        "download_url": None,
         "path": None,
         "localPath": None,
         "filePath": None,
@@ -473,6 +444,8 @@ def _build_discovered_resource(
         "can_download": False,
         "downloadStatusCode": None,
         "download_status_code": None,
+        "accessNote": None,
+        "access_note": None,
         "errorMessage": None,
         "error_message": None,
         "notes": None,
@@ -503,10 +476,10 @@ def _verify_discovered_resource(
     if not link.is_internal:
         _set_resource_state(
             resource,
-            can_access=False,
-            access_status=ACCESS_STATUS_ERROR,
+            can_access=True,
+            access_status=ACCESS_STATUS_OK,
             can_download=False,
-            error_message="Enlace externo detectado en deep scan; no se verifica ni descarga.",
+            error_message="Enlace externo detectado en deep scan; se conserva sin seguirlo ni descargarlo.",
         )
         resource["status"] = ResourceHealthStatus.WARN.value
         _append_note(resource, "external_link: enlace externo no verificado.")
@@ -548,6 +521,7 @@ def _verify_discovered_resource(
 def _merge_canvas_file_metadata(resource: dict[str, Any], canvas_file: CanvasFile) -> None:
     resource["fileId"] = canvas_file.id
     resource["downloadUrl"] = canvas_file.url
+    resource["download_url"] = canvas_file.url
     resource["title"] = canvas_file.display_name or canvas_file.filename or resource["title"]
     resource["type"] = _infer_resource_type(canvas_file.filename or canvas_file.url or "", is_downloadable_candidate=True).value
     details = dict(resource.get("details") or {})
@@ -637,9 +611,13 @@ def _set_resource_state(
     resource["download_status_code"] = download_status_code
     resource["errorMessage"] = error_message
     resource["error_message"] = error_message
+    resource["accessNote"] = error_message
+    resource["access_note"] = error_message
     resource["status"] = (
         ResourceHealthStatus.OK.value
         if access_status == ACCESS_STATUS_OK
+        else ResourceHealthStatus.WARN.value
+        if access_status == ACCESS_STATUS_REQUIRES_INTERACTION
         else ResourceHealthStatus.ERROR.value
     )
 
@@ -661,13 +639,7 @@ def _url_result_payload(result: UrlCheckResult, *, url: str) -> dict[str, Any]:
 
 
 def _result_access_status(result: UrlCheckResult) -> str:
-    if result.reason == "timeout":
-        return ACCESS_STATUS_TIMEOUT
-    if result.reason == "404_not_found" or result.status_code == 404:
-        return ACCESS_STATUS_NOT_FOUND
-    if result.reason in {"forbidden", "canvas_auth_required"} or result.status_code in {401, 403}:
-        return ACCESS_STATUS_FORBIDDEN
-    return ACCESS_STATUS_ERROR
+    return ACCESS_STATUS_NO_ACCEDE
 
 
 def _result_error_message(result: UrlCheckResult) -> str:
@@ -681,13 +653,7 @@ def _result_error_message(result: UrlCheckResult) -> str:
 
 
 def _app_error_status(exc: AppError) -> str:
-    if exc.status_code == 404:
-        return ACCESS_STATUS_NOT_FOUND
-    if exc.status_code in {401, 403}:
-        return ACCESS_STATUS_FORBIDDEN
-    if exc.code == "canvas_timeout" or exc.status_code == 504:
-        return ACCESS_STATUS_TIMEOUT
-    return ACCESS_STATUS_ERROR
+    return ACCESS_STATUS_NO_ACCEDE
 
 
 def _attach_deep_scan_error(resource: dict[str, Any], exc: AppError) -> None:

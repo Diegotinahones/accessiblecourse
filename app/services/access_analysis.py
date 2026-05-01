@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
 from app.core.config import Settings
@@ -13,15 +14,17 @@ from app.core.errors import AppError
 from app.models.entities import ResourceHealthStatus
 from app.services.access_check import build_access_status_counts
 from app.services.canvas_client import CanvasClient, CanvasCredentials
+from app.services.canvas_deep_scan import extract_canvas_links
 from app.services.imscc_parser import IMSCCParser
 from app.services.storage import get_extracted_dir, resolve_job_resource_path
 from app.services.url_check import URLCheckService, UrlCheckResult
 
+logger = logging.getLogger("accessiblecourse.access")
+
 ACCESS_STATUS_OK = "OK"
-ACCESS_STATUS_NOT_FOUND = "NOT_FOUND"
-ACCESS_STATUS_FORBIDDEN = "FORBIDDEN"
-ACCESS_STATUS_TIMEOUT = "TIMEOUT"
-ACCESS_STATUS_ERROR = "ERROR"
+ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
+ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
+ACCESS_STATUS_ERROR = ACCESS_STATUS_NO_ACCEDE
 DISCOVERED_BY_DEEP_SCAN = "access_deep_scan"
 
 DOWNLOADABLE_EXTENSIONS = {
@@ -105,6 +108,7 @@ def analyze_access(
 ) -> AccessAnalysisResult:
     max_depth = max(0, int(getattr(adapter, "max_depth", 1)))
     max_pages = max(0, int(getattr(adapter, "max_pages", 50)))
+    max_discovered = max(0, int(getattr(adapter, "max_discovered", 500)))
     base_resources = [
         dict(resource)
         for resource in resources
@@ -140,6 +144,9 @@ def analyze_access(
 
         scanned_pages += 1
         for child in adapter.resolve_children(html, parent_resource):
+            if discovered_count >= max_discovered:
+                skipped_pages += 1
+                break
             _normalize_child_resource(job_id, child, parent_resource, depth=depth + 1)
             key = _dedupe_key(child)
             if key in seen_keys:
@@ -162,6 +169,7 @@ def analyze_access(
     summary["deepScan"] = {
         "maxDepth": max_depth,
         "maxPages": max_pages,
+        "maxDiscovered": max_discovered,
         "scannedPages": scanned_pages,
         "skippedPages": skipped_pages,
     }
@@ -192,6 +200,11 @@ def build_access_summary(
                 "accessible": 0,
                 "downloadable": 0,
                 "downloadableAccessible": 0,
+                "ok_count": 0,
+                "no_accede_count": 0,
+                "requiere_interaccion_count": 0,
+                "downloadables_total": 0,
+                "downloadables_ok": 0,
                 "byStatus": build_access_status_counts(),
                 "resources": [],
             },
@@ -200,6 +213,11 @@ def build_access_summary(
         group["accessible"] += int(bool(resource.get("canAccess")))
         group["downloadable"] += int(bool(resource.get("canDownload")))
         group["downloadableAccessible"] += int(bool(resource.get("canAccess")) and bool(resource.get("canDownload")))
+        group["ok_count"] += int(access_status == ACCESS_STATUS_OK)
+        group["no_accede_count"] += int(access_status == ACCESS_STATUS_NO_ACCEDE)
+        group["requiere_interaccion_count"] += int(access_status == ACCESS_STATUS_REQUIRES_INTERACTION)
+        group["downloadables_total"] += int(bool(resource.get("canDownload")))
+        group["downloadables_ok"] += int(bool(resource.get("canAccess")) and bool(resource.get("canDownload")))
         group["byStatus"].setdefault(access_status, 0)
         group["byStatus"][access_status] += 1
         group["resources"].append(
@@ -212,21 +230,35 @@ def build_access_summary(
                 "canDownload": bool(resource.get("canDownload")),
                 "accessStatusCode": resource.get("accessStatusCode"),
                 "downloadStatusCode": resource.get("downloadStatusCode"),
+                "discovered": _is_discovered_resource(resource),
+                "accessNote": resource.get("accessNote") or resource.get("errorMessage"),
                 "badge": _badge_for(access_status),
             }
         )
 
-    groups = sorted(groups_by_module.values(), key=lambda group: str(group["modulePath"]).lower())
+    groups = list(groups_by_module.values())
+    ok_count = sum(1 for resource in resources if resource.get("accessStatus") == ACCESS_STATUS_OK)
+    no_accede_count = sum(1 for resource in resources if resource.get("accessStatus") == ACCESS_STATUS_NO_ACCEDE)
+    requiere_interaccion_count = sum(
+        1 for resource in resources if resource.get("accessStatus") == ACCESS_STATUS_REQUIRES_INTERACTION
+    )
+    downloadables_total = sum(1 for resource in resources if bool(resource.get("canDownload")))
+    downloadables_ok = sum(
+        1 for resource in resources if bool(resource.get("canAccess")) and bool(resource.get("canDownload"))
+    )
     return {
         "jobId": job_id,
         "status": status,
         "progress": progress,
         "total": len(resources),
         "accessible": sum(1 for resource in resources if bool(resource.get("canAccess"))),
-        "downloadable": sum(1 for resource in resources if bool(resource.get("canDownload"))),
-        "downloadableAccessible": sum(
-            1 for resource in resources if bool(resource.get("canAccess")) and bool(resource.get("canDownload"))
-        ),
+        "downloadable": downloadables_total,
+        "downloadableAccessible": downloadables_ok,
+        "ok_count": ok_count,
+        "no_accede_count": no_accede_count,
+        "requiere_interaccion_count": requiere_interaccion_count,
+        "downloadables_total": downloadables_total,
+        "downloadables_ok": downloadables_ok,
         "byStatus": by_status,
         "groups": groups,
     }
@@ -268,7 +300,7 @@ class OfflineAccessAdapter:
         if not resolved_path.exists() or not resolved_path.is_file():
             return AccessProbeResult(
                 can_access=False,
-                access_status=ACCESS_STATUS_NOT_FOUND,
+                access_status=ACCESS_STATUS_NO_ACCEDE,
                 error_message="No se ha encontrado el fichero extraido para este recurso.",
             )
 
@@ -417,6 +449,7 @@ class OnlineAccessAdapter:
         url_checker: URLCheckService,
         max_depth: int = 2,
         max_pages: int = 50,
+        max_discovered: int = 500,
     ) -> None:
         self.client = client
         self.credentials = credentials
@@ -424,6 +457,7 @@ class OnlineAccessAdapter:
         self.url_checker = url_checker
         self.max_depth = max_depth
         self.max_pages = max_pages
+        self.max_discovered = max_discovered
         self.allowed_host = urlparse(credentials.base_url).netloc.lower()
         self._url_cache: dict[str, UrlCheckResult] = {}
         self._download_cache: dict[str, UrlCheckResult] = {}
@@ -434,17 +468,18 @@ class OnlineAccessAdapter:
         source_url = _resource_source_url(resource)
         if _is_deep_scan_child(resource) and source_url and not self.credentials.is_canvas_url(source_url):
             return AccessProbeResult(
-                can_access=False,
-                access_status=ACCESS_STATUS_ERROR,
-                error_message="Enlace externo detectado en deep scan; no se verifica ni descarga.",
+                can_access=True,
+                access_status=ACCESS_STATUS_OK,
+                error_message="Enlace externo detectado en deep scan; se conserva sin seguirlo ni descargarlo.",
                 details={"external": True, "checked": False},
             )
 
-        if canvas_type == "ExternalTool":
+        if canvas_type in {"Assignment", "Quiz", "Discussion", "ExternalTool"}:
             return AccessProbeResult(
                 can_access=False,
-                access_status=ACCESS_STATUS_FORBIDDEN,
-                error_message="Herramienta externa/LTI: puede requerir una sesion interactiva o permisos adicionales.",
+                access_status=ACCESS_STATUS_REQUIRES_INTERACTION,
+                error_message="Este recurso existe en Canvas, pero requiere una interacción o sesión de navegador.",
+                details={"requiresInteraction": True, "canvasType": canvas_type},
             )
 
         if canvas_type == "Page" and resource.get("pageId"):
@@ -535,30 +570,30 @@ class OnlineAccessAdapter:
     def resolve_children(self, html: str, base_resource: dict[str, Any]) -> list[dict[str, Any]]:
         base_url = str(base_resource.get("finalUrl") or base_resource.get("sourceUrl") or base_resource.get("url") or self.credentials.base_url)
         children: list[dict[str, Any]] = []
-        for reference in extract_html_references(html):
-            if _is_ignored_reference(reference):
-                continue
-            resolved_url = urljoin(base_url, reference)
-            if not resolved_url.startswith(("http://", "https://")):
-                continue
-            if Path(urlparse(resolved_url).path).suffix.lower() in IGNORED_DISCOVERY_EXTENSIONS:
-                continue
-            is_internal = self.credentials.is_canvas_url(resolved_url)
-            page_id = _extract_canvas_page_id(resolved_url, course_id=self.course_id) if is_internal else None
-            file_id = _extract_canvas_file_id(resolved_url) if is_internal else None
+        links = extract_canvas_links(
+            html,
+            base_url=base_url,
+            course_id=self.course_id,
+            allowed_host=self.allowed_host,
+        )
+        for link in links:
+            resolved_url = link.url
+            is_internal = link.is_internal
             child = _build_discovered_resource(
                 reference=resolved_url,
                 base_resource=base_resource,
                 source_url=resolved_url,
                 origin="interno" if is_internal else "externo",
-                file_id=file_id,
-                page_id=page_id,
-                normalized_url=normalize_url(resolved_url),
-                download_candidate=_looks_downloadable_reference(resolved_url),
+                title=link.title,
+                resource_type=link.resource_type.value,
+                file_id=link.file_id,
+                page_id=link.page_url,
+                normalized_url=link.normalized_url,
+                download_candidate=link.is_downloadable_candidate,
             )
-            if file_id:
+            if link.file_id:
                 try:
-                    canvas_file = self.client.get_file(self.course_id, file_id)
+                    canvas_file = self.client.get_file(self.course_id, link.file_id)
                     _merge_discovered_file(child, canvas_file)
                 except AppError as exc:
                     details = dict(child.get("details") or {})
@@ -671,8 +706,13 @@ def _merge_analysis(
     resource["can_download"] = download.can_download
     resource["downloadStatusCode"] = download.http_status
     resource["download_status_code"] = download.http_status
+    if _download_url(resource):
+        resource["downloadUrl"] = _download_url(resource)
+        resource["download_url"] = resource["downloadUrl"]
     resource["errorMessage"] = error_message
     resource["error_message"] = error_message
+    resource["accessNote"] = error_message
+    resource["access_note"] = error_message
     if access.url_status is not None:
         resource["urlStatus"] = access.url_status
     if access.final_url is not None:
@@ -694,29 +734,27 @@ def _merge_analysis(
         details["accessCheck"].update(access.details)
     if download.details:
         details["downloadCheck"] = download.details
-    if access.access_status != ACCESS_STATUS_OK:
+    if access.access_status == ACCESS_STATUS_NO_ACCEDE:
         details["broken_link"] = {
             "url": resource.get("sourceUrl") or resource.get("url"),
             "reason": access.access_status,
             "statusCode": http_status,
         }
         _append_note(resource, _broken_link_note(access.access_status, http_status))
+    elif access.access_status == ACCESS_STATUS_REQUIRES_INTERACTION:
+        _append_note(resource, "requires_interaction: recurso Canvas que requiere sesión o acción del usuario.")
     resource["details"] = details
+    _log_access_result(resource)
 
 
 def _access_from_url_result(result: UrlCheckResult, *, allow_canvas_forbidden: bool) -> AccessProbeResult:
-    if result.reason == "timeout":
-        access_status = ACCESS_STATUS_TIMEOUT
-    elif result.reason == "404_not_found":
-        access_status = ACCESS_STATUS_NOT_FOUND
-    elif result.reason == "forbidden" or result.status_code in {401, 403}:
-        access_status = ACCESS_STATUS_FORBIDDEN
-    elif result.reason == "canvas_auth_required":
-        access_status = ACCESS_STATUS_FORBIDDEN if allow_canvas_forbidden else ACCESS_STATUS_ERROR
+    access_status = ACCESS_STATUS_OK
+    if result.reason in {"timeout", "404_not_found", "forbidden", "canvas_auth_required"}:
+        access_status = ACCESS_STATUS_NO_ACCEDE
+    elif result.status_code in {401, 403, 404}:
+        access_status = ACCESS_STATUS_NO_ACCEDE
     elif result.broken_link or not result.checked:
-        access_status = ACCESS_STATUS_ERROR
-    else:
-        access_status = ACCESS_STATUS_OK
+        access_status = ACCESS_STATUS_NO_ACCEDE
 
     return AccessProbeResult(
         can_access=access_status == ACCESS_STATUS_OK,
@@ -731,17 +769,9 @@ def _access_from_url_result(result: UrlCheckResult, *, allow_canvas_forbidden: b
 
 
 def _access_from_app_error(exc: AppError) -> AccessProbeResult:
-    if exc.status_code in {401, 403}:
-        access_status = ACCESS_STATUS_FORBIDDEN
-    elif exc.status_code == 404:
-        access_status = ACCESS_STATUS_NOT_FOUND
-    elif exc.status_code == 504 or exc.code.endswith("timeout"):
-        access_status = ACCESS_STATUS_TIMEOUT
-    else:
-        access_status = ACCESS_STATUS_ERROR
     return AccessProbeResult(
         can_access=False,
-        access_status=access_status,
+        access_status=ACCESS_STATUS_NO_ACCEDE,
         http_status=exc.status_code if exc.status_code >= 400 else None,
         error_message=exc.message,
         details={"code": exc.code},
@@ -751,11 +781,11 @@ def _access_from_app_error(exc: AppError) -> AccessProbeResult:
 def _url_result_message(result: UrlCheckResult, access_status: str) -> str | None:
     if access_status == ACCESS_STATUS_OK:
         return None
-    if access_status == ACCESS_STATUS_NOT_FOUND:
+    if result.reason == "404_not_found" or result.status_code == 404:
         return "La URL devolvió 404."
-    if access_status == ACCESS_STATUS_FORBIDDEN:
+    if result.reason in {"forbidden", "canvas_auth_required"} or result.status_code in {401, 403}:
         return f"La URL devolvió {result.status_code or 403}."
-    if access_status == ACCESS_STATUS_TIMEOUT:
+    if result.reason == "timeout":
         return "La URL ha excedido el tiempo de espera."
     if result.status_code is not None:
         return f"La URL devolvió {result.status_code}."
@@ -787,6 +817,8 @@ def _build_discovered_resource(
         "origin": origin or ("externo" if source_url else "interno"),
         "url": source_url,
         "sourceUrl": source_url,
+        "downloadUrl": None,
+        "download_url": None,
         "path": file_path,
         "filePath": file_path,
         "localPath": file_path,
@@ -800,9 +832,14 @@ def _build_discovered_resource(
         "itemPath": f"{module_path} > {resolved_title}",
         "parentResourceId": parent_id,
         "parent_resource_id": parent_id,
+        "discovered": True,
         "discoveredChildrenCount": 0,
         "discovered_children_count": 0,
         "status": ResourceHealthStatus.WARN.value,
+        "accessNote": None,
+        "access_note": None,
+        "errorMessage": None,
+        "error_message": None,
         "notes": None,
         "details": {
             "discoveredBy": DISCOVERED_BY_DEEP_SCAN,
@@ -844,6 +881,7 @@ def _normalize_resource_defaults(resource: dict[str, Any]) -> None:
     resource.setdefault("discoveredChildrenCount", 0)
     resource.setdefault("discovered_children_count", resource.get("discoveredChildrenCount", 0))
     resource.setdefault("details", {})
+    resource.setdefault("discovered", _is_discovered_resource(resource))
     module_path = _module_path(resource)
     resource.setdefault("coursePath", module_path)
     resource.setdefault("modulePath", module_path)
@@ -854,6 +892,7 @@ def _normalize_resource_defaults(resource: dict[str, Any]) -> None:
 def _merge_discovered_file(resource: dict[str, Any], canvas_file) -> None:
     resource["fileId"] = canvas_file.id
     resource["downloadUrl"] = canvas_file.url
+    resource["download_url"] = canvas_file.url
     resource["title"] = canvas_file.display_name or canvas_file.filename or resource.get("title")
     resource["type"] = _infer_resource_type(canvas_file.filename or canvas_file.url or "")
     details = dict(resource.get("details") or {})
@@ -1022,17 +1061,13 @@ def _module_path(resource: dict[str, Any]) -> str:
 def _badge_for(access_status: str) -> dict[str, str]:
     labels = {
         ACCESS_STATUS_OK: "OK",
-        ACCESS_STATUS_NOT_FOUND: "No encontrado",
-        ACCESS_STATUS_FORBIDDEN: "Restringido",
-        ACCESS_STATUS_TIMEOUT: "Timeout",
-        ACCESS_STATUS_ERROR: "Error",
+        ACCESS_STATUS_NO_ACCEDE: "NO ACCEDE",
+        ACCESS_STATUS_REQUIRES_INTERACTION: "REQUIERE INTERACCION",
     }
     tones = {
         ACCESS_STATUS_OK: "success",
-        ACCESS_STATUS_NOT_FOUND: "danger",
-        ACCESS_STATUS_FORBIDDEN: "warning",
-        ACCESS_STATUS_TIMEOUT: "warning",
-        ACCESS_STATUS_ERROR: "danger",
+        ACCESS_STATUS_NO_ACCEDE: "danger",
+        ACCESS_STATUS_REQUIRES_INTERACTION: "warning",
     }
     return {"label": labels.get(access_status, "Error"), "tone": tones.get(access_status, "danger")}
 
@@ -1040,21 +1075,35 @@ def _badge_for(access_status: str) -> dict[str, str]:
 def _health_status_for(access_status: str) -> str:
     if access_status == ACCESS_STATUS_OK:
         return ResourceHealthStatus.OK.value
-    if access_status == ACCESS_STATUS_FORBIDDEN:
+    if access_status == ACCESS_STATUS_REQUIRES_INTERACTION:
         return ResourceHealthStatus.WARN.value
     return ResourceHealthStatus.ERROR.value
 
 
 def _broken_link_note(access_status: str, http_status: int | None) -> str:
-    if access_status == ACCESS_STATUS_NOT_FOUND:
-        return "broken_link: URL devuelve 404."
-    if access_status == ACCESS_STATUS_FORBIDDEN:
-        return f"broken_link: URL devuelve {http_status or 403}."
-    if access_status == ACCESS_STATUS_TIMEOUT:
-        return "broken_link: la URL ha excedido el tiempo de espera."
     if http_status is not None:
         return f"broken_link: URL devuelve {http_status}."
     return "broken_link: no se pudo acceder al recurso."
+
+
+def _log_access_result(resource: dict[str, Any]) -> None:
+    logger.info(
+        "Resource access analyzed",
+        extra={
+            "event": "resource_access_analyzed",
+            "details": {
+                "resourceId": resource.get("id"),
+                "type": resource.get("type"),
+                "canvasType": (resource.get("details") or {}).get("canvasType")
+                if isinstance(resource.get("details"), dict)
+                else None,
+                "accessStatus": resource.get("accessStatus"),
+                "httpStatus": resource.get("httpStatus"),
+                "downloadStatusCode": resource.get("downloadStatusCode"),
+                "canDownload": resource.get("canDownload"),
+            },
+        },
+    )
 
 
 def _append_note(resource: dict[str, Any], note: str) -> None:

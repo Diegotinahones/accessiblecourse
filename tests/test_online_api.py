@@ -82,6 +82,17 @@ class StubCanvasClient:
                     page_url=None,
                     url=None,
                 ),
+                CanvasModuleItem(
+                    id="assignment-1",
+                    title="Entrega final",
+                    type="Assignment",
+                    position=4,
+                    content_id="a-1",
+                    html_url="https://canvas.example.edu/courses/77/assignments/1",
+                    external_url=None,
+                    page_url=None,
+                    url="https://canvas.example.edu/api/v1/courses/77/assignments/1",
+                ),
             ]
         return [
             CanvasModuleItem(
@@ -287,12 +298,21 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     assert status_response.status_code == 200, status_response.text
     status_payload = status_response.json()
     assert status_payload["status"] == "done"
+    assert status_payload["phase"] == "DONE"
     assert status_payload["totalSteps"] == 6
 
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
     resources_payload = resources_response.json()
-    assert len(resources_payload["resources"]) == 5
+    assert len(resources_payload["resources"]) == 6
+
+    access_response = client.get(f"/api/jobs/{job_id}/access")
+    assert access_response.status_code == 200, access_response.text
+    access_payload = access_response.json()
+    assert access_payload["summary"]["total"] == 6
+    assert access_payload["summary"]["accessible"] == 4
+    assert access_payload["summary"]["requiere_interaccion_count"] == 1
+    assert access_payload["modules"][0]["modulePath"] == "Modulo 1 > Recursos principales"
 
     pdf_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Guia docente.pdf")
     assert pdf_resource["coursePath"] == "Modulo 1 > Recursos principales"
@@ -305,7 +325,13 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     broken_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Video externo")
     assert broken_resource["status"] == "ERROR"
     assert "broken_link" in broken_resource["notes"]
-    assert broken_resource["accessStatus"] == "NOT_FOUND"
+    assert broken_resource["accessStatus"] == "NO_ACCEDE"
+
+    assignment_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Entrega final")
+    assert assignment_resource["status"] == "WARN"
+    assert assignment_resource["accessStatus"] == "REQUIERE_INTERACCION"
+    assert assignment_resource["canDownload"] is False
+    assert "requires_interaction" in assignment_resource["notes"]
 
     page_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Bienvenida")
     assert page_resource["canAccess"] is True
@@ -336,4 +362,4 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
 
     report_response = client.post(f"/api/jobs/{job_id}/report")
     assert report_response.status_code == 200, report_response.text
-    assert report_response.json()["stats"]["resources"] == 5
+    assert report_response.json()["stats"]["resources"] == 6

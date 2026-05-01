@@ -28,10 +28,9 @@ ORIGIN_INTERNO = "interno"
 ORIGIN_EXTERNO = "externo"
 SOURCE_CANVAS = "Canvas"
 ACCESS_STATUS_OK = "OK"
-ACCESS_STATUS_NOT_FOUND = "NOT_FOUND"
-ACCESS_STATUS_FORBIDDEN = "FORBIDDEN"
-ACCESS_STATUS_TIMEOUT = "TIMEOUT"
-ACCESS_STATUS_ERROR = "ERROR"
+ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
+ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
+ACCESS_STATUS_ERROR = ACCESS_STATUS_NO_ACCEDE
 RESOURCE_ID_NAMESPACE = uuid5(NAMESPACE_URL, "accessiblecourse.canvas.resource")
 
 
@@ -213,6 +212,7 @@ def _build_file_resource(
     )
     resource["fileId"] = item.content_id
     resource["downloadUrl"] = file.url if file else None
+    resource["download_url"] = resource["downloadUrl"]
     resource["details"] = details
 
     if file_error is not None:
@@ -299,16 +299,16 @@ def _build_non_file_resource(
     if not verify_access:
         return resource
 
-    if item.type == "ExternalTool":
+    if item.type in {"Assignment", "Discussion", "Quiz", "ExternalTool"}:
         _set_access_state(
             resource,
             can_access=False,
-            access_status=ACCESS_STATUS_FORBIDDEN,
+            access_status=ACCESS_STATUS_REQUIRES_INTERACTION,
             can_download=False,
-            error_message="Herramienta externa/LTI: puede requerir una sesion interactiva o permisos adicionales.",
+            error_message="Este recurso existe en Canvas, pero requiere una interaccion o sesion de navegador.",
         )
         resource["status"] = ResourceHealthStatus.WARN.value
-        _append_note(resource, "possible_restriction: herramienta externa o LTI.")
+        _append_note(resource, "requires_interaction: recurso Canvas que requiere sesion o accion del usuario.")
         return resource
 
     if url_checker is None and item.type == "ExternalUrl":
@@ -444,6 +444,8 @@ def _base_resource(
         "source": SOURCE_CANVAS,
         "url": url,
         "sourceUrl": url,
+        "downloadUrl": None,
+        "download_url": None,
         "path": local_path,
         "localPath": local_path,
         "filePath": local_path,
@@ -466,8 +468,11 @@ def _base_resource(
         "can_download": False,
         "downloadStatusCode": None,
         "download_status_code": None,
+        "discovered": False,
         "discoveredChildrenCount": 0,
         "discovered_children_count": 0,
+        "accessNote": None,
+        "access_note": None,
         "errorMessage": None,
         "error_message": None,
         "notes": None,
@@ -561,7 +566,7 @@ def _apply_url_result(
         _set_access_state(
             resource,
             can_access=False,
-            access_status=ACCESS_STATUS_FORBIDDEN,
+            access_status=ACCESS_STATUS_NO_ACCEDE,
             http_status=result.status_code,
             can_download=False,
             error_message="Canvas ha rechazado el acceso al recurso con el token configurado.",
@@ -602,18 +607,8 @@ def _apply_url_result(
 
 def _apply_app_error(resource: dict[str, Any], exc: AppError, *, default_message: str) -> None:
     http_status = exc.status_code if exc.status_code >= 400 else None
-    if exc.status_code in {401, 403}:
-        access_status = ACCESS_STATUS_FORBIDDEN
-        resource["status"] = ResourceHealthStatus.WARN.value
-    elif exc.status_code == 404:
-        access_status = ACCESS_STATUS_NOT_FOUND
-        resource["status"] = ResourceHealthStatus.ERROR.value
-    elif exc.code == "canvas_timeout" or exc.status_code == 504:
-        access_status = ACCESS_STATUS_TIMEOUT
-        resource["status"] = ResourceHealthStatus.ERROR.value
-    else:
-        access_status = ACCESS_STATUS_ERROR
-        resource["status"] = ResourceHealthStatus.ERROR.value
+    access_status = ACCESS_STATUS_NO_ACCEDE
+    resource["status"] = ResourceHealthStatus.ERROR.value
 
     _set_access_state(
         resource,
@@ -666,6 +661,8 @@ def _set_access_state(
     resource["download_status_code"] = resource["downloadStatusCode"]
     resource["errorMessage"] = error_message
     resource["error_message"] = error_message
+    resource["accessNote"] = error_message
+    resource["access_note"] = error_message
     details = dict(resource.get("details") or {})
     details["accessCheck"] = {
         "canAccess": can_access,
@@ -677,7 +674,7 @@ def _set_access_state(
     resource["details"] = details
     if access_status == ACCESS_STATUS_OK:
         resource["status"] = ResourceHealthStatus.OK.value
-    elif access_status == ACCESS_STATUS_FORBIDDEN:
+    elif access_status == ACCESS_STATUS_REQUIRES_INTERACTION:
         resource["status"] = ResourceHealthStatus.WARN.value
     else:
         resource["status"] = ResourceHealthStatus.ERROR.value
@@ -730,13 +727,7 @@ def _url_check_message(reason: str | None, *, status_code: int | None = None) ->
 
 
 def _broken_link_status(reason: str | None) -> str:
-    if reason == "404_not_found":
-        return ACCESS_STATUS_NOT_FOUND
-    if reason == "timeout":
-        return ACCESS_STATUS_TIMEOUT
-    if reason == "forbidden":
-        return ACCESS_STATUS_FORBIDDEN
-    return ACCESS_STATUS_ERROR
+    return ACCESS_STATUS_NO_ACCEDE
 
 
 def _build_course_path(module: str, subheader: str | None) -> str:

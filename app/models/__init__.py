@@ -18,12 +18,14 @@ class Job(SQLModel, table=True):
     size_bytes: int
     storage_dir: str
     status: str = Field(default="created", index=True)
+    phase: str = Field(default="UPLOAD", index=True)
     progress: int = Field(default=0)
     current_step: int = Field(default=1)
     total_steps: int = Field(default=4)
     message: str = Field(default="Analisis en cola.")
     error_code: str | None = Field(default=None)
     error_message: str | None = Field(default=None)
+    course_structure: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = Field(default=None)

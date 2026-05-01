@@ -26,6 +26,7 @@ from app.schemas import (
     ChecklistUpdateRequest,
     JobCreatedResponse,
     JobLifecycleStatus,
+    JobPhase,
     JobStatusResponse,
     ResourceResponse,
 )
@@ -78,6 +79,10 @@ REVIEW_STATUS_TO_LEGACY_STATUS = {
     "ERROR": "ERROR",
 }
 
+
+SENSITIVE_DETAIL_KEYS = {"authorization", "password", "secret", "token", "api_key", "apikey"}
+
+
 def get_job_or_404(session: Session, job_id: str) -> Job:
     job = session.get(Job, job_id)
     if not job:
@@ -104,30 +109,53 @@ def record_job_event(
     details: dict | None = None,
     level: int = logging.INFO,
 ) -> None:
+    safe_details = _redact_log_details(details or {})
     session.add(
         JobEvent(
             job_id=job_id,
             event=event,
             message=message,
             progress=progress,
-            details=details or {},
+            details=safe_details,
         )
     )
-    append_job_log(get_job_log_path(settings, job_id), event=event, message=message, details=details)
+    append_job_log(get_job_log_path(settings, job_id), event=event, message=message, details=safe_details)
     with job_logging_context(job_id):
-        logger.log(level, message, extra={"event": event, "job_id": job_id, "details": details or {}})
+        logger.log(level, message, extra={"event": event, "job_id": job_id, "details": safe_details})
 
 
 def serialize_job(job: Job) -> JobStatusResponse:
     return JobStatusResponse(
         jobId=job.id,
         status=JobLifecycleStatus(job.status),
+        phase=_coerce_job_phase(job.phase),
         progress=job.progress,
         message=job.message,
         currentStep=job.current_step,
         totalSteps=job.total_steps,
         errorCode=job.error_code,
     )
+
+
+def _coerce_job_phase(value: str | None) -> JobPhase:
+    if value in {phase.value for phase in JobPhase}:
+        return JobPhase(str(value))
+    return JobPhase.ERROR
+
+
+def _redact_log_details(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key).replace("-", "_").lower()
+            if any(secret_key in normalized_key for secret_key in SENSITIVE_DETAIL_KEYS):
+                redacted[str(key)] = "[redacted]"
+            else:
+                redacted[str(key)] = _redact_log_details(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_log_details(item) for item in value]
+    return value
 
 
 def serialize_resource(resource: ResourceRecord) -> ResourceResponse:
@@ -216,6 +244,11 @@ def _persist_analyzed_inventory(
 ) -> None:
     _write_review_inventory_payload(settings, job_id, inventory)
     _write_course_structure_payload(settings, job_id, course_structure)
+    job = session.get(Job, job_id)
+    if job is not None:
+        job.course_structure = course_structure
+        job.updated_at = utcnow()
+        session.add(job)
     _persist_legacy_inventory(session, job_id, inventory)
     sync_job_inventory_from_payload(session, job_id, inventory)
 
@@ -317,6 +350,42 @@ def _normalize_offline_inventory(
         else:
             module_path = module_path.strip()
 
+        title = str(resource.get("title") or "Recurso sin titulo")
+        item_path = resource.get("itemPath") or resource.get("item_path")
+        if isinstance(item_path, str):
+            item_path = item_path.strip() or None
+        else:
+            item_path = None
+        if not item_path and module_path:
+            item_path = f"{module_path} > {title}"
+
+        module_title = resource.get("moduleTitle") or resource.get("module_title")
+        if isinstance(module_title, str):
+            module_title = module_title.strip() or None
+        else:
+            module_title = None
+        if not module_title and module_path:
+            module_title = module_path.split(">", 1)[0].strip()
+
+        section_title = resource.get("sectionTitle") or resource.get("section_title")
+        if isinstance(section_title, str):
+            section_title = section_title.strip() or None
+        else:
+            section_title = None
+        if not section_title:
+            if item_path and ">" in item_path:
+                section_title = item_path.rsplit(">", 2)[-2].strip()
+            else:
+                section_title = module_path.rsplit(">", 1)[-1].strip() if module_path else title
+
+        downloadable = resource.get("downloadable")
+        if not isinstance(downloadable, bool):
+            downloadable = bool(
+                not source_url
+                and file_path
+                and Path(file_path).suffix.lower() not in {".html", ".htm", ".xhtml"}
+            )
+
         normalized = dict(resource)
         normalized["origin"] = _normalize_origin(
             resource.get("origin") if isinstance(resource.get("origin"), str) else None,
@@ -331,6 +400,13 @@ def _normalize_offline_inventory(
         normalized["coursePath"] = module_path
         normalized["module_path"] = module_path
         normalized["modulePath"] = module_path
+        normalized["item_path"] = item_path
+        normalized["itemPath"] = item_path
+        normalized["module_title"] = module_title
+        normalized["moduleTitle"] = module_title
+        normalized["section_title"] = section_title
+        normalized["sectionTitle"] = section_title
+        normalized["downloadable"] = downloadable
         normalized.setdefault("details", {})
         normalized_resources.append(normalized)
 
@@ -349,6 +425,12 @@ def _assign_generic_module_paths(resources: list[dict[str, Any]], module_title: 
         if not isinstance(resource.get("itemPath"), str) or not str(resource.get("itemPath")).strip():
             resource["itemPath"] = f"{module_title} > {title}"
             resource["item_path"] = f"{module_title} > {title}"
+        if not isinstance(resource.get("moduleTitle"), str) or not str(resource.get("moduleTitle")).strip():
+            resource["moduleTitle"] = module_title
+            resource["module_title"] = module_title
+        if not isinstance(resource.get("sectionTitle"), str) or not str(resource.get("sectionTitle")).strip():
+            resource["sectionTitle"] = module_title
+            resource["section_title"] = module_title
 
 
 def _build_manifest_review_inventory(
@@ -365,6 +447,12 @@ def _build_manifest_review_inventory(
         extracted_dir,
         excluded_extensions=excluded_extensions,
     )
+    discovered_inventory = parser.discover_html_linked_resources(
+        inventory,
+        extracted_dir,
+        excluded_extensions=excluded_extensions,
+    )
+    inventory = _merge_discovered_inventory(inventory, discovered_inventory)
     normalized_inventory = _normalize_offline_inventory(
         inventory,
         preserve_unmapped_paths=True,
@@ -436,11 +524,17 @@ def _build_offline_review_inventory(
         )
 
     excluded_extensions = _normalized_excluded_extensions(settings)
+    fallback_inventory = _build_review_inventory(
+        build_resources_from_extracted(extracted_dir),
+        excluded_extensions=excluded_extensions,
+    )
+    fallback_discovered = IMSCCParser().discover_html_linked_resources(
+        fallback_inventory,
+        extracted_dir,
+        excluded_extensions=excluded_extensions,
+    )
     fallback_inventory = _normalize_offline_inventory(
-        _build_review_inventory(
-            build_resources_from_extracted(extracted_dir),
-            excluded_extensions=excluded_extensions,
-        ),
+        _merge_discovered_inventory(fallback_inventory, fallback_discovered),
         preserve_unmapped_paths=True,
         excluded_extensions=excluded_extensions,
     )
@@ -500,6 +594,7 @@ def create_job_record(
         size_bytes=size_bytes,
         storage_dir=str(job_dir),
         status=JobLifecycleStatus.CREATED.value,
+        phase=JobPhase.UPLOAD.value,
         progress=0,
         current_step=1,
         total_steps=total_steps,
@@ -561,10 +656,17 @@ def _update_job(
     progress: int,
     current_step: int,
     message: str,
+    phase: JobPhase | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> None:
     job.status = status.value
+    if phase is not None:
+        job.phase = phase.value
+    elif status == JobLifecycleStatus.DONE:
+        job.phase = JobPhase.DONE.value
+    elif status == JobLifecycleStatus.ERROR:
+        job.phase = JobPhase.ERROR.value
     job.progress = progress
     job.current_step = current_step
     job.message = message
@@ -573,6 +675,8 @@ def _update_job(
     job.updated_at = utcnow()
     if status in {JobLifecycleStatus.DONE, JobLifecycleStatus.ERROR}:
         job.finished_at = utcnow()
+    else:
+        job.finished_at = None
     session.add(job)
 
 
@@ -604,6 +708,7 @@ def _update_job_progress(
     current_step: int,
     progress: int,
     message: str,
+    phase: JobPhase | None = None,
     event: str = "progress",
     details: dict[str, Any] | None = None,
 ) -> None:
@@ -614,7 +719,10 @@ def _update_job_progress(
         progress=progress,
         current_step=current_step,
         message=message,
+        phase=phase,
     )
+    event_details = dict(details or {})
+    event_details.setdefault("phase", job.phase)
     record_job_event(
         session,
         settings,
@@ -622,7 +730,7 @@ def _update_job_progress(
         event=event,
         message=message,
         progress=progress,
-        details=details,
+        details=event_details,
     )
     session.commit()
 
@@ -802,6 +910,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 session,
                 job,
                 status=JobLifecycleStatus.PROCESSING,
+                phase=JobPhase.UPLOAD,
                 progress=10,
                 current_step=1,
                 message="Validando archivo del curso.",
@@ -821,6 +930,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 session,
                 job,
                 status=JobLifecycleStatus.PROCESSING,
+                phase=JobPhase.INVENTORY,
                 progress=30,
                 current_step=2,
                 message="Extrayendo recursos del curso.",
@@ -843,6 +953,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 session,
                 job,
                 status=JobLifecycleStatus.PROCESSING,
+                phase=JobPhase.INVENTORY,
                 progress=55,
                 current_step=3,
                 message="Reconstruyendo estructura e inventario.",
@@ -874,6 +985,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 current_step=4,
                 progress=80,
                 message="Ejecutando Access + Deep Scan.",
+                phase=JobPhase.ACCESS_SCAN,
             )
             access_analysis = analyze_access(
                 job_id=job_id,
@@ -895,6 +1007,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 current_step=5,
                 progress=95,
                 message="Guardando inventario analizado.",
+                phase=JobPhase.ACCESS_SCAN,
                 details=access_summary,
             )
 
@@ -910,6 +1023,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 session,
                 job,
                 status=JobLifecycleStatus.DONE,
+                phase=JobPhase.DONE,
                 progress=100,
                 current_step=5,
                 message="Analisis completado.",
@@ -1024,6 +1138,7 @@ def process_online_job(
                 current_step=1,
                 progress=10,
                 message="Autenticacion Canvas validada.",
+                phase=JobPhase.UPLOAD,
                 event="started",
                 details={"source": "canvas", "courseId": context.course_id},
             )
@@ -1047,6 +1162,7 @@ def process_online_job(
                 current_step=2,
                 progress=25,
                 message=f"Curso cargado: {course.name}",
+                phase=JobPhase.UPLOAD,
                 details={"courseId": course.id, "courseName": course.name},
             )
 
@@ -1065,6 +1181,7 @@ def process_online_job(
                 current_step=3,
                 progress=45,
                 message=f"Modulos leidos: {len(modules)}",
+                phase=JobPhase.INVENTORY,
                 details={"moduleCount": len(modules)},
             )
 
@@ -1083,6 +1200,7 @@ def process_online_job(
                 current_step=4,
                 progress=65,
                 message=f"Inventario inicial construido: {inventory_build.items_read} items leidos.",
+                phase=JobPhase.INVENTORY,
                 details={"itemsRead": inventory_build.items_read, "resourceCount": len(inventory_build.resources)},
             )
 
@@ -1093,6 +1211,7 @@ def process_online_job(
                 current_step=5,
                 progress=82,
                 message="Ejecutando Access + Deep Scan.",
+                phase=JobPhase.ACCESS_SCAN,
             )
             access_analysis = analyze_access(
                 job_id=job_id,
@@ -1102,8 +1221,9 @@ def process_online_job(
                     credentials=context.credentials,
                     course_id=course.id,
                     url_checker=url_checker,
-                    max_depth=settings.online_deep_scan_max_depth if settings.online_deep_scan_enabled else 0,
+                    max_depth=settings.canvas_crawl_depth if settings.online_deep_scan_enabled else 0,
                     max_pages=settings.online_deep_scan_max_pages,
+                    max_discovered=settings.canvas_max_discovered,
                 ),
                 progress=95,
             )
@@ -1117,6 +1237,7 @@ def process_online_job(
                 current_step=6,
                 progress=95,
                 message="Guardando inventario online analizado.",
+                phase=JobPhase.ACCESS_SCAN,
                 details=access_summary,
             )
 
@@ -1132,6 +1253,7 @@ def process_online_job(
                 session,
                 job,
                 status=JobLifecycleStatus.DONE,
+                phase=JobPhase.DONE,
                 progress=100,
                 current_step=6,
                 message="Analisis online completado.",
@@ -1224,6 +1346,7 @@ def prepare_access_analysis_retry(session: Session, settings: Settings, job_id: 
         session,
         job,
         status=JobLifecycleStatus.PROCESSING,
+        phase=JobPhase.ACCESS_SCAN,
         progress=min(job.progress or 0, 80),
         current_step=min(max(job.current_step, 1), job.total_steps),
         message="Reanalisis de acceso en cola.",
@@ -1271,6 +1394,7 @@ def rerun_access_analysis(
                 current_step=min(max(job.current_step, 1), job.total_steps),
                 progress=82,
                 message="Reejecutando Access + Deep Scan.",
+                phase=JobPhase.ACCESS_SCAN,
                 event="access_retry_started",
             )
 
@@ -1304,6 +1428,7 @@ def rerun_access_analysis(
                 session,
                 job,
                 status=JobLifecycleStatus.DONE,
+                phase=JobPhase.DONE,
                 progress=100,
                 current_step=job.total_steps,
                 message="Reanalisis de acceso completado.",
@@ -1387,6 +1512,9 @@ def _build_retry_access_adapter(
             credentials=context.credentials,
             course_id=context.course_id,
             url_checker=url_check_factory(settings),
+            max_depth=settings.canvas_crawl_depth if settings.online_deep_scan_enabled else 0,
+            max_pages=settings.online_deep_scan_max_pages,
+            max_discovered=settings.canvas_max_discovered,
         )
 
     course_id = _course_id_from_resources(resources)
@@ -1397,6 +1525,9 @@ def _build_retry_access_adapter(
             credentials=credentials,
             course_id=course_id,
             url_checker=url_check_factory(settings),
+            max_depth=settings.canvas_crawl_depth if settings.online_deep_scan_enabled else 0,
+            max_pages=settings.online_deep_scan_max_pages,
+            max_discovered=settings.canvas_max_discovered,
         )
 
     if get_extracted_dir(settings, job_id).exists():
@@ -1434,6 +1565,7 @@ def prepare_retry_job(session: Session, settings: Settings, job_id: str) -> JobS
         session,
         job,
         status=JobLifecycleStatus.CREATED,
+        phase=JobPhase.UPLOAD,
         progress=0,
         current_step=1,
         message="Reintento en cola.",

@@ -158,8 +158,9 @@ def get_canvas_course_access_summary(
             credentials=credentials,
             course_id=course.id,
             url_checker=url_checker,
-            max_depth=settings.online_deep_scan_max_depth if settings.online_deep_scan_enabled else 0,
+            max_depth=settings.canvas_crawl_depth if settings.online_deep_scan_enabled else 0,
             max_pages=settings.online_deep_scan_max_pages,
+            max_discovered=settings.canvas_max_discovered,
         ),
     )
     summary = analysis.summary
@@ -167,10 +168,24 @@ def get_canvas_course_access_summary(
     return {
         "courseId": course.id,
         "courseName": course.name,
+        "summary": {
+            "total": summary["total"],
+            "ok_count": summary["ok_count"],
+            "no_accede_count": summary["no_accede_count"],
+            "requiere_interaccion_count": summary["requiere_interaccion_count"],
+            "downloadables_total": summary["downloadables_total"],
+            "downloadables_ok": summary["downloadables_ok"],
+            "byStatus": summary["byStatus"],
+        },
         "total": summary["total"],
         "accessible": summary["accessible"],
         "downloadable": summary["downloadable"],
         "downloadableAccessible": summary["downloadableAccessible"],
+        "ok_count": summary["ok_count"],
+        "no_accede_count": summary["no_accede_count"],
+        "requiere_interaccion_count": summary["requiere_interaccion_count"],
+        "downloadables_total": summary["downloadables_total"],
+        "downloadables_ok": summary["downloadables_ok"],
         "byStatus": summary["byStatus"],
         "deepScan": summary.get("deepScan"),
         "modules": [
@@ -181,6 +196,11 @@ def get_canvas_course_access_summary(
                 "accessible": group["accessible"],
                 "downloadable": group["downloadable"],
                 "downloadableAccessible": group["downloadableAccessible"],
+                "ok_count": group["ok_count"],
+                "no_accede_count": group["no_accede_count"],
+                "requiere_interaccion_count": group["requiere_interaccion_count"],
+                "downloadables_total": group["downloadables_total"],
+                "downloadables_ok": group["downloadables_ok"],
                 "byStatus": group["byStatus"],
                 "resources": group["resources"],
             }
@@ -228,8 +248,9 @@ def download_canvas_course_resource(
             credentials=credentials,
             course_id=course_id,
             url_checker=_build_url_checker(settings),
-            max_depth=settings.online_deep_scan_max_depth if settings.online_deep_scan_enabled else 0,
+            max_depth=settings.canvas_crawl_depth if settings.online_deep_scan_enabled else 0,
             max_pages=settings.online_deep_scan_max_pages,
+            max_discovered=settings.canvas_max_discovered,
         ),
     )
     resource = next((item for item in analysis.resources if str(item.get("id")) == resource_id), None)

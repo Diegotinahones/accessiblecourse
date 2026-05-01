@@ -34,6 +34,7 @@ interface UploadRequestOptions {
 interface RawJobStatusResponse {
   jobId?: string;
   status: 'created' | 'pending' | 'running' | 'processing' | 'done' | 'error';
+  phase?: 'UPLOAD' | 'INVENTORY' | 'ACCESS_SCAN' | 'DONE' | 'ERROR';
   progress: number;
   message?: string;
   currentStep?: number;
@@ -215,6 +216,7 @@ function normalizeReviewState(state: string | null | undefined): ReviewState {
 
 function normalizeResource(item: ResourceListItem): ResourceListItem {
   const sourceUrl = item.sourceUrl ?? item.url ?? null;
+  const downloadUrl = item.downloadUrl ?? null;
   const filePath = item.filePath ?? item.localPath ?? item.path ?? null;
   const modulePath = item.modulePath ?? item.coursePath ?? null;
   const itemPath = item.itemPath ?? null;
@@ -227,6 +229,7 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
     origin: item.origin ?? null,
     url: sourceUrl,
     sourceUrl,
+    downloadUrl,
     path: filePath,
     localPath: filePath,
     filePath,
@@ -244,6 +247,8 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
     downloadStatusCode: item.downloadStatusCode ?? null,
     discoveredChildrenCount: item.discoveredChildrenCount ?? 0,
     parentResourceId: item.parentResourceId ?? null,
+    discovered: item.discovered ?? false,
+    accessNote: item.accessNote ?? item.errorMessage ?? null,
     errorMessage: item.errorMessage ?? null,
     notes: item.notes ?? null,
     failCount: item.failCount ?? 0,
@@ -303,9 +308,24 @@ function normalizeJobStatus(payload: RawJobStatusResponse): JobStatus {
       totalSteps,
       Math.max(1, Math.ceil(Math.max(payload.progress, 1) / (100 / totalSteps))),
     );
+  let phase = payload.phase;
+  if (!phase) {
+    if (normalizedStatus === 'done') {
+      phase = 'DONE';
+    } else if (normalizedStatus === 'error') {
+      phase = 'ERROR';
+    } else if (currentStep >= totalSteps - 1) {
+      phase = 'ACCESS_SCAN';
+    } else if (currentStep >= 2) {
+      phase = 'INVENTORY';
+    } else {
+      phase = 'UPLOAD';
+    }
+  }
 
   return {
     status: normalizedStatus,
+    phase,
     progress: payload.progress,
     message: payload.message ?? buildStepMessage(payload.progress),
     currentStep,

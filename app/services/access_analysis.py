@@ -15,6 +15,7 @@ from app.models.entities import ResourceHealthStatus
 from app.services.access_check import build_access_status_counts
 from app.services.canvas_client import CanvasClient, CanvasCredentials
 from app.services.canvas_deep_scan import extract_canvas_links
+from app.services.course_structure import build_section_key, section_key_from_path, section_title_from_path
 from app.services.imscc_parser import IMSCCParser
 from app.services.storage import get_extracted_dir, resolve_job_resource_path
 from app.services.url_check import URLCheckService, UrlCheckResult
@@ -187,6 +188,7 @@ def build_access_summary(
 ) -> dict[str, Any]:
     by_status = build_access_status_counts()
     groups_by_module: dict[str, dict[str, Any]] = {}
+    group_priorities: dict[str, int] = {}
 
     for resource in resources:
         access_status = str(resource.get("accessStatus") or ACCESS_STATUS_ERROR)
@@ -194,8 +196,9 @@ def build_access_summary(
         by_status[access_status] += 1
 
         module_path = _module_path(resource)
+        group_key = _module_group_key(resource)
         group = groups_by_module.setdefault(
-            module_path,
+            group_key,
             {
                 "modulePath": module_path,
                 "total": 0,
@@ -212,6 +215,11 @@ def build_access_summary(
                 "resources": [],
             },
         )
+        current_priority = 0 if not _is_discovered_resource(resource) else 1
+        previous_priority = group_priorities.get(group_key)
+        if previous_priority is None or current_priority < previous_priority:
+            group["modulePath"] = module_path
+            group_priorities[group_key] = current_priority
         group["total"] += 1
         group["accessible"] += int(bool(resource.get("canAccess")))
         group["downloadable"] += int(bool(resource.get("canDownload")))
@@ -784,6 +792,9 @@ def _merge_analysis(
 ) -> None:
     http_status = access.http_status if access.http_status is not None else download.http_status
     error_message = access.error_message or download.error_message
+    reason_code = access.details.get("reason") if isinstance(access.details, dict) else None
+    if not isinstance(reason_code, str) or not reason_code.strip():
+        reason_code = access.access_status if access.access_status != ACCESS_STATUS_OK else None
 
     resource["canAccess"] = access.can_access
     resource["can_access"] = access.can_access
@@ -806,6 +817,10 @@ def _merge_analysis(
     resource["error_message"] = error_message
     resource["accessNote"] = error_message
     resource["access_note"] = error_message
+    resource["reasonCode"] = reason_code
+    resource["reason_code"] = reason_code
+    resource["reasonDetail"] = error_message
+    resource["reason_detail"] = error_message
     if access.url_status is not None:
         resource["urlStatus"] = access.url_status
     if access.final_url is not None:
@@ -822,6 +837,8 @@ def _merge_analysis(
         "httpStatus": http_status,
         "canDownload": download.can_download,
         "errorMessage": error_message,
+        "reasonCode": reason_code,
+        "reasonDetail": error_message,
     }
     if access.details:
         details["accessCheck"].update(access.details)
@@ -908,6 +925,16 @@ def _build_discovered_resource(
     resolved_resource_type = resource_type or _infer_resource_type(reference)
     resolved_title = title or _title_from_reference(reference)
     module_path = _module_path(base_resource)
+    module_title = _resource_module_title(base_resource) or section_title_from_path(module_path) or module_path
+    section_title = _resource_section_title(base_resource) or section_title_from_path(module_path) or module_title
+    parent_item_path = _resource_item_path(base_resource)
+    item_path = (
+        f"{parent_item_path} > {resolved_title}"
+        if parent_item_path
+        else f"{module_path} > {resolved_title}"
+        if module_path
+        else resolved_title
+    )
     parent_id = base_resource.get("id")
     return {
         "id": "",
@@ -929,8 +956,12 @@ def _build_discovered_resource(
         "coursePath": module_path,
         "module_path": module_path,
         "modulePath": module_path,
-        "item_path": f"{module_path} > {resolved_title}",
-        "itemPath": f"{module_path} > {resolved_title}",
+        "moduleTitle": module_title,
+        "module_title": module_title,
+        "sectionTitle": section_title,
+        "section_title": section_title,
+        "item_path": item_path,
+        "itemPath": item_path,
         "parentResourceId": parent_id,
         "parent_resource_id": parent_id,
         "discovered": True,
@@ -1162,6 +1193,42 @@ def _module_path(resource: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return "Modulo general"
+
+
+def _resource_module_title(resource: dict[str, Any]) -> str | None:
+    for key in ("moduleTitle", "module_title"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _resource_section_title(resource: dict[str, Any]) -> str | None:
+    for key in ("sectionTitle", "section_title"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _resource_item_path(resource: dict[str, Any]) -> str | None:
+    for key in ("itemPath", "item_path"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _module_group_key(resource: dict[str, Any]) -> str:
+    module_path = _module_path(resource)
+    key = section_key_from_path(module_path)
+    if key:
+        return key
+
+    section_title = resource.get("sectionTitle") or resource.get("section_title") or section_title_from_path(module_path)
+    if isinstance(section_title, str) and section_title.strip():
+        return build_section_key(section_title.strip())
+    return build_section_key(module_path)
 
 
 def _badge_for(access_status: str) -> dict[str, str]:

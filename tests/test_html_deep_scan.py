@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from app.services.course_structure import augment_course_structure, build_section_key
 from app.services.imscc_parser import IMSCCParser
 
 
@@ -135,3 +136,65 @@ def test_discover_html_linked_resources_extracts_and_dedupes_nested_links() -> N
         assert references["course/downloads/guide.pdf"]["sectionTitle"] == "Módulo 1"
         assert inventory[0]["discoveredChildrenCount"] == 4
         assert inventory[1]["discoveredChildrenCount"] == 1
+
+
+def test_augment_course_structure_merges_equivalent_sections_and_keeps_discovered_under_parent() -> None:
+    structure = {
+        "title": "Curso demo",
+        "organizations": [
+            {
+                "nodeId": "org-1",
+                "title": "Curso demo",
+                "children": [
+                    {
+                        "nodeId": "section-1",
+                        "title": "PEC 2: práctica",
+                        "resourceId": None,
+                        "children": [
+                            {
+                                "nodeId": "page-1",
+                                "title": "Página principal",
+                                "resourceId": "res-html",
+                                "children": [],
+                            }
+                        ],
+                    },
+                    {
+                        "nodeId": "section-2",
+                        "title": "PEC2 practica",
+                        "resourceId": None,
+                        "children": [],
+                    },
+                ],
+            }
+        ],
+        "unplacedResourceIds": [],
+    }
+    resources = [
+        {
+            "id": "res-html",
+            "title": "Página principal",
+            "modulePath": "PEC 2: práctica",
+            "itemPath": "PEC 2: práctica > Página principal",
+        },
+        {
+            "id": "discovered-pdf",
+            "title": "Guía descargable",
+            "modulePath": "PEC2 practica",
+            "itemPath": "PEC2 practica > Página principal > Guía descargable",
+            "parentResourceId": "res-html",
+            "discovered": True,
+        },
+    ]
+
+    augmented = augment_course_structure(structure, resources)
+
+    assert augmented is not None
+    organization = augmented["organizations"][0]
+    assert len(organization["children"]) == 1
+    assert build_section_key("PEC 2: práctica") == build_section_key("PEC2 practica")
+    section = organization["children"][0]
+    assert section["title"] == "PEC 2: práctica"
+    page = section["children"][0]
+    assert page["resourceId"] == "res-html"
+    assert page["children"][0]["resourceId"] == "discovered-pdf"

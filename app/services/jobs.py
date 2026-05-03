@@ -36,7 +36,7 @@ from app.services.access_analysis import OfflineAccessAdapter, OnlineAccessAdapt
 from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContextStore
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
-from app.services.course_structure import build_fallback_course_structure
+from app.services.course_structure import build_fallback_course_structure, build_section_key, section_key_from_path
 from app.services.imscc import build_resources_from_extracted
 from app.services.imscc_parser import HTML_RESOURCE_EXTENSIONS, IMSCCParser, ParserError
 from app.services.review_service import load_inventory_file, sync_job_inventory_from_payload
@@ -551,6 +551,8 @@ def _dedupe_offline_inventory(inventory: list[dict[str, Any]]) -> list[dict[str,
             "module_title",
             "sectionTitle",
             "section_title",
+            "sectionKey",
+            "section_key",
             "url",
             "sourceUrl",
             "filePath",
@@ -561,6 +563,10 @@ def _dedupe_offline_inventory(inventory: list[dict[str, Any]]) -> list[dict[str,
             "access_note",
             "errorMessage",
             "error_message",
+            "reasonCode",
+            "reason_code",
+            "reasonDetail",
+            "reason_detail",
         ):
             value = existing.get(field)
             if isinstance(value, str) and value.strip():
@@ -635,6 +641,7 @@ def _build_auxiliary_resource(item: Any) -> AuxiliaryResourceRead:
         modulePath=getattr(item, "course_path", None),
         moduleTitle=getattr(item, "module_title", None),
         sectionTitle=getattr(item, "section_title", None),
+        sectionKey=getattr(item, "section_key", None),
         itemPath=getattr(item, "item_path", None),
         status=_enum_value(getattr(item, "status", None)),
         accessStatus=_enum_value(getattr(item, "access_status", None)),
@@ -642,6 +649,8 @@ def _build_auxiliary_resource(item: Any) -> AuxiliaryResourceRead:
         canDownload=bool(getattr(item, "can_download", False)),
         accessNote=getattr(item, "access_note", None),
         errorMessage=getattr(item, "error_message", None),
+        reasonCode=getattr(item, "reason_code", None),
+        reasonDetail=getattr(item, "reason_detail", None),
         notes=getattr(item, "notes", None),
     )
 
@@ -722,6 +731,9 @@ def _normalize_offline_inventory(
                 section_title = item_path.rsplit(">", 2)[-2].strip()
             else:
                 section_title = module_path.rsplit(">", 1)[-1].strip() if module_path else title
+        section_key = section_key_from_path(module_path) if module_path else None
+        if not section_key and section_title:
+            section_key = build_section_key(section_title)
 
         downloadable = resource.get("downloadable")
         if not isinstance(downloadable, bool):
@@ -752,10 +764,16 @@ def _normalize_offline_inventory(
         normalized["moduleTitle"] = module_title
         normalized["section_title"] = section_title
         normalized["sectionTitle"] = section_title
+        normalized["section_key"] = section_key
+        normalized["sectionKey"] = section_key
         normalized["downloadable"] = downloadable
         normalized["canDownload"] = bool(resource.get("canDownload")) or downloadable
         normalized["can_download"] = normalized["canDownload"]
         normalized["source"] = _inventory_source(normalized)
+        normalized["reasonCode"] = resource.get("reasonCode") or resource.get("reason_code")
+        normalized["reason_code"] = normalized["reasonCode"]
+        normalized["reasonDetail"] = resource.get("reasonDetail") or resource.get("reason_detail")
+        normalized["reason_detail"] = normalized["reasonDetail"]
         analysis_category = _analysis_category_for_offline_resource(
             normalized,
             excluded_extensions=excluded_extensions,

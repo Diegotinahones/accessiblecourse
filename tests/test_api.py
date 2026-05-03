@@ -272,6 +272,58 @@ def build_imscc_with_offline_deep_scan() -> bytes:
     return buffer.getvalue()
 
 
+def build_imscc_with_pec_section_deep_scan() -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "imsmanifest.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+  <organizations>
+    <organization identifier="org-1">
+      <title>Curso PEC</title>
+      <item identifier="section-pec1">
+        <title>PEC 1: Actividad inicial</title>
+        <item identifier="item-html" identifierref="res-html">
+          <title>Página de actividad</title>
+        </item>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-html" type="webcontent" href="course/pec1/activity.html">
+      <file href="course/pec1/activity.html" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        )
+        archive.writestr(
+            "course/pec1/activity.html",
+            """
+            <html><body>
+              <a href="../downloads/brief.pdf">Brief de la PEC</a>
+              <a href="https://example.com/como-citar-ia">¿Cómo citar la IA…</a>
+            </body></html>
+            """,
+        )
+        archive.writestr("course/downloads/brief.pdf", b"%PDF-1.4\n%brief\n")
+    return buffer.getvalue()
+
+
+def collect_resource_ids(node: dict[str, object]) -> list[str]:
+    collected: list[str] = []
+    resource_id = node.get("resourceId")
+    if isinstance(resource_id, str) and resource_id:
+        collected.append(resource_id)
+    children = node.get("children")
+    if isinstance(children, list):
+        for child in children:
+            if isinstance(child, dict):
+                collected.extend(collect_resource_ids(child))
+    return collected
+
+
 def test_bootstrap_inventory_and_persist_checklist(client, test_settings) -> None:
     job_id = "job-thread4-bootstrap"
     write_inventory(
@@ -732,6 +784,61 @@ def test_offline_deep_scan_discovers_nested_local_and_external_resources(client,
     access_summary = access_summary_response.json()
     assert access_summary["accessible"] == 6
     assert access_summary["downloadable"] == 4
+
+
+def test_offline_deep_scan_keeps_discovered_links_inside_existing_pec_section(client, monkeypatch) -> None:
+    class StubURLChecker:
+        def check_url(self, url: str):
+            checked_at = datetime(2026, 5, 2, 10, 0, tzinfo=timezone.utc)
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=True,
+                reason="404_not_found",
+                status_code=404,
+                url_status="404",
+                final_url=url,
+                checked_at=checked_at,
+            )
+
+    monkeypatch.setattr("app.services.jobs.build_url_checker", lambda settings: StubURLChecker())
+
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_imscc_with_pec_section_deep_scan(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    payload = resources_response.json()
+    resources = payload["resources"]
+    by_title = {resource["title"]: resource for resource in resources}
+
+    assert payload["structure"]["organizations"][0]["title"] == "Curso PEC"
+    top_sections = payload["structure"]["organizations"][0]["children"]
+    assert len(top_sections) == 1
+    assert top_sections[0]["title"] == "PEC 1: Actividad inicial"
+    grouped_ids = collect_resource_ids(top_sections[0])
+    assert "res-html" in grouped_ids
+    assert by_title["Brief de la PEC"]["id"] in grouped_ids
+    assert by_title["¿Cómo citar la IA…"]["id"] in grouped_ids
+    assert payload["structure"]["unplacedResourceIds"] == []
+
+    assert by_title["Brief de la PEC"]["discovered"] is True
+    assert by_title["Brief de la PEC"]["parentResourceId"] == "res-html"
+    assert by_title["¿Cómo citar la IA…"]["discovered"] is True
+    assert by_title["¿Cómo citar la IA…"]["parentResourceId"] == "res-html"
+    assert by_title["¿Cómo citar la IA…"]["reasonCode"] == "404_not_found"
+    assert by_title["¿Cómo citar la IA…"]["reasonDetail"] == "La URL devolvió 404."
+
+    access_response = client.get(f"/api/jobs/{job_id}/access")
+    assert access_response.status_code == 200, access_response.text
+    access_payload = access_response.json()
+    assert len(access_payload["modules"]) == 1
+    assert access_payload["modules"][0]["modulePath"] == "PEC 1: Actividad inicial"
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

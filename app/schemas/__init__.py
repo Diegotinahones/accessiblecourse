@@ -196,6 +196,7 @@ class ResourceListItemRead(StrictModel):
     modulePath: str | None = None
     moduleTitle: str | None = None
     sectionTitle: str | None = None
+    sectionKey: str | None = None
     itemPath: str | None = None
     status: ReviewResourceHealthStatus
     urlStatus: str | None = None
@@ -213,6 +214,8 @@ class ResourceListItemRead(StrictModel):
     discovered: bool = False
     accessNote: str | None = None
     errorMessage: str | None = None
+    reasonCode: str | None = None
+    reasonDetail: str | None = None
     notes: str | None = None
     reviewState: ReviewStateEnum
     failCount: int
@@ -312,6 +315,7 @@ class AuxiliaryResourceRead(StrictModel):
     modulePath: str | None = None
     moduleTitle: str | None = None
     sectionTitle: str | None = None
+    sectionKey: str | None = None
     itemPath: str | None = None
     status: str | None = None
     accessStatus: str | None = None
@@ -319,6 +323,8 @@ class AuxiliaryResourceRead(StrictModel):
     canDownload: bool = False
     accessNote: str | None = None
     errorMessage: str | None = None
+    reasonCode: str | None = None
+    reasonDetail: str | None = None
     notes: str | None = None
 
 

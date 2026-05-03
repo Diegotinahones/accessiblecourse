@@ -54,6 +54,10 @@ class InventoryResourceSeed(BaseModel):
         default=None,
         validation_alias=AliasChoices("section_title", "sectionTitle"),
     )
+    section_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("section_key", "sectionKey"),
+    )
     status: ResourceHealthStatus = ResourceHealthStatus.OK
     notes: str | list[str] | None = None
     item_path: str | None = Field(default=None, validation_alias=AliasChoices("item_path", "itemPath"))
@@ -97,6 +101,8 @@ class InventoryResourceSeed(BaseModel):
         validation_alias=AliasChoices("error_message", "errorMessage"),
     )
     access_note: str | None = Field(default=None, validation_alias=AliasChoices("access_note", "accessNote"))
+    reason_code: str | None = Field(default=None, validation_alias=AliasChoices("reason_code", "reasonCode"))
+    reason_detail: str | None = Field(default=None, validation_alias=AliasChoices("reason_detail", "reasonDetail"))
     details: dict[str, Any] | None = None
 
     @field_validator("notes")

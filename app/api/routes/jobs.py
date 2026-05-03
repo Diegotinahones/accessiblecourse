@@ -36,6 +36,7 @@ from app.schemas import (
 from app.services.access_analysis import build_access_summary
 from app.services.canvas_client import CanvasClient, CanvasCredentials
 from app.services.course_structure import (
+    augment_course_structure,
     build_fallback_course_structure,
     filter_course_structure,
     load_course_structure,
@@ -104,6 +105,7 @@ def _resource_read(
     module_path = inventory_item.course_path if inventory_item is not None else resource.course_path
     module_title = inventory_item.module_title if inventory_item is not None else None
     section_title = inventory_item.section_title if inventory_item is not None else None
+    section_key = inventory_item.section_key if inventory_item is not None else None
     item_path = inventory_item.item_path if inventory_item is not None else None
     parent_resource_id = inventory_item.parent_resource_id if inventory_item is not None else None
     return ResourceListItemRead(
@@ -123,6 +125,7 @@ def _resource_read(
         modulePath=module_path,
         moduleTitle=module_title,
         sectionTitle=section_title,
+        sectionKey=section_key,
         itemPath=item_path,
         status=resource.status,
         urlStatus=inventory_item.url_status if inventory_item is not None else None,
@@ -148,6 +151,8 @@ def _resource_read(
         discovered=inventory_item.discovered if inventory_item is not None else False,
         accessNote=inventory_item.access_note if inventory_item is not None else resource.access_note,
         errorMessage=inventory_item.error_message if inventory_item is not None else resource.error_message,
+        reasonCode=inventory_item.reason_code if inventory_item is not None else None,
+        reasonDetail=inventory_item.reason_detail if inventory_item is not None else resource.error_message,
         notes=resource.notes,
         reviewState=resource.review_state,
         failCount=fail_count,
@@ -386,7 +391,8 @@ def _build_visible_course_structure(
         raw_structure = build_fallback_course_structure(resource_payload)
 
     visible_resource_ids = {resource.id for resource in resources}
-    filtered_structure = filter_course_structure(raw_structure, visible_resource_ids=visible_resource_ids)
+    augmented_structure = augment_course_structure(raw_structure, resource_payload) or raw_structure
+    filtered_structure = filter_course_structure(augmented_structure, visible_resource_ids=visible_resource_ids)
     return filtered_structure or build_fallback_course_structure(resource_payload)
 
 

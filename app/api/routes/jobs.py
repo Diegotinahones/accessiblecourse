@@ -106,6 +106,7 @@ def _resource_read(
     module_title = inventory_item.module_title if inventory_item is not None else None
     section_title = inventory_item.section_title if inventory_item is not None else None
     section_key = inventory_item.section_key if inventory_item is not None else None
+    section_type = inventory_item.section_type if inventory_item is not None else None
     item_path = inventory_item.item_path if inventory_item is not None else None
     parent_resource_id = inventory_item.parent_resource_id if inventory_item is not None else None
     return ResourceListItemRead(
@@ -126,6 +127,7 @@ def _resource_read(
         moduleTitle=module_title,
         sectionTitle=section_title,
         sectionKey=section_key,
+        sectionType=section_type,
         itemPath=item_path,
         status=resource.status,
         urlStatus=inventory_item.url_status if inventory_item is not None else None,
@@ -182,7 +184,7 @@ def _is_broken_inventory_resource(resource: Resource, inventory_item) -> bool:
 def _build_access_summary(session: Session, settings: Settings, job_id: str) -> AccessSummaryRead:
     resources = session.exec(select(Resource).where(Resource.job_id == job_id)).all()
     job = get_processing_job_or_404(session, job_id)
-    _, non_analyzable_external_count, technical_ignored_count = load_inventory_breakdown(settings, job_id)
+    breakdown = load_inventory_breakdown(settings, job_id)
     resource_payload = [
         {
             "id": resource.id,
@@ -211,8 +213,11 @@ def _build_access_summary(session: Session, settings: Settings, job_id: str) -> 
     summary["downloadableAccessible"] = sum(1 for resource in resources if resource.can_access and resource.can_download)
     summary["discovered"] = sum(resource.discovered_children_count for resource in resources)
     summary["totalAnalizables"] = summary["total"]
-    summary["noAnalizablesExternos"] = non_analyzable_external_count
-    summary["tecnicosIgnorados"] = technical_ignored_count
+    summary["noAnalizablesExternos"] = breakdown["noAnalizablesExternos"]
+    summary["tecnicosIgnorados"] = breakdown["tecnicosIgnorados"]
+    summary["globalUnplacedCount"] = breakdown["globalUnplacedCount"]
+    summary["noAccessCount"] = breakdown["noAccessCount"]
+    summary["noAccessByReason"] = breakdown["noAccessByReason"]
     return AccessSummaryRead.model_validate(summary)
 
 
@@ -226,7 +231,7 @@ def _build_access_response(session: Session, settings: Settings, job_id: str) ->
     _ensure_review_inventory(session, settings, job_id)
     job = get_processing_job_or_404(session, job_id)
     summary = _build_access_summary(session, settings, job_id)
-    non_analyzable_external_resources, _, _ = load_inventory_breakdown(settings, job_id)
+    breakdown = load_inventory_breakdown(settings, job_id)
     inventory_items = _load_inventory_items_or_empty(settings, job_id)
     inventory_index = {item.id: item for item in inventory_items}
     inventory_order = {item.id: index for index, item in enumerate(inventory_items)}
@@ -274,7 +279,7 @@ def _build_access_response(session: Session, settings: Settings, job_id: str) ->
         progress=job.progress,
         summary=summary,
         modules=modules,
-        nonAnalyzableExternalResources=non_analyzable_external_resources,
+        nonAnalyzableExternalResources=breakdown["auxiliaryResources"],
     )
 
 
@@ -314,7 +319,7 @@ def _get_review_resource(session: Session, job_id: str, resource_id: str) -> Res
 
 def _build_summary_response(session: Session, settings: Settings, job_id: str) -> ReviewSummaryPayload:
     _ensure_review_inventory(session, settings, job_id)
-    _, non_analyzable_external_count, technical_ignored_count = load_inventory_breakdown(settings, job_id)
+    breakdown = load_inventory_breakdown(settings, job_id)
     try:
         review_session, review_summary, rows = build_summary_payload(session, job_id)
     except LookupError as exc:
@@ -333,8 +338,8 @@ def _build_summary_response(session: Session, settings: Settings, job_id: str) -
         totalFailItems=review_summary.total_fail_items,
         accessibleResources=review_summary.accessible_resources,
         downloadableResources=review_summary.downloadable_resources,
-        noAnalizablesExternos=non_analyzable_external_count,
-        tecnicosIgnorados=technical_ignored_count,
+        noAnalizablesExternos=breakdown["noAnalizablesExternos"],
+        tecnicosIgnorados=breakdown["tecnicosIgnorados"],
         lastUpdated=review_summary.last_updated,
         reviewSession=_review_session_read(review_session),
         resources=[
@@ -459,9 +464,7 @@ def get_resources(
 ) -> ResourceListPayload:
     _ensure_review_inventory(session, settings, job_id)
     review_session, review_summary = ensure_review_rollups(session, job_id)
-    non_analyzable_external_resources, non_analyzable_external_count, technical_ignored_count = (
-        load_inventory_breakdown(settings, job_id)
-    )
+    breakdown = load_inventory_breakdown(settings, job_id)
     inventory_items = _load_inventory_items_or_empty(settings, job_id)
     inventory_index = {item.id: item for item in inventory_items}
     inventory_order = {item.id: index for index, item in enumerate(inventory_items)}
@@ -483,9 +486,12 @@ def get_resources(
         jobId=job_id,
         resources=resources,
         totalAnalizables=review_summary.total_resources,
-        noAnalizablesExternos=non_analyzable_external_count,
-        tecnicosIgnorados=technical_ignored_count,
-        nonAnalyzableExternalResources=non_analyzable_external_resources,
+        noAnalizablesExternos=breakdown["noAnalizablesExternos"],
+        tecnicosIgnorados=breakdown["tecnicosIgnorados"],
+        globalUnplacedCount=breakdown["globalUnplacedCount"],
+        noAccessCount=breakdown["noAccessCount"],
+        noAccessByReason=breakdown["noAccessByReason"],
+        nonAnalyzableExternalResources=breakdown["auxiliaryResources"],
         reviewSession=_review_session_read(review_session),
         structure=_build_visible_course_structure(settings, job_id, resources),
     )

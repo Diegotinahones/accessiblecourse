@@ -1,8 +1,18 @@
 export type ResourceType = 'PDF' | 'Web' | 'Video' | 'Notebook' | 'Other';
 export type ResourceOrigin = 'interno' | 'externo';
 export type ResourceState = 'OK' | 'AVISO' | 'ERROR';
-export type JobLifecycleStatus = 'pending' | 'running' | 'processing' | 'done' | 'error';
-export type JobPhase = 'UPLOAD' | 'INVENTORY' | 'ACCESS_SCAN' | 'DONE' | 'ERROR';
+export type JobLifecycleStatus =
+  | 'pending'
+  | 'running'
+  | 'processing'
+  | 'done'
+  | 'error';
+export type JobPhase =
+  | 'UPLOAD'
+  | 'INVENTORY'
+  | 'ACCESS_SCAN'
+  | 'DONE'
+  | 'ERROR';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
 export type AnalysisMode = 'offline' | 'online';
 export type AppMode = 'online' | 'offline';
@@ -74,7 +84,13 @@ export interface GeneratedReport {
   downloads: ReportDownloads;
 }
 
-export type ReviewResourceType = 'WEB' | 'PDF' | 'VIDEO' | 'NOTEBOOK' | 'IMAGE' | 'OTHER';
+export type ReviewResourceType =
+  | 'WEB'
+  | 'PDF'
+  | 'VIDEO'
+  | 'NOTEBOOK'
+  | 'IMAGE'
+  | 'OTHER';
 export type ReviewResourceHealthStatus = 'OK' | 'WARN' | 'ERROR';
 export type ReviewState = 'OK' | 'IN_REVIEW' | 'NEEDS_FIX';
 export type ReviewChecklistValue = 'PENDING' | 'PASS' | 'FAIL';
@@ -92,6 +108,7 @@ export interface ResourceListItem {
   title: string;
   type: ReviewResourceType;
   origin: string | null;
+  analysisCategory?: string;
   url: string | null;
   sourceUrl: string | null;
   downloadUrl: string | null;
@@ -100,6 +117,10 @@ export interface ResourceListItem {
   filePath: string | null;
   coursePath: string | null;
   modulePath: string | null;
+  moduleTitle?: string | null;
+  sectionTitle?: string | null;
+  sectionKey?: string | null;
+  sectionType?: string | null;
   itemPath: string | null;
   status: ReviewResourceHealthStatus;
   urlStatus: string | null;
@@ -125,6 +146,8 @@ export interface ResourceListItem {
   discovered: boolean;
   accessNote: string | null;
   errorMessage: string | null;
+  reasonCode?: string | null;
+  reasonDetail?: string | null;
   notes: string | null;
   reviewState: ReviewState;
   failCount: number;
@@ -155,6 +178,12 @@ export interface CourseStructure {
 export interface ResourceListResponse {
   jobId: string;
   resources: ResourceListItem[];
+  totalAnalizables?: number;
+  noAnalizablesExternos?: number;
+  tecnicosIgnorados?: number;
+  globalUnplacedCount?: number;
+  noAccessCount?: number;
+  noAccessByReason?: Record<string, number>;
   reviewSession: ReviewSession;
   structure: CourseStructure;
 }
@@ -241,9 +270,12 @@ const reviewPriority: Record<ReviewState, number> = {
   OK: 2,
 };
 
-export function sortResourcesByPriority(resources: ResourceListItem[]): ResourceListItem[] {
+export function sortResourcesByPriority(
+  resources: ResourceListItem[],
+): ResourceListItem[] {
   return [...resources].sort((left, right) => {
-    const priorityDiff = reviewPriority[left.reviewState] - reviewPriority[right.reviewState];
+    const priorityDiff =
+      reviewPriority[left.reviewState] - reviewPriority[right.reviewState];
     if (priorityDiff !== 0) {
       return priorityDiff;
     }

@@ -51,6 +51,8 @@ from app.services.url_check import URLCheckService
 
 logger = logging.getLogger("accessiblecourse.jobs")
 DEFAULT_GENERIC_MODULE_TITLE = "Módulo general"
+GLOBAL_UNPLACED_SECTION_TYPE = "global_unplaced"
+STRUCTURED_SECTION_TYPE = "structured"
 ANALYSIS_CATEGORY_MAIN = "MAIN_ANALYZABLE"
 ANALYSIS_CATEGORY_NON_ANALYZABLE_EXTERNAL = "NON_ANALYZABLE_EXTERNAL"
 ANALYSIS_CATEGORY_TECHNICAL_IGNORED = "TECHNICAL_IGNORED"
@@ -642,9 +644,12 @@ def _build_auxiliary_resource(item: Any) -> AuxiliaryResourceRead:
         moduleTitle=getattr(item, "module_title", None),
         sectionTitle=getattr(item, "section_title", None),
         sectionKey=getattr(item, "section_key", None),
+        sectionType=getattr(item, "section_type", None),
         itemPath=getattr(item, "item_path", None),
         status=_enum_value(getattr(item, "status", None)),
         accessStatus=_enum_value(getattr(item, "access_status", None)),
+        finalUrl=getattr(item, "final_url", None),
+        httpStatus=getattr(item, "http_status", None),
         canAccess=bool(getattr(item, "can_access", False)),
         canDownload=bool(getattr(item, "can_download", False)),
         accessNote=getattr(item, "access_note", None),
@@ -655,16 +660,44 @@ def _build_auxiliary_resource(item: Any) -> AuxiliaryResourceRead:
     )
 
 
-def load_inventory_breakdown(settings: Settings, job_id: str) -> tuple[list[AuxiliaryResourceRead], int, int]:
+def _normalized_no_access_reason_code(value: str | None) -> str:
+    normalized = _normalize_label(value)
+    mapping = {
+        "not_found": "NOT_FOUND",
+        "404_not_found": "NOT_FOUND",
+        "timeout": "TIMEOUT",
+        "auth_required": "AUTH_REQUIRED",
+        "canvas_auth_required": "AUTH_REQUIRED",
+        "forbidden": "FORBIDDEN",
+        "ssl_error": "SSL_ERROR",
+        "dns_error": "DNS_ERROR",
+        "network_error": "NETWORK_ERROR",
+        "invalid_url": "INVALID_URL",
+        "unknown": "UNKNOWN",
+    }
+    return mapping.get(normalized, value.strip().upper() if isinstance(value, str) and value.strip() else "UNKNOWN")
+
+
+def load_inventory_breakdown(settings: Settings, job_id: str) -> dict[str, Any]:
     try:
         items = load_inventory_file(settings, job_id)
     except (FileNotFoundError, ValueError):
-        return [], 0, 0
+        return {
+            "auxiliaryResources": [],
+            "noAnalizablesExternos": 0,
+            "tecnicosIgnorados": 0,
+            "globalUnplacedCount": 0,
+            "noAccessCount": 0,
+            "noAccessByReason": {},
+        }
 
     auxiliary_resources = [
         _build_auxiliary_resource(item)
         for item in items
         if getattr(item, "analysis_category", ANALYSIS_CATEGORY_MAIN) == ANALYSIS_CATEGORY_NON_ANALYZABLE_EXTERNAL
+    ]
+    main_items = [
+        item for item in items if getattr(item, "analysis_category", ANALYSIS_CATEGORY_MAIN) == ANALYSIS_CATEGORY_MAIN
     ]
     excluded_extensions = _normalized_excluded_extensions(settings)
     technical_from_payload = sum(
@@ -676,7 +709,26 @@ def load_inventory_breakdown(settings: Settings, job_id: str) -> tuple[list[Auxi
         technical_from_payload,
         _technical_ignored_count(settings, job_id, excluded_extensions=excluded_extensions),
     )
-    return auxiliary_resources, len(auxiliary_resources), technical_ignored
+    global_unplaced_count = sum(
+        1 for item in main_items if getattr(item, "section_type", None) == GLOBAL_UNPLACED_SECTION_TYPE
+    )
+    no_access_items = [
+        item
+        for item in main_items
+        if _enum_value(getattr(item, "access_status", None)) == "NO_ACCEDE"
+    ]
+    no_access_by_reason: dict[str, int] = {}
+    for item in no_access_items:
+        reason_code = _normalized_no_access_reason_code(getattr(item, "reason_code", None))
+        no_access_by_reason[reason_code] = no_access_by_reason.get(reason_code, 0) + 1
+    return {
+        "auxiliaryResources": auxiliary_resources,
+        "noAnalizablesExternos": len(auxiliary_resources),
+        "tecnicosIgnorados": technical_ignored,
+        "globalUnplacedCount": global_unplaced_count,
+        "noAccessCount": len(no_access_items),
+        "noAccessByReason": no_access_by_reason,
+    }
 
 
 def _normalize_offline_inventory(
@@ -734,6 +786,7 @@ def _normalize_offline_inventory(
         section_key = section_key_from_path(module_path) if module_path else None
         if not section_key and section_title:
             section_key = build_section_key(section_title)
+        section_type = STRUCTURED_SECTION_TYPE if module_path else GLOBAL_UNPLACED_SECTION_TYPE
 
         downloadable = resource.get("downloadable")
         if not isinstance(downloadable, bool):
@@ -766,6 +819,8 @@ def _normalize_offline_inventory(
         normalized["sectionTitle"] = section_title
         normalized["section_key"] = section_key
         normalized["sectionKey"] = section_key
+        normalized["section_type"] = section_type
+        normalized["sectionType"] = section_type
         normalized["downloadable"] = downloadable
         normalized["canDownload"] = bool(resource.get("canDownload")) or downloadable
         normalized["can_download"] = normalized["canDownload"]

@@ -56,6 +56,15 @@ DOWNLOADABLE_EXTENSIONS = {
 HTML_EXTENSIONS = {".html", ".htm", ".xhtml"}
 IGNORED_DISCOVERY_EXTENSIONS = {".xml", ".xsd", ".dtd", ".qti", ".imsmanifest"}
 SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu")
+NO_ACCESS_REASON_NOT_FOUND = "NOT_FOUND"
+NO_ACCESS_REASON_TIMEOUT = "TIMEOUT"
+NO_ACCESS_REASON_AUTH_REQUIRED = "AUTH_REQUIRED"
+NO_ACCESS_REASON_FORBIDDEN = "FORBIDDEN"
+NO_ACCESS_REASON_SSL_ERROR = "SSL_ERROR"
+NO_ACCESS_REASON_DNS_ERROR = "DNS_ERROR"
+NO_ACCESS_REASON_NETWORK_ERROR = "NETWORK_ERROR"
+NO_ACCESS_REASON_INVALID_URL = "INVALID_URL"
+NO_ACCESS_REASON_UNKNOWN = "UNKNOWN"
 
 
 @dataclass(slots=True, frozen=True)
@@ -791,10 +800,8 @@ def _merge_analysis(
     mode: str,
 ) -> None:
     http_status = access.http_status if access.http_status is not None else download.http_status
-    error_message = access.error_message or download.error_message
-    reason_code = access.details.get("reason") if isinstance(access.details, dict) else None
-    if not isinstance(reason_code, str) or not reason_code.strip():
-        reason_code = access.access_status if access.access_status != ACCESS_STATUS_OK else None
+    reason_code = _normalize_no_access_reason_code(access, http_status=http_status)
+    error_message = _normalized_reason_detail(access, download, http_status=http_status, reason_code=reason_code)
 
     resource["canAccess"] = access.can_access
     resource["can_access"] = access.can_access
@@ -906,6 +913,83 @@ def _url_result_message(result: UrlCheckResult, access_status: str) -> str | Non
     if result.status_code is not None:
         return f"La URL devolvió {result.status_code}."
     return "No se ha podido acceder a la URL."
+
+
+def _normalize_no_access_reason_code(access: AccessProbeResult, *, http_status: int | None) -> str | None:
+    if access.access_status != ACCESS_STATUS_NO_ACCEDE:
+        return None
+
+    reason = access.details.get("reason") if isinstance(access.details, dict) else None
+    normalized_reason = str(reason or "").strip().lower()
+
+    if normalized_reason in {"404_not_found", "not_found"} or http_status == 404:
+        return NO_ACCESS_REASON_NOT_FOUND
+    if normalized_reason == "timeout":
+        return NO_ACCESS_REASON_TIMEOUT
+    if normalized_reason in {"canvas_auth_required", "auth_required"} or http_status == 401:
+        return NO_ACCESS_REASON_AUTH_REQUIRED
+    if normalized_reason == "forbidden" or http_status == 403:
+        return NO_ACCESS_REASON_FORBIDDEN
+    if normalized_reason in {"ssl_error", "tls_error", "certificate_error"}:
+        return NO_ACCESS_REASON_SSL_ERROR
+    if normalized_reason in {"dns_error", "name_not_resolved"}:
+        return NO_ACCESS_REASON_DNS_ERROR
+    if normalized_reason in {"invalid_url", "unsupported_protocol"}:
+        return NO_ACCESS_REASON_INVALID_URL
+
+    detail_text = " ".join(
+        part.strip().lower()
+        for part in (access.error_message, access.details.get("code") if isinstance(access.details, dict) else None)
+        if isinstance(part, str) and part.strip()
+    )
+    if any(marker in detail_text for marker in ("ssl", "certificate", "tls")):
+        return NO_ACCESS_REASON_SSL_ERROR
+    if any(marker in detail_text for marker in ("dns", "name or service not known", "name not resolved")):
+        return NO_ACCESS_REASON_DNS_ERROR
+    if any(marker in detail_text for marker in ("invalid url", "unsupported protocol")):
+        return NO_ACCESS_REASON_INVALID_URL
+    if normalized_reason in {"request_error", "network_error", "connect_error", "read_error", "write_error"} or detail_text:
+        return NO_ACCESS_REASON_NETWORK_ERROR
+    return NO_ACCESS_REASON_UNKNOWN
+
+
+def _normalized_reason_detail(
+    access: AccessProbeResult,
+    download: DownloadProbeResult,
+    *,
+    http_status: int | None,
+    reason_code: str | None,
+) -> str | None:
+    detail = access.error_message or download.error_message
+    if detail:
+        return detail
+
+    if access.access_status == ACCESS_STATUS_OK:
+        return None
+    if access.access_status == ACCESS_STATUS_REQUIRES_SSO:
+        return "El recurso redirige a un acceso SSO y no puede validarse automáticamente."
+    if access.access_status == ACCESS_STATUS_REQUIRES_INTERACTION:
+        return "El recurso requiere interacción manual para acceder."
+    if access.access_status != ACCESS_STATUS_NO_ACCEDE:
+        return "No se pudo determinar el estado de acceso del recurso."
+
+    if reason_code == NO_ACCESS_REASON_NOT_FOUND:
+        return "La URL o el recurso devolvió 404 y no se encontró."
+    if reason_code == NO_ACCESS_REASON_TIMEOUT:
+        return "La comprobación de acceso agotó el tiempo de espera."
+    if reason_code == NO_ACCESS_REASON_AUTH_REQUIRED:
+        return f"El recurso requiere autenticación y devolvió {http_status or 401}."
+    if reason_code == NO_ACCESS_REASON_FORBIDDEN:
+        return f"El acceso al recurso fue rechazado con {http_status or 403}."
+    if reason_code == NO_ACCESS_REASON_SSL_ERROR:
+        return "La conexión falló por un problema SSL/TLS."
+    if reason_code == NO_ACCESS_REASON_DNS_ERROR:
+        return "No se pudo resolver el dominio del recurso."
+    if reason_code == NO_ACCESS_REASON_INVALID_URL:
+        return "La URL del recurso no es válida o no puede interpretarse."
+    if reason_code == NO_ACCESS_REASON_NETWORK_ERROR:
+        return "La comprobación de acceso falló por un problema de red."
+    return "Se intentó acceder al recurso, pero no fue posible determinar un motivo más preciso."
 
 
 def _build_discovered_resource(

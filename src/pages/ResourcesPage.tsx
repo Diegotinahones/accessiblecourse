@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { LayoutSimple } from '../components/LayoutSimple';
 import {
-  fetchResources,
-  getResourceDownloadUrl,
-  api,
-} from '../lib/api';
-import type { AppMode, CourseStructure, CourseStructureNode, ResourceListItem } from '../lib/types';
+  Link,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from 'react-router-dom';
+import { LayoutSimple } from '../components/LayoutSimple';
+import { fetchResources, getResourceDownloadUrl, api } from '../lib/api';
+import type {
+  AppMode,
+  CourseStructure,
+  CourseStructureNode,
+  ResourceListItem,
+} from '../lib/types';
 import { getReviewResourceTypeLabel } from '../lib/types';
 import {
   getModeSearch,
@@ -20,7 +26,43 @@ type BadgeTone = 'ok' | 'warning' | 'danger' | 'neutral';
 interface ResourceGroup {
   id: string;
   section: string;
+  description?: string;
+  isGlobalUnplaced?: boolean;
   resources: ResourceListItem[];
+}
+
+interface BackendResourceCounts {
+  globalUnplacedCount: number | null;
+  noAccessCount: number | null;
+}
+
+const GLOBAL_UNPLACED_SECTION_LABEL =
+  'Recursos globales o no ubicados en la estructura del curso';
+const GLOBAL_UNPLACED_SECTION_DESCRIPTION =
+  'Recursos incluidos en el paquete, pero no asociados claramente a un módulo o PEC.';
+
+function normalizeComparableText(value: string | null | undefined) {
+  return value?.trim().toLocaleLowerCase('es-ES') ?? '';
+}
+
+function isGlobalUnplacedValue(value: string | null | undefined) {
+  const normalizedValue = normalizeComparableText(value);
+  return (
+    normalizedValue === 'global_unplaced' ||
+    normalizedValue === 'sin sección' ||
+    normalizedValue === 'sin seccion'
+  );
+}
+
+function getGlobalUnplacedMetadata(isGlobalUnplaced: boolean) {
+  if (!isGlobalUnplaced) {
+    return {};
+  }
+
+  return {
+    description: GLOBAL_UNPLACED_SECTION_DESCRIPTION,
+    isGlobalUnplaced: true,
+  };
 }
 
 function getAccessLabel(resource: ResourceListItem) {
@@ -30,7 +72,9 @@ function getAccessLabel(resource: ResourceListItem) {
   if (resource.accessStatus === 'REQUIERE_SSO') {
     return 'REQUIERE SSO';
   }
-  return resource.canAccess && resource.accessStatus === 'OK' ? 'OK' : 'NO ACCEDE';
+  return resource.canAccess && resource.accessStatus === 'OK'
+    ? 'OK'
+    : 'NO ACCEDE';
 }
 
 function getAccessTone(resource: ResourceListItem): BadgeTone {
@@ -49,7 +93,7 @@ function getAccessTone(resource: ResourceListItem): BadgeTone {
 }
 
 function getDownloadLabel(resource: ResourceListItem) {
-  return resource.canDownload ? 'DESCARGABLE' : 'NO DESCARGABLE';
+  return resource.canDownload ? 'sí' : 'no';
 }
 
 function getDownloadTone(resource: ResourceListItem): BadgeTone {
@@ -76,11 +120,69 @@ function getStatusClasses(tone: BadgeTone) {
 }
 
 function getSectionLabel(resource: ResourceListItem) {
-  return resource.modulePath || resource.coursePath || 'Sin sección';
+  const sectionName =
+    resource.sectionTitle ||
+    resource.moduleTitle ||
+    resource.modulePath ||
+    resource.coursePath;
+
+  if (
+    isGlobalUnplacedValue(resource.sectionType) ||
+    isGlobalUnplacedValue(sectionName)
+  ) {
+    return GLOBAL_UNPLACED_SECTION_LABEL;
+  }
+
+  return sectionName || GLOBAL_UNPLACED_SECTION_LABEL;
+}
+
+function isNoAccessResource(resource: ResourceListItem) {
+  return getAccessLabel(resource) === 'NO ACCEDE';
+}
+
+function getNoAccessReason(resource: ResourceListItem) {
+  if (resource.reasonCode) {
+    return resource.reasonCode;
+  }
+
+  if (typeof resource.httpStatus === 'number') {
+    return `http_${resource.httpStatus}`;
+  }
+
+  if (resource.urlStatus) {
+    return resource.urlStatus;
+  }
+
+  if (resource.accessStatus && resource.accessStatus !== 'OK') {
+    return resource.accessStatus.toLocaleLowerCase('es-ES');
+  }
+
+  return 'no_access';
+}
+
+function getNoAccessDetail(resource: ResourceListItem) {
+  return (
+    resource.reasonDetail ||
+    resource.errorMessage ||
+    resource.accessNote ||
+    null
+  );
+}
+
+function hasTechnicalDetails(resource: ResourceListItem) {
+  return typeof resource.httpStatus === 'number' || Boolean(resource.finalUrl);
+}
+
+function toSectionDomId(sectionId: string) {
+  return `section-${sectionId.replace(/[^a-zA-Z0-9_-]+/g, '-').toLowerCase()}`;
 }
 
 function isDownloadable(resource: ResourceListItem, mode: AppMode) {
-  return mode === 'offline' && resource.canDownload && Boolean(resource.filePath || resource.localPath || resource.path);
+  return (
+    mode === 'offline' &&
+    resource.canDownload &&
+    Boolean(resource.filePath || resource.localPath || resource.path)
+  );
 }
 
 function buildGroupsByPath(resources: ResourceListItem[]): ResourceGroup[] {
@@ -100,6 +202,7 @@ function buildGroupsByPath(resources: ResourceListItem[]): ResourceGroup[] {
   return Array.from(groups.entries()).map(([section, sectionResources]) => ({
     id: section,
     section,
+    ...getGlobalUnplacedMetadata(section === GLOBAL_UNPLACED_SECTION_LABEL),
     resources: sectionResources,
   }));
 }
@@ -128,7 +231,9 @@ function buildGroupsFromStructure(
   structure: CourseStructure,
   resources: ResourceListItem[],
 ): ResourceGroup[] {
-  const resourcesById = new Map(resources.map((resource) => [resource.id, resource]));
+  const resourcesById = new Map(
+    resources.map((resource) => [resource.id, resource]),
+  );
   const groupedResourceIds = new Set<string>();
   const groups: ResourceGroup[] = [];
 
@@ -150,18 +255,28 @@ function buildGroupsFromStructure(
         return;
       }
 
-      sectionResources.forEach((resource) => groupedResourceIds.add(resource.id));
+      sectionResources.forEach((resource) =>
+        groupedResourceIds.add(resource.id),
+      );
+      const section = isGlobalUnplacedValue(node.title)
+        ? GLOBAL_UNPLACED_SECTION_LABEL
+        : node.title;
       groups.push({
         id: node.nodeId,
-        section: node.title,
+        section,
+        ...getGlobalUnplacedMetadata(section === GLOBAL_UNPLACED_SECTION_LABEL),
         resources: sectionResources,
       });
     });
 
     if (directResources.length > 0) {
+      const section = isGlobalUnplacedValue(organization.title)
+        ? GLOBAL_UNPLACED_SECTION_LABEL
+        : organization.title;
       groups.push({
         id: `${organization.nodeId}-direct`,
-        section: organization.title,
+        section,
+        ...getGlobalUnplacedMetadata(section === GLOBAL_UNPLACED_SECTION_LABEL),
         resources: directResources,
       });
     }
@@ -176,12 +291,15 @@ function buildGroupsFromStructure(
   if (unplacedResources.length > 0) {
     groups.push({
       id: 'unplaced-resources',
-      section: 'Sin sección',
+      section: GLOBAL_UNPLACED_SECTION_LABEL,
+      ...getGlobalUnplacedMetadata(true),
       resources: unplacedResources,
     });
   }
 
-  const remainingResources = resources.filter((resource) => !groupedResourceIds.has(resource.id));
+  const remainingResources = resources.filter(
+    (resource) => !groupedResourceIds.has(resource.id),
+  );
   if (remainingResources.length > 0) {
     groups.push(...buildGroupsByPath(remainingResources));
   }
@@ -195,14 +313,20 @@ export function ResourcesPage() {
   const [searchParams] = useSearchParams();
   const [resources, setResources] = useState<ResourceListItem[]>([]);
   const [structure, setStructure] = useState<CourseStructure | null>(null);
-  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  const [backendCounts, setBackendCounts] = useState<BackendResourceCounts>({
+    globalUnplacedCount: null,
+    noAccessCount: null,
+  });
+  const [expandedSections, setExpandedSections] = useState<
+    Record<string, boolean>
+  >({});
   const [isLoading, setIsLoading] = useState(true);
   const [isRetrying, setIsRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const modeParam = searchParams.get('mode');
   const appMode: AppMode = isAppMode(modeParam)
     ? modeParam
-    : loadRememberedAppMode() ?? 'offline';
+    : (loadRememberedAppMode() ?? 'offline');
 
   useEffect(() => {
     rememberAppMode(appMode);
@@ -229,6 +353,16 @@ export function ResourcesPage() {
 
         setResources(payload.resources);
         setStructure(payload.structure);
+        setBackendCounts({
+          globalUnplacedCount:
+            typeof payload.globalUnplacedCount === 'number'
+              ? payload.globalUnplacedCount
+              : null,
+          noAccessCount:
+            typeof payload.noAccessCount === 'number'
+              ? payload.noAccessCount
+              : null,
+        });
       } catch (caughtError) {
         if (!cancelled) {
           setError(
@@ -262,12 +396,11 @@ export function ResourcesPage() {
     () => resources.filter((resource) => resource.accessStatus === 'OK').length,
     [resources],
   );
-  const requiresInteractionCount = useMemo(
-    () => resources.filter((resource) => resource.accessStatus === 'REQUIERE_INTERACCION').length,
-    [resources],
-  );
-  const requiresSsoCount = useMemo(
-    () => resources.filter((resource) => resource.accessStatus === 'REQUIERE_SSO').length,
+  const inaccessibleCount = useMemo(
+    () =>
+      resources.filter(
+        (resource) => !resource.canAccess || isNoAccessResource(resource),
+      ).length,
     [resources],
   );
   const downloadableCount = useMemo(
@@ -275,9 +408,25 @@ export function ResourcesPage() {
     [resources],
   );
   const accessibleDownloadableCount = useMemo(
-    () => resources.filter((resource) => resource.canAccess && resource.canDownload).length,
+    () =>
+      resources.filter((resource) => resource.canAccess && resource.canDownload)
+        .length,
     [resources],
   );
+  const globalUnplacedCount = useMemo(
+    () =>
+      groups
+        .filter((group) => group.isGlobalUnplaced)
+        .reduce((total, group) => total + group.resources.length, 0),
+    [groups],
+  );
+  const displayedInaccessibleCount =
+    backendCounts.noAccessCount ?? inaccessibleCount;
+  const displayedGlobalUnplacedCount =
+    backendCounts.globalUnplacedCount ?? globalUnplacedCount;
+  const shouldShowGlobalUnplacedCount =
+    backendCounts.globalUnplacedCount !== null ||
+    displayedGlobalUnplacedCount > 0;
 
   const handleRetryAnalysis = async () => {
     if (!jobId) {
@@ -293,7 +442,9 @@ export function ResourcesPage() {
       setIsRetrying(true);
       setError(null);
       await api.retryJob(jobId);
-      navigate(`/analyzing/${jobId}${getModeSearch('offline')}`, { replace: true });
+      navigate(`/analyzing/${jobId}${getModeSearch('offline')}`, {
+        replace: true,
+      });
     } catch (caughtError) {
       setError(
         caughtError instanceof Error
@@ -334,24 +485,31 @@ export function ResourcesPage() {
         </section>
       ) : (
         <div className="space-y-6">
-          <section className="card-panel space-y-3 p-5">
-            <h2 className="text-lg font-semibold text-ink">Resumen del acceso</h2>
+          <section aria-live="polite" className="card-panel space-y-3 p-5">
+            <h2 className="text-lg font-semibold text-ink">
+              Resumen del acceso
+            </h2>
             <p className="text-base text-ink">
               Se ha accedido a {accessedCount} de {resources.length} recursos.
             </p>
             <p className="text-base text-ink">
-              Requieren interacción: {requiresInteractionCount}.
+              Descargables: {downloadableCount} ({accessibleDownloadableCount}{' '}
+              accesibles).
             </p>
             <p className="text-base text-ink">
-              Requieren SSO: {requiresSsoCount}.
+              No accesibles: {displayedInaccessibleCount}.
             </p>
-            <p className="text-base text-ink">
-              Descargables: {downloadableCount} ({accessibleDownloadableCount} accesibles).
-            </p>
+            {shouldShowGlobalUnplacedCount ? (
+              <p className="text-base text-ink">
+                Recursos globales/no ubicados: {displayedGlobalUnplacedCount}.
+              </p>
+            ) : null}
           </section>
 
           <section className="space-y-4">
-            <h2 className="text-xl font-semibold text-ink">Recursos por módulo o sección</h2>
+            <h2 className="text-xl font-semibold text-ink">
+              Recursos por módulo o sección
+            </h2>
 
             {groups.length === 0 ? (
               <div className="card-panel p-6 text-sm text-subtle">
@@ -360,13 +518,20 @@ export function ResourcesPage() {
             ) : (
               groups.map((group) => {
                 const isExpanded = expandedSections[group.id] ?? false;
-                const sectionId = `section-${group.id.replace(/\s+/g, '-').toLowerCase()}`;
+                const sectionId = toSectionDomId(group.id);
+                const sectionDescriptionId = `${sectionId}-description`;
 
                 return (
-                  <section className="card-panel overflow-hidden" key={group.id}>
+                  <section
+                    className="card-panel overflow-hidden"
+                    key={group.id}
+                  >
                     <h3>
                       <button
                         aria-controls={sectionId}
+                        aria-describedby={
+                          group.description ? sectionDescriptionId : undefined
+                        }
                         aria-expanded={isExpanded}
                         className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
                         onClick={() => toggleSection(group.id)}
@@ -378,6 +543,14 @@ export function ResourcesPage() {
                         </span>
                       </button>
                     </h3>
+                    {group.description ? (
+                      <p
+                        className="px-5 pb-4 text-sm leading-6 text-subtle sm:px-6"
+                        id={sectionDescriptionId}
+                      >
+                        {group.description}
+                      </p>
+                    ) : null}
 
                     <div
                       className="border-t border-line"
@@ -388,6 +561,10 @@ export function ResourcesPage() {
                         {group.resources.map((resource) => {
                           const accessLabel = getAccessLabel(resource);
                           const downloadLabel = getDownloadLabel(resource);
+                          const isNoAccess = isNoAccessResource(resource);
+                          const reasonDetail = getNoAccessDetail(resource);
+                          const showTechnicalDetails =
+                            hasTechnicalDetails(resource);
                           const downloadable = jobId
                             ? isDownloadable(resource, appMode)
                             : false;
@@ -402,32 +579,78 @@ export function ResourcesPage() {
                                   {resource.title}
                                 </p>
                                 <div className="flex flex-wrap gap-2 text-sm">
-                                  <span
-                                    aria-label={`Acceso ${accessLabel}`}
-                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getAccessTone(resource))}`}
-                                  >
-                                    {accessLabel}
-                                  </span>
-                                  <span
-                                    aria-label={`Descarga ${downloadLabel}`}
-                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getDownloadTone(resource))}`}
-                                  >
-                                    {downloadLabel}
-                                  </span>
-                                  <span
-                                    aria-label={`Tipo ${getReviewResourceTypeLabel(resource.type)}`}
-                                    className="inline-flex rounded-full border border-line bg-[#f7faf7] px-3 py-1 font-medium text-subtle"
-                                  >
+                                  <span className="inline-flex rounded-full border border-line bg-[#f7faf7] px-3 py-1 font-medium text-subtle">
+                                    Tipo:{' '}
                                     {getReviewResourceTypeLabel(resource.type)}
                                   </span>
+                                  <span
+                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getAccessTone(resource))}`}
+                                  >
+                                    Estado: {accessLabel}
+                                  </span>
+                                  <span
+                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getDownloadTone(resource))}`}
+                                  >
+                                    Descargable: {downloadLabel}
+                                  </span>
                                 </div>
+
+                                {isNoAccess ? (
+                                  <div className="space-y-1 text-sm leading-6 text-ink">
+                                    <p>
+                                      <span className="font-semibold">
+                                        Motivo:
+                                      </span>{' '}
+                                      {getNoAccessReason(resource)}
+                                    </p>
+                                    {reasonDetail ? (
+                                      <p>
+                                        <span className="font-semibold">
+                                          Detalle:
+                                        </span>{' '}
+                                        {reasonDetail}
+                                      </p>
+                                    ) : null}
+                                    {showTechnicalDetails ? (
+                                      <details className="mt-2 rounded-xl border border-line bg-white px-3 py-2">
+                                        <summary className="cursor-pointer font-semibold text-ink focus:outline-none focus-visible:rounded-md focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2">
+                                          Más detalles
+                                        </summary>
+                                        <dl className="mt-2 space-y-2 text-sm text-subtle">
+                                          {typeof resource.httpStatus ===
+                                          'number' ? (
+                                            <div>
+                                              <dt className="font-semibold text-ink">
+                                                Estado HTTP
+                                              </dt>
+                                              <dd>{resource.httpStatus}</dd>
+                                            </div>
+                                          ) : null}
+                                          {resource.finalUrl ? (
+                                            <div>
+                                              <dt className="font-semibold text-ink">
+                                                URL final
+                                              </dt>
+                                              <dd className="break-all">
+                                                {resource.finalUrl}
+                                              </dd>
+                                            </div>
+                                          ) : null}
+                                        </dl>
+                                      </details>
+                                    ) : null}
+                                  </div>
+                                ) : null}
                               </div>
 
                               {downloadable && jobId ? (
                                 <a
                                   aria-label={`Descargar ${resource.title}`}
                                   className="button-secondary w-full sm:w-auto"
-                                  href={getResourceDownloadUrl(jobId, resource.id)}
+                                  href={getResourceDownloadUrl(
+                                    jobId,
+                                    resource.id,
+                                  )}
                                 >
                                   Descargar
                                 </a>

@@ -197,6 +197,7 @@ class ResourceListItemRead(StrictModel):
     moduleTitle: str | None = None
     sectionTitle: str | None = None
     sectionKey: str | None = None
+    sectionType: str | None = None
     itemPath: str | None = None
     status: ReviewResourceHealthStatus
     urlStatus: str | None = None
@@ -272,6 +273,9 @@ class AccessSummaryRead(StrictModel):
     groups: list[AccessSummaryGroupRead] = Field(default_factory=list)
     noAnalizablesExternos: int = 0
     tecnicosIgnorados: int = 0
+    globalUnplacedCount: int = 0
+    noAccessCount: int = 0
+    noAccessByReason: dict[str, int] = Field(default_factory=dict)
     discovered: int = 0
     deepScan: dict[str, Any] | None = None
 
@@ -316,9 +320,12 @@ class AuxiliaryResourceRead(StrictModel):
     moduleTitle: str | None = None
     sectionTitle: str | None = None
     sectionKey: str | None = None
+    sectionType: str | None = None
     itemPath: str | None = None
     status: str | None = None
     accessStatus: str | None = None
+    finalUrl: str | None = None
+    httpStatus: int | None = None
     canAccess: bool = False
     canDownload: bool = False
     accessNote: str | None = None
@@ -334,6 +341,9 @@ class ResourceListPayload(StrictModel):
     totalAnalizables: int = 0
     noAnalizablesExternos: int = 0
     tecnicosIgnorados: int = 0
+    globalUnplacedCount: int = 0
+    noAccessCount: int = 0
+    noAccessByReason: dict[str, int] = Field(default_factory=dict)
     nonAnalyzableExternalResources: list[AuxiliaryResourceRead] = Field(default_factory=list)
     reviewSession: ReviewSessionRead
     structure: "CourseStructureRead"

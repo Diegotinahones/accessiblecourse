@@ -566,8 +566,12 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert link_resource["accessStatus"] == "NO_ACCEDE"
     assert link_resource["httpStatus"] == 404
     assert link_resource["canDownload"] is False
+    assert link_resource["reasonCode"] == "NOT_FOUND"
+    assert link_resource["reasonDetail"] == "La URL devolvió 404."
     assert link_resource["errorMessage"] == "La URL devolvió 404."
     assert "broken_link" in link_resource["notes"]
+    assert resources_payload["noAccessCount"] == 1
+    assert resources_payload["noAccessByReason"] == {"NOT_FOUND": 1}
 
     broken_only_response = client.get(f"/api/jobs/{job_id}/resources?onlyBroken=true")
     assert broken_only_response.status_code == 200, broken_only_response.text
@@ -589,6 +593,8 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
         "REQUIERE_INTERACCION": 0,
         "REQUIERE_SSO": 0,
     }
+    assert access_summary["noAccessCount"] == 1
+    assert access_summary["noAccessByReason"] == {"NOT_FOUND": 1}
     assert access_summary["groups"][0]["modulePath"] == "Tema 1"
 
     access_response = client.get(f"/api/jobs/{job_id}/access")
@@ -700,9 +706,14 @@ def test_offline_inventory_returns_unmapped_resources_without_technical_grouping
 
     assert mapped_resource["modulePath"] == "Bloque 1"
     assert mapped_resource["itemPath"] == "Bloque 1 > Guía principal"
+    assert mapped_resource["sectionType"] == "structured"
     assert unmapped_resource["modulePath"] is None
     assert unmapped_resource["coursePath"] is None
     assert unmapped_resource["itemPath"] is None
+    assert unmapped_resource["sectionType"] == "global_unplaced"
+    assert payload["globalUnplacedCount"] == 1
+    assert payload["noAccessCount"] == 0
+    assert payload["noAccessByReason"] == {}
 
 
 def test_offline_deep_scan_discovers_nested_local_and_external_resources(client, monkeypatch) -> None:
@@ -831,14 +842,18 @@ def test_offline_deep_scan_keeps_discovered_links_inside_existing_pec_section(cl
     assert by_title["Brief de la PEC"]["parentResourceId"] == "res-html"
     assert by_title["¿Cómo citar la IA…"]["discovered"] is True
     assert by_title["¿Cómo citar la IA…"]["parentResourceId"] == "res-html"
-    assert by_title["¿Cómo citar la IA…"]["reasonCode"] == "404_not_found"
+    assert by_title["¿Cómo citar la IA…"]["reasonCode"] == "NOT_FOUND"
     assert by_title["¿Cómo citar la IA…"]["reasonDetail"] == "La URL devolvió 404."
+    assert payload["noAccessCount"] == 1
+    assert payload["noAccessByReason"] == {"NOT_FOUND": 1}
 
     access_response = client.get(f"/api/jobs/{job_id}/access")
     assert access_response.status_code == 200, access_response.text
     access_payload = access_response.json()
     assert len(access_payload["modules"]) == 1
     assert access_payload["modules"][0]["modulePath"] == "PEC 1: Actividad inicial"
+    assert access_payload["summary"]["noAccessCount"] == 1
+    assert access_payload["summary"]["noAccessByReason"] == {"NOT_FOUND": 1}
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

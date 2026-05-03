@@ -21,7 +21,10 @@ import type {
 import { buildStepMessage } from './utils';
 
 const API_BASE_URL =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api';
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(
+    /\/$/,
+    '',
+  ) ?? '/api';
 
 interface JobCreatedResponse {
   jobId: string;
@@ -119,7 +122,9 @@ function uploadRequest<T>(
         return;
       }
 
-      options.onProgress(Math.min(100, Math.round((event.loaded / total) * 100)));
+      options.onProgress(
+        Math.min(100, Math.round((event.loaded / total) * 100)),
+      );
     });
 
     xhr.onerror = () => {
@@ -170,7 +175,9 @@ function normalizeOnlineCourse(course: RawOnlineCourse): OnlineCourse {
   };
 }
 
-function normalizeReviewType(type: string | null | undefined): ReviewResourceType {
+function normalizeReviewType(
+  type: string | null | undefined,
+): ReviewResourceType {
   const value = (type ?? 'OTHER').toUpperCase();
 
   if (value === 'WEB') {
@@ -192,7 +199,9 @@ function normalizeReviewType(type: string | null | undefined): ReviewResourceTyp
   return 'OTHER';
 }
 
-function normalizeHealthStatus(status: string | null | undefined): ReviewResourceHealthStatus {
+function normalizeHealthStatus(
+  status: string | null | undefined,
+): ReviewResourceHealthStatus {
   const value = (status ?? 'OK').toUpperCase();
   if (value === 'WARN' || value === 'AVISO' || value === 'WARNING') {
     return 'WARN';
@@ -219,6 +228,9 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
   const downloadUrl = item.downloadUrl ?? null;
   const filePath = item.filePath ?? item.localPath ?? item.path ?? null;
   const modulePath = item.modulePath ?? item.coursePath ?? null;
+  const moduleTitle = item.moduleTitle ?? null;
+  const sectionTitle = item.sectionTitle ?? null;
+  const sectionKey = item.sectionKey ?? null;
   const itemPath = item.itemPath ?? null;
 
   return {
@@ -235,34 +247,46 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
     filePath,
     coursePath: modulePath,
     modulePath,
+    moduleTitle,
+    sectionTitle,
+    sectionKey,
+    sectionType: item.sectionType ?? null,
     itemPath,
     urlStatus: item.urlStatus ?? null,
     finalUrl: item.finalUrl ?? sourceUrl,
     checkedAt: item.checkedAt ?? null,
     canAccess: item.canAccess ?? item.accessStatus === 'OK',
-    accessStatus: item.accessStatus ?? (item.status === 'ERROR' ? 'ERROR' : 'OK'),
+    accessStatus:
+      item.accessStatus ?? (item.status === 'ERROR' ? 'ERROR' : 'OK'),
     httpStatus: item.httpStatus ?? null,
     accessStatusCode: item.accessStatusCode ?? item.httpStatus ?? null,
     canDownload: item.canDownload ?? false,
-    downloadStatus: item.downloadStatus ?? (item.canDownload ? 'OK' : 'NO_DESCARGABLE'),
+    downloadStatus:
+      item.downloadStatus ?? (item.canDownload ? 'OK' : 'NO_DESCARGABLE'),
     downloadStatusCode: item.downloadStatusCode ?? null,
     discoveredChildrenCount: item.discoveredChildrenCount ?? 0,
     parentResourceId: item.parentResourceId ?? null,
     discovered: item.discovered ?? false,
     accessNote: item.accessNote ?? item.errorMessage ?? null,
     errorMessage: item.errorMessage ?? null,
+    reasonCode: item.reasonCode ?? null,
+    reasonDetail: item.reasonDetail ?? item.errorMessage ?? null,
     notes: item.notes ?? null,
     failCount: item.failCount ?? 0,
   };
 }
 
-function normalizeCourseStructureNode(node: CourseStructureNode): CourseStructureNode {
+function normalizeCourseStructureNode(
+  node: CourseStructureNode,
+): CourseStructureNode {
   return {
     nodeId: node.nodeId ?? node.identifier ?? node.resourceId ?? node.title,
     identifier: node.identifier ?? null,
     title: node.title,
     resourceId: node.resourceId ?? null,
-    children: Array.isArray(node.children) ? node.children.map(normalizeCourseStructureNode) : [],
+    children: Array.isArray(node.children)
+      ? node.children.map(normalizeCourseStructureNode)
+      : [],
   };
 }
 
@@ -270,7 +294,8 @@ function normalizeCourseStructureOrganization(
   organization: CourseStructureOrganization,
 ): CourseStructureOrganization {
   return {
-    nodeId: organization.nodeId ?? organization.identifier ?? organization.title,
+    nodeId:
+      organization.nodeId ?? organization.identifier ?? organization.title,
     identifier: organization.identifier ?? null,
     title: organization.title,
     children: Array.isArray(organization.children)
@@ -279,7 +304,9 @@ function normalizeCourseStructureOrganization(
   };
 }
 
-function normalizeCourseStructure(structure: CourseStructure | null | undefined): CourseStructure {
+function normalizeCourseStructure(
+  structure: CourseStructure | null | undefined,
+): CourseStructure {
   if (!structure || !Array.isArray(structure.organizations)) {
     return {
       title: 'Estructura del curso',
@@ -290,16 +317,22 @@ function normalizeCourseStructure(structure: CourseStructure | null | undefined)
 
   return {
     title: structure.title ?? 'Estructura del curso',
-    organizations: structure.organizations.map(normalizeCourseStructureOrganization),
+    organizations: structure.organizations.map(
+      normalizeCourseStructureOrganization,
+    ),
     unplacedResourceIds: Array.isArray(structure.unplacedResourceIds)
-      ? structure.unplacedResourceIds.filter((resourceId): resourceId is string => typeof resourceId === 'string')
+      ? structure.unplacedResourceIds.filter(
+          (resourceId): resourceId is string => typeof resourceId === 'string',
+        )
       : [],
   };
 }
 
 function normalizeJobStatus(payload: RawJobStatusResponse): JobStatus {
   const normalizedStatus =
-    payload.status === 'created' || payload.status === 'pending' || payload.status === 'running'
+    payload.status === 'created' ||
+    payload.status === 'pending' ||
+    payload.status === 'running'
       ? 'processing'
       : payload.status;
   const totalSteps = payload.totalSteps ?? 5;
@@ -307,7 +340,10 @@ function normalizeJobStatus(payload: RawJobStatusResponse): JobStatus {
     payload.currentStep ??
     Math.min(
       totalSteps,
-      Math.max(1, Math.ceil(Math.max(payload.progress, 1) / (100 / totalSteps))),
+      Math.max(
+        1,
+        Math.ceil(Math.max(payload.progress, 1) / (100 / totalSteps)),
+      ),
     );
   let phase = payload.phase;
   if (!phase) {
@@ -334,10 +370,17 @@ function normalizeJobStatus(payload: RawJobStatusResponse): JobStatus {
   };
 }
 
-function deriveReviewSession(jobId: string, resources: ResourceListItem[]): ReviewSession {
-  const hasNeedsFix = resources.some((resource) => resource.reviewState === 'NEEDS_FIX');
+function deriveReviewSession(
+  jobId: string,
+  resources: ResourceListItem[],
+): ReviewSession {
+  const hasNeedsFix = resources.some(
+    (resource) => resource.reviewState === 'NEEDS_FIX',
+  );
   const hasOk = resources.some((resource) => resource.reviewState === 'OK');
-  const hasReview = resources.some((resource) => resource.reviewState === 'IN_REVIEW');
+  const hasReview = resources.some(
+    (resource) => resource.reviewState === 'IN_REVIEW',
+  );
 
   const status =
     resources.length === 0 || (hasReview && !hasNeedsFix && !hasOk)
@@ -354,12 +397,38 @@ function deriveReviewSession(jobId: string, resources: ResourceListItem[]): Revi
   };
 }
 
-function normalizeResourcesResponse(jobId: string, payload: RawResourcesResponse): ResourceListResponse {
+function normalizeResourcesResponse(
+  jobId: string,
+  payload: RawResourcesResponse,
+): ResourceListResponse {
   if (Array.isArray(payload)) {
     const resources = payload.map(normalizeResource);
+    const noAccessByReason = resources.reduce<Record<string, number>>(
+      (counts, resource) => {
+        if (
+          (!resource.canAccess || resource.accessStatus === 'NO_ACCEDE') &&
+          resource.reasonCode
+        ) {
+          counts[resource.reasonCode] = (counts[resource.reasonCode] ?? 0) + 1;
+        }
+        return counts;
+      },
+      {},
+    );
     return {
       jobId,
       resources,
+      totalAnalizables: resources.length,
+      noAnalizablesExternos: 0,
+      tecnicosIgnorados: 0,
+      globalUnplacedCount: resources.filter(
+        (resource) => resource.sectionType === 'global_unplaced',
+      ).length,
+      noAccessCount: resources.filter(
+        (resource) =>
+          !resource.canAccess || resource.accessStatus === 'NO_ACCEDE',
+      ).length,
+      noAccessByReason,
       reviewSession: deriveReviewSession(jobId, resources),
       structure: normalizeCourseStructure(null),
     };
@@ -369,12 +438,30 @@ function normalizeResourcesResponse(jobId: string, payload: RawResourcesResponse
   const payloadWithLegacyStructure = payload as ResourceListResponse & {
     courseStructure?: CourseStructure | null;
   };
-  const rawStructure = payloadWithLegacyStructure.structure ?? payloadWithLegacyStructure.courseStructure ?? null;
+  const rawStructure =
+    payloadWithLegacyStructure.structure ??
+    payloadWithLegacyStructure.courseStructure ??
+    null;
   return {
     ...payload,
     jobId: payload.jobId ?? jobId,
     resources,
-    reviewSession: payload.reviewSession ?? deriveReviewSession(jobId, resources),
+    totalAnalizables: payload.totalAnalizables ?? resources.length,
+    noAnalizablesExternos: payload.noAnalizablesExternos ?? 0,
+    tecnicosIgnorados: payload.tecnicosIgnorados ?? 0,
+    globalUnplacedCount:
+      payload.globalUnplacedCount ??
+      resources.filter((resource) => resource.sectionType === 'global_unplaced')
+        .length,
+    noAccessCount:
+      payload.noAccessCount ??
+      resources.filter(
+        (resource) =>
+          !resource.canAccess || resource.accessStatus === 'NO_ACCEDE',
+      ).length,
+    noAccessByReason: payload.noAccessByReason ?? {},
+    reviewSession:
+      payload.reviewSession ?? deriveReviewSession(jobId, resources),
     structure: normalizeCourseStructure(rawStructure),
   };
 }
@@ -390,7 +477,10 @@ export function resolveApiUrl(path: string): string {
     return normalizedPath;
   }
 
-  if (normalizedPath === API_BASE_URL || normalizedPath.startsWith(`${API_BASE_URL}/`)) {
+  if (
+    normalizedPath === API_BASE_URL ||
+    normalizedPath.startsWith(`${API_BASE_URL}/`)
+  ) {
     return normalizedPath;
   }
 
@@ -398,7 +488,10 @@ export function resolveApiUrl(path: string): string {
 }
 
 export const api = {
-  async createJob(file: File, options?: UploadRequestOptions): Promise<JobCreatedResponse> {
+  async createJob(
+    file: File,
+    options?: UploadRequestOptions,
+  ): Promise<JobCreatedResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -411,9 +504,12 @@ export const api = {
   },
 
   async retryJob(jobId: string): Promise<JobStatus> {
-    const payload = await request<RawJobStatusResponse>(`/jobs/${jobId}/retry`, {
-      method: 'POST',
-    });
+    const payload = await request<RawJobStatusResponse>(
+      `/jobs/${jobId}/retry`,
+      {
+        method: 'POST',
+      },
+    );
     return normalizeJobStatus(payload);
   },
 
@@ -443,7 +539,10 @@ export const api = {
     });
   },
 
-  async createCanvasJob(payload: { courseId: string; courseName?: string | null }): Promise<JobCreatedResponse> {
+  async createCanvasJob(payload: {
+    courseId: string;
+    courseName?: string | null;
+  }): Promise<JobCreatedResponse> {
     return request<JobCreatedResponse>('/canvas/jobs', {
       method: 'POST',
       headers: {
@@ -459,12 +558,19 @@ export async function fetchResources(
   options?: { onlyBroken?: boolean },
 ): Promise<ResourceListResponse> {
   const query = options?.onlyBroken ? '?onlyBroken=true' : '';
-  const payload = await request<RawResourcesResponse>(`/jobs/${jobId}/resources${query}`);
+  const payload = await request<RawResourcesResponse>(
+    `/jobs/${jobId}/resources${query}`,
+  );
   return normalizeResourcesResponse(jobId, payload);
 }
 
-export async function fetchResourceDetail(jobId: string, resourceId: string): Promise<ResourceDetailResponse> {
-  const payload = await request<ResourceDetailResponse>(`/jobs/${jobId}/resources/${resourceId}`);
+export async function fetchResourceDetail(
+  jobId: string,
+  resourceId: string,
+): Promise<ResourceDetailResponse> {
+  const payload = await request<ResourceDetailResponse>(
+    `/jobs/${jobId}/resources/${resourceId}`,
+  );
   return {
     ...payload,
     resource: normalizeResource(payload.resource),
@@ -480,13 +586,16 @@ export function saveChecklist(
   resourceId: string,
   payload: ChecklistSaveRequest,
 ): Promise<ChecklistSaveResult> {
-  return request<ChecklistSaveResult>(`/jobs/${jobId}/resources/${resourceId}/checklist`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
+  return request<ChecklistSaveResult>(
+    `/jobs/${jobId}/resources/${resourceId}/checklist`,
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
-  });
+  );
 }
 
 export function fetchSummary(jobId: string): Promise<ReviewSummary> {

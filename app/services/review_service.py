@@ -58,6 +58,10 @@ class InventoryResourceSeed(BaseModel):
         default=None,
         validation_alias=AliasChoices("section_key", "sectionKey"),
     )
+    section_type: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("section_type", "sectionType"),
+    )
     status: ResourceHealthStatus = ResourceHealthStatus.OK
     notes: str | list[str] | None = None
     item_path: str | None = Field(default=None, validation_alias=AliasChoices("item_path", "itemPath"))

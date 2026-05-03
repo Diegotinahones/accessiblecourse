@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 COURSE_STRUCTURE_FILENAME = "course_structure.json"
 FALLBACK_ORGANIZATION_TITLE = "Estructura del curso"
 UNTITLED_LABEL = "Sin título"
+GLOBAL_UNPLACED_TITLE = "Recursos globales o no ubicados en la estructura del curso"
 SECTION_KEY_SEP = " > "
 PEC_KEY_RE = re.compile(r"\bpec\s*0*(\d+)\b", re.IGNORECASE)
 
@@ -256,7 +257,7 @@ def augment_course_structure(
             )
 
         if target_node is None:
-            section_title = _resource_section_title(resource) or "Sin sección"
+            section_title = _resource_section_title(resource) or GLOBAL_UNPLACED_TITLE
             section_key = _resource_section_key(resource) or build_section_key(section_title)
             organization = organizations[0]
             target_node = {

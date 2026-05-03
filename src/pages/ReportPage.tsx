@@ -30,15 +30,20 @@ export function ReportPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const location = useLocation();
   const [searchParams] = useSearchParams();
-  const navigationState = (location.state as ReportLocationState | null) ?? null;
+  const navigationState =
+    (location.state as ReportLocationState | null) ?? null;
   const [report, setReport] = useState<GeneratedReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [announcement, setAnnouncement] = useState(navigationState?.announcement ?? '');
+  const [announcement, setAnnouncement] = useState(
+    navigationState?.announcement ?? '',
+  );
   const modeParam = searchParams.get('mode');
-  const appMode: AppMode = isAppMode(modeParam) ? modeParam : loadRememberedAppMode() ?? 'offline';
+  const appMode: AppMode = isAppMode(modeParam)
+    ? modeParam
+    : (loadRememberedAppMode() ?? 'offline');
 
   useEffect(() => {
     rememberAppMode(appMode);
@@ -96,7 +101,9 @@ export function ReportPage() {
         }
 
         setError(
-          loadError instanceof Error ? loadError.message : 'No se pudo cargar el informe.',
+          loadError instanceof Error
+            ? loadError.message
+            : 'No se pudo cargar el informe.',
         );
       } finally {
         if (!cancelled) {
@@ -113,7 +120,9 @@ export function ReportPage() {
   }, [jobId]);
 
   const courseName = jobId
-    ? navigationState?.courseName ?? loadRememberedCourseName(jobId) ?? `Curso ${jobId}`
+    ? (navigationState?.courseName ??
+      loadRememberedCourseName(jobId) ??
+      `Curso ${jobId}`)
     : 'Curso';
 
   const downloadUrls = jobId ? getDirectReportDownloadUrls(jobId) : null;
@@ -230,7 +239,6 @@ export function ReportPage() {
               className="border-t border-line"
               hidden={!detailsOpen}
               id="report-detail-panel"
-              role="region"
             >
               {sortedGroups.length === 0 ? (
                 <div className="p-6 text-sm text-subtle">

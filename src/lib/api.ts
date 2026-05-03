@@ -55,7 +55,25 @@ interface RawOnlineCourse {
   end_at?: string | null;
 }
 
-type RawResourcesResponse = ResourceListResponse | ResourceListItem[];
+type RawResourceListItem = Partial<ResourceListItem> & Record<string, unknown>;
+type RawResourcesResponse =
+  | (Omit<ResourceListResponse, 'resources'> & {
+      resources: RawResourceListItem[];
+    })
+  | RawResourceListItem[];
+
+type ResourceAccessStatus = ResourceListItem['accessStatus'];
+
+const ACCESS_STATUSES: ResourceAccessStatus[] = [
+  'OK',
+  'NO_ACCEDE',
+  'REQUIERE_INTERACCION',
+  'REQUIERE_SSO',
+  'NOT_FOUND',
+  'FORBIDDEN',
+  'TIMEOUT',
+  'ERROR',
+];
 
 export class ApiError extends Error {
   status: number;
@@ -199,6 +217,86 @@ function normalizeReviewType(
   return 'OTHER';
 }
 
+function readString(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmedValue = value.trim();
+    return trimmedValue || null;
+  }
+
+  if (typeof value === 'number') {
+    return String(value);
+  }
+
+  return null;
+}
+
+function readNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsedValue = Number(value);
+    return Number.isFinite(parsedValue) ? parsedValue : null;
+  }
+
+  return null;
+}
+
+function readBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalizedValue = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'si', 'sí'].includes(normalizedValue)) {
+      return true;
+    }
+    if (['false', '0', 'no'].includes(normalizedValue)) {
+      return false;
+    }
+  }
+
+  return null;
+}
+
+function normalizeAccessStatus(
+  accessStatus: unknown,
+  healthStatus: unknown,
+): ResourceAccessStatus {
+  const normalizedValue = readString(accessStatus)
+    ?.toUpperCase()
+    .replace(/\s+/g, '_')
+    .replace(/-/g, '_');
+
+  if (normalizedValue === 'NO_ACCEDE' || normalizedValue === 'NO_ACCESIBLE') {
+    return 'NO_ACCEDE';
+  }
+
+  if (normalizedValue === 'REQUIERE_INTERACCION') {
+    return 'REQUIERE_INTERACCION';
+  }
+
+  if (normalizedValue === 'REQUIERE_SSO') {
+    return 'REQUIERE_SSO';
+  }
+
+  if (
+    normalizedValue &&
+    ACCESS_STATUSES.includes(normalizedValue as ResourceAccessStatus)
+  ) {
+    return normalizedValue as ResourceAccessStatus;
+  }
+
+  const normalizedHealthStatus = readString(healthStatus)?.toUpperCase();
+  if (normalizedHealthStatus === 'ERROR') {
+    return 'ERROR';
+  }
+
+  return 'OK';
+}
+
 function normalizeHealthStatus(
   status: string | null | undefined,
 ): ReviewResourceHealthStatus {
@@ -223,22 +321,91 @@ function normalizeReviewState(state: string | null | undefined): ReviewState {
   return 'IN_REVIEW';
 }
 
-function normalizeResource(item: ResourceListItem): ResourceListItem {
-  const sourceUrl = item.sourceUrl ?? item.url ?? null;
-  const downloadUrl = item.downloadUrl ?? null;
-  const filePath = item.filePath ?? item.localPath ?? item.path ?? null;
-  const modulePath = item.modulePath ?? item.coursePath ?? null;
-  const moduleTitle = item.moduleTitle ?? null;
-  const sectionTitle = item.sectionTitle ?? null;
-  const sectionKey = item.sectionKey ?? null;
-  const itemPath = item.itemPath ?? null;
+function normalizeResource(item: RawResourceListItem): ResourceListItem {
+  const accessStatus = normalizeAccessStatus(
+    item.accessStatus ?? item.access_status,
+    item.status,
+  );
+  const sourceUrl =
+    readString(item.sourceUrl) ??
+    readString(item.source_url) ??
+    readString(item.url) ??
+    readString(item.source) ??
+    null;
+  const downloadUrl =
+    readString(item.downloadUrl) ?? readString(item.download_url) ?? null;
+  const filePath =
+    readString(item.filePath) ??
+    readString(item.localPath) ??
+    readString(item.local_path) ??
+    readString(item.path) ??
+    null;
+  const sectionTitle =
+    readString(item.sectionTitle) ??
+    readString(item.section_title) ??
+    readString(item.section) ??
+    null;
+  const moduleTitle =
+    readString(item.moduleTitle) ??
+    readString(item.module_title) ??
+    readString(item.module) ??
+    readString(item.group) ??
+    null;
+  const modulePath =
+    readString(item.modulePath) ??
+    readString(item.module_path) ??
+    readString(item.coursePath) ??
+    readString(item.course_path) ??
+    moduleTitle ??
+    sectionTitle ??
+    null;
+  const sectionKey =
+    readString(item.sectionKey) ?? readString(item.section_key) ?? null;
+  const itemPath =
+    readString(item.itemPath) ?? readString(item.item_path) ?? null;
+  const canAccess =
+    readBoolean(item.canAccess) ??
+    readBoolean(item.can_access) ??
+    accessStatus === 'OK';
+  const canDownload =
+    readBoolean(item.canDownload) ??
+    readBoolean(item.can_download) ??
+    readBoolean(item.downloadable) ??
+    false;
+  const reasonCode =
+    readString(item.reasonCode) ??
+    readString(item.reason_code) ??
+    readString(item.accessNote) ??
+    readString(item.access_note) ??
+    null;
+  const reasonDetail =
+    readString(item.reasonDetail) ??
+    readString(item.reason_detail) ??
+    readString(item.errorMessage) ??
+    readString(item.error_message) ??
+    readString(item.accessNote) ??
+    readString(item.access_note) ??
+    null;
 
   return {
     ...item,
-    type: normalizeReviewType(item.type),
-    status: normalizeHealthStatus(item.status),
-    reviewState: normalizeReviewState(item.reviewState),
-    origin: item.origin ?? null,
+    id:
+      readString(item.id) ??
+      readString(item.resourceId) ??
+      readString(item.resource_id) ??
+      readString(item.path) ??
+      readString(item.url) ??
+      readString(item.title) ??
+      'resource-unknown',
+    jobId: readString(item.jobId) ?? readString(item.job_id) ?? '',
+    title:
+      readString(item.title) ?? readString(item.name) ?? 'Recurso sin título',
+    type: normalizeReviewType(readString(item.type)),
+    status: normalizeHealthStatus(readString(item.status)),
+    reviewState: normalizeReviewState(
+      readString(item.reviewState) ?? readString(item.review_state),
+    ),
+    origin: readString(item.origin),
     url: sourceUrl,
     sourceUrl,
     downloadUrl,
@@ -250,29 +417,48 @@ function normalizeResource(item: ResourceListItem): ResourceListItem {
     moduleTitle,
     sectionTitle,
     sectionKey,
-    sectionType: item.sectionType ?? null,
+    sectionType:
+      readString(item.sectionType) ?? readString(item.section_type) ?? null,
     itemPath,
-    urlStatus: item.urlStatus ?? null,
-    finalUrl: item.finalUrl ?? sourceUrl,
-    checkedAt: item.checkedAt ?? null,
-    canAccess: item.canAccess ?? item.accessStatus === 'OK',
-    accessStatus:
-      item.accessStatus ?? (item.status === 'ERROR' ? 'ERROR' : 'OK'),
-    httpStatus: item.httpStatus ?? null,
-    accessStatusCode: item.accessStatusCode ?? item.httpStatus ?? null,
-    canDownload: item.canDownload ?? false,
+    urlStatus: readString(item.urlStatus) ?? readString(item.url_status),
+    finalUrl:
+      readString(item.finalUrl) ?? readString(item.final_url) ?? sourceUrl,
+    checkedAt: readString(item.checkedAt) ?? readString(item.checked_at),
+    canAccess,
+    accessStatus,
+    httpStatus: readNumber(item.httpStatus ?? item.http_status),
+    accessStatusCode: readNumber(
+      item.accessStatusCode ?? item.access_status_code ?? item.httpStatus,
+    ),
+    canDownload,
     downloadStatus:
-      item.downloadStatus ?? (item.canDownload ? 'OK' : 'NO_DESCARGABLE'),
-    downloadStatusCode: item.downloadStatusCode ?? null,
-    discoveredChildrenCount: item.discoveredChildrenCount ?? 0,
-    parentResourceId: item.parentResourceId ?? null,
-    discovered: item.discovered ?? false,
-    accessNote: item.accessNote ?? item.errorMessage ?? null,
-    errorMessage: item.errorMessage ?? null,
-    reasonCode: item.reasonCode ?? null,
-    reasonDetail: item.reasonDetail ?? item.errorMessage ?? null,
-    notes: item.notes ?? null,
-    failCount: item.failCount ?? 0,
+      readString(item.downloadStatus) ??
+      readString(item.download_status) ??
+      (canDownload ? 'OK' : 'NO_DESCARGABLE'),
+    downloadStatusCode: readNumber(
+      item.downloadStatusCode ?? item.download_status_code,
+    ),
+    discoveredChildrenCount:
+      readNumber(item.discoveredChildrenCount) ??
+      readNumber(item.discovered_children_count) ??
+      0,
+    parentResourceId:
+      readString(item.parentResourceId) ??
+      readString(item.parent_resource_id) ??
+      readString(item.parentId) ??
+      readString(item.parent_id),
+    discovered: readBoolean(item.discovered) ?? false,
+    accessNote: readString(item.accessNote) ?? readString(item.access_note),
+    errorMessage:
+      readString(item.errorMessage) ?? readString(item.error_message),
+    reasonCode,
+    reasonDetail,
+    notes: readString(item.notes),
+    failCount: readNumber(item.failCount ?? item.fail_count) ?? 0,
+    updatedAt:
+      readString(item.updatedAt) ??
+      readString(item.updated_at) ??
+      new Date().toISOString(),
   };
 }
 
@@ -573,7 +759,9 @@ export async function fetchResourceDetail(
   );
   return {
     ...payload,
-    resource: normalizeResource(payload.resource),
+    resource: normalizeResource(
+      payload.resource as unknown as RawResourceListItem,
+    ),
   };
 }
 

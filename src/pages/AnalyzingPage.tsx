@@ -4,7 +4,34 @@ import { LayoutSimple } from '../components/LayoutSimple';
 import { ProgressBar } from '../components/ProgressBar';
 import { api } from '../lib/api';
 import type { AppMode, JobStatus } from '../lib/types';
-import { getModeSearch, isAppMode, loadRememberedAppMode, rememberAppMode } from '../lib/utils';
+import {
+  getModeSearch,
+  isAppMode,
+  loadRememberedAppMode,
+  rememberAppMode,
+} from '../lib/utils';
+
+function getAnalysisMessage(status: JobStatus | null) {
+  const progress = status?.progress ?? 0;
+
+  if (progress >= 95) {
+    return 'Generando diagnóstico';
+  }
+
+  if (progress >= 75) {
+    return 'Buscando descargables';
+  }
+
+  if (progress >= 50) {
+    return 'Comprobando acceso';
+  }
+
+  if (progress >= 25) {
+    return 'Detectando recursos';
+  }
+
+  return 'Leyendo estructura del curso';
+}
 
 export function AnalyzingPage() {
   const navigate = useNavigate();
@@ -14,7 +41,9 @@ export function AnalyzingPage() {
   const [error, setError] = useState<string | null>(null);
   const hasNavigatedRef = useRef(false);
   const modeParam = searchParams.get('mode');
-  const appMode: AppMode = isAppMode(modeParam) ? modeParam : loadRememberedAppMode() ?? 'offline';
+  const appMode: AppMode = isAppMode(modeParam)
+    ? modeParam
+    : (loadRememberedAppMode() ?? 'offline');
 
   useEffect(() => {
     rememberAppMode(appMode);
@@ -45,7 +74,9 @@ export function AnalyzingPage() {
         ) {
           hasNavigatedRef.current = true;
           window.clearInterval(intervalId);
-          navigate(`/resources/${jobId}${getModeSearch(appMode)}`, { replace: true });
+          navigate(`/resources/${jobId}${getModeSearch(appMode)}`, {
+            replace: true,
+          });
           return;
         }
 
@@ -78,26 +109,28 @@ export function AnalyzingPage() {
   }, [appMode, jobId, navigate]);
 
   const progress = jobStatus?.progress ?? 0;
-  const statusMessage = jobStatus?.message ?? 'Preparando análisis…';
+  const statusMessage = getAnalysisMessage(jobStatus);
   const currentStep = jobStatus?.currentStep ?? 1;
   const totalSteps = jobStatus?.totalSteps ?? 1;
-  const liveMessage = `Analizando… ${progress}%`;
+  const liveMessage = `${statusMessage}. ${progress}% completado.`;
 
   return (
     <LayoutSimple
-      backLabel="Volver a subir"
+      backLabel="Volver"
       backTo={`/${appMode}${getModeSearch(appMode)}`}
-      description="Analizando el curso y preparando el inventario real."
-      title="Analizando curso"
+      description="Estamos preparando el diagnóstico de acceso a recursos."
+      title="Analizando recursos"
     >
-      <section className="card-panel mx-auto max-w-2xl space-y-6 p-6 sm:p-8">
+      <section className="mx-auto max-w-2xl space-y-6 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8">
         {error ? (
           <div
             aria-live="assertive"
             className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-danger"
             role="alert"
           >
-            <p className="text-base font-semibold">No hemos podido completar el análisis.</p>
+            <p className="text-base font-semibold">
+              No hemos podido completar el análisis.
+            </p>
             <p className="mt-2 text-sm">{error}</p>
           </div>
         ) : (
@@ -106,10 +139,14 @@ export function AnalyzingPage() {
             <p aria-live="polite" className="text-base font-medium text-ink">
               {liveMessage}
             </p>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-subtle">
+            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">
               Paso {currentStep} de {totalSteps}
             </p>
-            <p className="text-sm text-subtle">{statusMessage}</p>
+            {jobStatus?.message ? (
+              <p className="text-sm leading-6 text-subtle">
+                {jobStatus.message}
+              </p>
+            ) : null}
           </>
         )}
       </section>

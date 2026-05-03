@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import { ProgressBar } from '../components/ProgressBar';
@@ -13,7 +13,6 @@ import {
 export function UploadPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -66,32 +65,35 @@ export function UploadPage() {
       align="center"
       backLabel="Cambiar modo"
       backTo="/?mode=offline"
-      description="Sube un archivo IMSCC o ZIP para iniciar el análisis offline."
-      title="Offline (IMSCC/ZIP)"
+      description="Se analizarán los recursos incluidos en el paquete y los enlaces detectados."
+      title="Sube tu paquete IMSCC"
     >
       <form
-        className="card-panel mx-auto max-w-xl space-y-5 p-6 sm:p-8"
+        className="mx-auto max-w-xl space-y-6 rounded-3xl border border-line bg-white p-6 text-left shadow-card sm:p-8"
         onSubmit={handleSubmit}
       >
         <div className="space-y-3">
+          <label
+            className="block text-base font-semibold text-ink"
+            htmlFor="course-file"
+          >
+            Selecciona archivo IMSCC o ZIP
+          </label>
           <input
             accept=".imscc,.zip"
-            className="sr-only"
+            className="field-input"
             disabled={isSubmitting}
             id="course-file"
             onChange={handleFileChange}
-            ref={fileInputRef}
             type="file"
           />
-          <button
-            className="button-secondary w-full sm:w-auto"
-            onClick={() => fileInputRef.current?.click()}
-            type="button"
-          >
-            Selecciona archivo IMSCC o ZIP
-          </button>
-          <p aria-live="polite" className="min-h-[1.5rem] text-sm text-subtle">
-            {selectedFile ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}` : ' '}
+          <p className="text-sm leading-6 text-subtle">
+            Formatos admitidos: .imscc y .zip.
+          </p>
+          <p aria-live="polite" className="min-h-6 text-sm text-subtle">
+            {selectedFile
+              ? `Archivo seleccionado: ${selectedFile.name}, ${formatFileSize(selectedFile.size)}.`
+              : 'No has seleccionado ningún archivo.'}
           </p>
         </div>
 
@@ -121,7 +123,7 @@ export function UploadPage() {
           disabled={!selectedFile || isSubmitting}
           type="submit"
         >
-          {isSubmitting ? 'Subiendo curso…' : 'Subir y analizar'}
+          {isSubmitting ? 'Subiendo curso…' : 'Analizar'}
         </button>
       </form>
     </LayoutSimple>

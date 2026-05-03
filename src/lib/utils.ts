@@ -3,7 +3,9 @@ import { AppMode, ChecklistDecision } from './types';
 const COURSE_NAME_PREFIX = 'accessiblecourse.course-name';
 const APP_MODE_KEY = 'accessiblecourse.app-mode';
 
-export function classNames(...values: Array<string | false | null | undefined>) {
+export function classNames(
+  ...values: Array<string | false | null | undefined>
+) {
   return values.filter(Boolean).join(' ');
 }
 
@@ -33,22 +35,22 @@ export function getDecisionLabel(decision: ChecklistDecision) {
 
 export function buildStepMessage(progress: number) {
   if (progress >= 100) {
-    return 'Analisis completado';
+    return 'Generando diagnóstico';
   }
 
   if (progress >= 75) {
-    return 'Generando inventario';
+    return 'Buscando descargables';
   }
 
   if (progress >= 50) {
-    return 'Resolviendo recursos';
+    return 'Comprobando acceso';
   }
 
   if (progress >= 25) {
-    return 'Parseando estructura';
+    return 'Detectando recursos';
   }
 
-  return 'Descomprimiendo paquete';
+  return 'Leyendo estructura del curso';
 }
 
 export function getCourseNameFromFilename(filename: string) {
@@ -96,7 +98,7 @@ export function loadRememberedAppMode() {
 }
 
 export function resolveAppMode(mode: string | null | undefined): AppMode {
-  return isAppMode(mode) ? mode : loadRememberedAppMode() ?? 'offline';
+  return isAppMode(mode) ? mode : (loadRememberedAppMode() ?? 'offline');
 }
 
 export function getModeSearch(mode: AppMode) {

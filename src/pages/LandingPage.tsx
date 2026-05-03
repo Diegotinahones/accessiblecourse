@@ -20,12 +20,13 @@ const MODE_OPTIONS: ModeOption[] = [
   {
     mode: 'online',
     label: 'Online (Canvas/UOC)',
-    description: 'Accede a tus cursos de Canvas/UOC y elige cuál quieres analizar.',
+    description: 'Analiza recursos directamente desde un aula online.',
   },
   {
     mode: 'offline',
     label: 'Offline (IMSCC/ZIP)',
-    description: 'Sube un paquete IMSCC o ZIP exportado desde tu plataforma.',
+    description:
+      'Sube un paquete exportado para analizarlo sin conexión a Canvas.',
   },
 ];
 
@@ -82,39 +83,44 @@ export function LandingPage() {
   return (
     <LayoutSimple
       align="center"
-      description="Elige cómo quieres analizarlo"
-      title="Haz tu curso accesible"
+      description="Haz tu curso accesible"
+      title="AccessibleCourse"
     >
       <form
-        className="card-panel mx-auto max-w-3xl space-y-6 p-6 sm:p-8"
+        className="mx-auto max-w-3xl space-y-7 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8"
         onSubmit={handleSubmit}
       >
-        <fieldset className="space-y-4">
-          <legend className="text-lg font-semibold text-ink">
-            Selecciona el flujo de análisis
+        <div className="space-y-2 text-center sm:text-left">
+          <p className="text-lg leading-8 text-subtle">
+            Analiza los recursos de un aula online o de un paquete IMSCC.
+          </p>
+        </div>
+
+        <fieldset className="space-y-4 text-left">
+          <legend className="text-base font-semibold text-ink">
+            Elige cómo quieres empezar
           </legend>
 
-          <div className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
             {MODE_OPTIONS.map((option) => {
               const inputId = `analysis-mode-${option.mode}`;
               const descriptionId = `mode-${option.mode}-description`;
               const isSelected = selectedMode === option.mode;
 
               return (
-                <div
+                <label
                   key={option.mode}
                   className={classNames(
-                    'rounded-2xl border p-4 transition sm:p-5',
-                    isSelected
-                      ? 'border-ink bg-[#f7faf7]'
-                      : 'border-line bg-white hover:border-[#9cb3a2]',
+                    'choice-panel cursor-pointer',
+                    isSelected && 'choice-panel-selected',
                   )}
+                  htmlFor={inputId}
                 >
-                  <div className="grid grid-cols-[auto_1fr] items-start gap-4">
+                  <span className="grid grid-cols-[auto_1fr] items-start gap-4">
                     <input
                       aria-describedby={descriptionId}
                       checked={isSelected}
-                      className="mt-1 h-5 w-5 accent-[#205e3c]"
+                      className="mt-1 h-5 w-5 accent-[#0f766e]"
                       id={inputId}
                       name="analysis-mode"
                       onChange={() => handleModeChange(option.mode)}
@@ -122,19 +128,19 @@ export function LandingPage() {
                       value={option.mode}
                     />
 
-                    <div className="space-y-2">
-                      <label
-                        className="block cursor-pointer text-lg font-semibold text-ink"
-                        htmlFor={inputId}
-                      >
+                    <span className="space-y-2">
+                      <span className="block text-lg font-semibold text-ink">
                         {option.label}
-                      </label>
-                      <p className="text-sm leading-6 text-subtle" id={descriptionId}>
+                      </span>
+                      <span
+                        className="block text-sm leading-6 text-subtle"
+                        id={descriptionId}
+                      >
                         {option.description}
-                      </p>
-                    </div>
-                  </div>
-                </div>
+                      </span>
+                    </span>
+                  </span>
+                </label>
               );
             })}
           </div>

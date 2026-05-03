@@ -28,7 +28,7 @@ export function LayoutSimple({
   }, [title]);
 
   return (
-    <div className="min-h-screen bg-white text-ink">
+    <div className="min-h-screen bg-[#f8faf7] text-ink">
       <a
         href="#page-content"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-xl focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
@@ -38,17 +38,22 @@ export function LayoutSimple({
 
       <main
         id="page-content"
-        className="mx-auto flex min-h-screen w-full max-w-5xl flex-col px-4 py-6 sm:px-6 sm:py-8"
+        className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-6 sm:px-6 sm:py-8 lg:px-8"
       >
         {backTo ? (
-          <nav aria-label="Navegación de página" className="mb-6">
+          <nav aria-label="Navegación de página" className="mb-8">
             <Link className="button-secondary text-sm" to={backTo}>
               {backLabel ?? 'Volver'}
             </Link>
           </nav>
         ) : null}
 
-        <header className={classNames('mb-8', align === 'center' && 'text-center')}>
+        <header
+          className={classNames(
+            'mb-8',
+            align === 'center' && 'mx-auto max-w-3xl text-center',
+          )}
+        >
           <h1
             ref={headingRef}
             tabIndex={-1}

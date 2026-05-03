@@ -23,12 +23,25 @@ import {
 
 type BadgeTone = 'ok' | 'warning' | 'danger' | 'neutral';
 
+interface ResourceTreeNode {
+  resource: ResourceListItem;
+  children: ResourceTreeNode[];
+}
+
+interface ResourceSubsection {
+  id: string;
+  title: string;
+  resources: ResourceListItem[];
+}
+
 interface ResourceGroup {
   id: string;
   section: string;
   description?: string;
-  isGlobalUnplaced?: boolean;
+  isGlobalUnplaced: boolean;
   resources: ResourceListItem[];
+  directResources: ResourceListItem[];
+  subsections: ResourceSubsection[];
 }
 
 interface BackendResourceCounts {
@@ -36,71 +49,107 @@ interface BackendResourceCounts {
   noAccessCount: number | null;
 }
 
+interface ResourceFilters {
+  onlyNoAccess: boolean;
+  onlyDownloadable: boolean;
+  hideGlobalUnplaced: boolean;
+}
+
+const EMPTY_FILTERS: ResourceFilters = {
+  onlyNoAccess: false,
+  onlyDownloadable: false,
+  hideGlobalUnplaced: false,
+};
+
 const GLOBAL_UNPLACED_SECTION_LABEL =
   'Recursos globales o no ubicados en la estructura del curso';
 const GLOBAL_UNPLACED_SECTION_DESCRIPTION =
   'Recursos incluidos en el paquete, pero no asociados claramente a un módulo o PEC.';
 
 function normalizeComparableText(value: string | null | undefined) {
-  return value?.trim().toLocaleLowerCase('es-ES') ?? '';
-}
-
-function isGlobalUnplacedValue(value: string | null | undefined) {
-  const normalizedValue = normalizeComparableText(value);
   return (
-    normalizedValue === 'global_unplaced' ||
-    normalizedValue === 'sin sección' ||
-    normalizedValue === 'sin seccion'
+    value
+      ?.trim()
+      .toLocaleLowerCase('es-ES')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '') ?? ''
   );
 }
 
-function getGlobalUnplacedMetadata(isGlobalUnplaced: boolean) {
-  if (!isGlobalUnplaced) {
-    return {};
-  }
+function isGlobalUnplacedType(value: string | null | undefined) {
+  const normalizedValue = normalizeComparableText(value);
+  return (
+    normalizedValue === 'global_unplaced' ||
+    normalizedValue === 'global-unplaced' ||
+    normalizedValue === 'unplaced'
+  );
+}
 
-  return {
-    description: GLOBAL_UNPLACED_SECTION_DESCRIPTION,
-    isGlobalUnplaced: true,
-  };
+function isGlobalUnplacedName(value: string | null | undefined) {
+  const normalizedValue = normalizeComparableText(value);
+  return (
+    !normalizedValue ||
+    normalizedValue === 'global_unplaced' ||
+    normalizedValue.includes('sin seccion') ||
+    normalizedValue.includes('no ubicado') ||
+    normalizedValue.includes('unplaced')
+  );
+}
+
+function normalizeSectionName(value: string | null | undefined) {
+  return isGlobalUnplacedName(value)
+    ? GLOBAL_UNPLACED_SECTION_LABEL
+    : (value?.trim() ?? GLOBAL_UNPLACED_SECTION_LABEL);
+}
+
+function buildGlobalMetadata(isGlobalUnplaced: boolean) {
+  return isGlobalUnplaced
+    ? {
+        description: GLOBAL_UNPLACED_SECTION_DESCRIPTION,
+        isGlobalUnplaced,
+      }
+    : {
+        isGlobalUnplaced,
+      };
 }
 
 function getAccessLabel(resource: ResourceListItem) {
   if (resource.accessStatus === 'REQUIERE_INTERACCION') {
     return 'REQUIERE INTERACCIÓN';
   }
+
   if (resource.accessStatus === 'REQUIERE_SSO') {
     return 'REQUIERE SSO';
   }
+
   return resource.canAccess && resource.accessStatus === 'OK'
     ? 'OK'
     : 'NO ACCEDE';
 }
 
 function getAccessTone(resource: ResourceListItem): BadgeTone {
-  if (resource.canAccess && resource.accessStatus === 'OK') {
+  const accessLabel = getAccessLabel(resource);
+
+  if (accessLabel === 'OK') {
     return 'ok';
   }
+
   if (
-    resource.accessStatus === 'REQUIERE_INTERACCION' ||
-    resource.accessStatus === 'REQUIERE_SSO' ||
-    resource.accessStatus === 'FORBIDDEN' ||
-    resource.accessStatus === 'TIMEOUT'
+    accessLabel === 'REQUIERE INTERACCIÓN' ||
+    accessLabel === 'REQUIERE SSO'
   ) {
     return 'warning';
   }
+
   return 'danger';
 }
 
 function getDownloadLabel(resource: ResourceListItem) {
-  return resource.canDownload ? 'sí' : 'no';
+  return resource.canDownload ? 'DESCARGABLE' : 'NO DESCARGABLE';
 }
 
 function getDownloadTone(resource: ResourceListItem): BadgeTone {
-  if (resource.canDownload) {
-    return 'ok';
-  }
-  return resource.canAccess ? 'neutral' : 'warning';
+  return resource.canDownload ? 'ok' : 'neutral';
 }
 
 function getStatusClasses(tone: BadgeTone) {
@@ -113,7 +162,7 @@ function getStatusClasses(tone: BadgeTone) {
   }
 
   if (tone === 'neutral') {
-    return 'border-slate-200 bg-slate-100 text-slate-700';
+    return 'border-slate-200 bg-slate-50 text-slate-700';
   }
 
   return 'border-rose-200 bg-rose-50 text-danger';
@@ -127,13 +176,13 @@ function getSectionLabel(resource: ResourceListItem) {
     resource.coursePath;
 
   if (
-    isGlobalUnplacedValue(resource.sectionType) ||
-    isGlobalUnplacedValue(sectionName)
+    isGlobalUnplacedType(resource.sectionType) ||
+    isGlobalUnplacedName(sectionName)
   ) {
     return GLOBAL_UNPLACED_SECTION_LABEL;
   }
 
-  return sectionName || GLOBAL_UNPLACED_SECTION_LABEL;
+  return normalizeSectionName(sectionName);
 }
 
 function isNoAccessResource(resource: ResourceListItem) {
@@ -173,38 +222,22 @@ function hasTechnicalDetails(resource: ResourceListItem) {
   return typeof resource.httpStatus === 'number' || Boolean(resource.finalUrl);
 }
 
-function toSectionDomId(sectionId: string) {
-  return `section-${sectionId.replace(/[^a-zA-Z0-9_-]+/g, '-').toLowerCase()}`;
+function toPanelId(prefix: string, id: string) {
+  const normalizedId =
+    id.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'panel';
+  return `${prefix}-${normalizedId.toLowerCase()}`;
 }
 
-function isDownloadable(resource: ResourceListItem, mode: AppMode) {
-  return (
-    mode === 'offline' &&
-    resource.canDownload &&
-    Boolean(resource.filePath || resource.localPath || resource.path)
-  );
-}
-
-function buildGroupsByPath(resources: ResourceListItem[]): ResourceGroup[] {
-  const groups = new Map<string, ResourceListItem[]>();
-
-  resources.forEach((resource) => {
-    const section = getSectionLabel(resource);
-    const existing = groups.get(section);
-    if (existing) {
-      existing.push(resource);
-      return;
+function uniqueResources(resources: ResourceListItem[]) {
+  const seenResourceIds = new Set<string>();
+  return resources.filter((resource) => {
+    if (seenResourceIds.has(resource.id)) {
+      return false;
     }
 
-    groups.set(section, [resource]);
+    seenResourceIds.add(resource.id);
+    return true;
   });
-
-  return Array.from(groups.entries()).map(([section, sectionResources]) => ({
-    id: section,
-    section,
-    ...getGlobalUnplacedMetadata(section === GLOBAL_UNPLACED_SECTION_LABEL),
-    resources: sectionResources,
-  }));
 }
 
 function collectNodeResources(
@@ -224,7 +257,95 @@ function collectNodeResources(
     collected.push(...collectNodeResources(childNode, resourcesById));
   });
 
-  return collected;
+  return uniqueResources(collected);
+}
+
+function createGroup(
+  id: string,
+  title: string | null | undefined,
+  directResources: ResourceListItem[],
+  subsections: ResourceSubsection[] = [],
+): ResourceGroup {
+  const section = normalizeSectionName(title);
+  const isGlobalUnplaced = section === GLOBAL_UNPLACED_SECTION_LABEL;
+  const subsectionResources = subsections.flatMap(
+    (subsection) => subsection.resources,
+  );
+  const resources = uniqueResources([
+    ...directResources,
+    ...subsectionResources,
+  ]);
+
+  return {
+    id,
+    section,
+    ...buildGlobalMetadata(isGlobalUnplaced),
+    resources,
+    directResources: uniqueResources(directResources),
+    subsections,
+  };
+}
+
+function buildGroupFromStructureNode(
+  node: CourseStructureNode,
+  resourcesById: Map<string, ResourceListItem>,
+): ResourceGroup | null {
+  const directResources: ResourceListItem[] = [];
+  const subsections: ResourceSubsection[] = [];
+
+  node.children.forEach((childNode) => {
+    if (childNode.resourceId && childNode.children.length === 0) {
+      const resource = resourcesById.get(childNode.resourceId);
+      if (resource) {
+        directResources.push(resource);
+      }
+      return;
+    }
+
+    const subsectionResources = collectNodeResources(childNode, resourcesById);
+    if (subsectionResources.length > 0) {
+      subsections.push({
+        id: childNode.nodeId,
+        title: normalizeSectionName(childNode.title),
+        resources: subsectionResources,
+      });
+    }
+  });
+
+  if (directResources.length === 0 && subsections.length === 0) {
+    directResources.push(...collectNodeResources(node, resourcesById));
+  }
+
+  const group = createGroup(
+    node.nodeId,
+    node.title,
+    directResources,
+    subsections,
+  );
+  return group.resources.length > 0 ? group : null;
+}
+
+function buildGroupsByPath(resources: ResourceListItem[]): ResourceGroup[] {
+  const groups = new Map<string, ResourceListItem[]>();
+
+  resources.forEach((resource) => {
+    const section = getSectionLabel(resource);
+    groups.set(section, [...(groups.get(section) ?? []), resource]);
+  });
+
+  return Array.from(groups.entries()).map(([section, sectionResources]) =>
+    createGroup(section, section, sectionResources),
+  );
+}
+
+function sortGlobalGroupLast(groups: ResourceGroup[]) {
+  return [...groups].sort((left, right) => {
+    if (left.isGlobalUnplaced === right.isGlobalUnplaced) {
+      return 0;
+    }
+
+    return left.isGlobalUnplaced ? 1 : -1;
+  });
 }
 
 function buildGroupsFromStructure(
@@ -238,47 +359,37 @@ function buildGroupsFromStructure(
   const groups: ResourceGroup[] = [];
 
   structure.organizations.forEach((organization) => {
-    const directResources: ResourceListItem[] = [];
+    const organizationDirectResources: ResourceListItem[] = [];
 
     organization.children.forEach((node) => {
       if (node.resourceId && node.children.length === 0) {
         const resource = resourcesById.get(node.resourceId);
         if (resource) {
-          directResources.push(resource);
+          organizationDirectResources.push(resource);
           groupedResourceIds.add(resource.id);
         }
         return;
       }
 
-      const sectionResources = collectNodeResources(node, resourcesById);
-      if (sectionResources.length === 0) {
+      const group = buildGroupFromStructureNode(node, resourcesById);
+      if (!group) {
         return;
       }
 
-      sectionResources.forEach((resource) =>
+      group.resources.forEach((resource) =>
         groupedResourceIds.add(resource.id),
       );
-      const section = isGlobalUnplacedValue(node.title)
-        ? GLOBAL_UNPLACED_SECTION_LABEL
-        : node.title;
-      groups.push({
-        id: node.nodeId,
-        section,
-        ...getGlobalUnplacedMetadata(section === GLOBAL_UNPLACED_SECTION_LABEL),
-        resources: sectionResources,
-      });
+      groups.push(group);
     });
 
-    if (directResources.length > 0) {
-      const section = isGlobalUnplacedValue(organization.title)
-        ? GLOBAL_UNPLACED_SECTION_LABEL
-        : organization.title;
-      groups.push({
-        id: `${organization.nodeId}-direct`,
-        section,
-        ...getGlobalUnplacedMetadata(section === GLOBAL_UNPLACED_SECTION_LABEL),
-        resources: directResources,
-      });
+    if (organizationDirectResources.length > 0) {
+      groups.push(
+        createGroup(
+          `${organization.nodeId}-direct`,
+          organization.title,
+          organizationDirectResources,
+        ),
+      );
     }
   });
 
@@ -289,22 +400,231 @@ function buildGroupsFromStructure(
   unplacedResources.forEach((resource) => groupedResourceIds.add(resource.id));
 
   if (unplacedResources.length > 0) {
-    groups.push({
-      id: 'unplaced-resources',
-      section: GLOBAL_UNPLACED_SECTION_LABEL,
-      ...getGlobalUnplacedMetadata(true),
-      resources: unplacedResources,
-    });
+    groups.push(
+      createGroup(
+        'unplaced-resources',
+        GLOBAL_UNPLACED_SECTION_LABEL,
+        unplacedResources,
+      ),
+    );
   }
 
   const remainingResources = resources.filter(
     (resource) => !groupedResourceIds.has(resource.id),
   );
+
   if (remainingResources.length > 0) {
     groups.push(...buildGroupsByPath(remainingResources));
   }
 
-  return groups;
+  return sortGlobalGroupLast(groups);
+}
+
+function buildResourceTree(resources: ResourceListItem[]): ResourceTreeNode[] {
+  const nodeMap = new Map<string, ResourceTreeNode>();
+
+  resources.forEach((resource) => {
+    nodeMap.set(resource.id, { resource, children: [] });
+  });
+
+  const roots: ResourceTreeNode[] = [];
+
+  resources.forEach((resource) => {
+    const node = nodeMap.get(resource.id);
+    if (!node) {
+      return;
+    }
+
+    const parentNode = resource.parentResourceId
+      ? nodeMap.get(resource.parentResourceId)
+      : null;
+
+    if (parentNode && resource.parentResourceId !== resource.id) {
+      parentNode.children.push(node);
+      return;
+    }
+
+    roots.push(node);
+  });
+
+  return roots;
+}
+
+function resourceMatchesFilters(
+  resource: ResourceListItem,
+  filters: ResourceFilters,
+) {
+  if (filters.onlyNoAccess && !isNoAccessResource(resource)) {
+    return false;
+  }
+
+  if (filters.onlyDownloadable && !resource.canDownload) {
+    return false;
+  }
+
+  return true;
+}
+
+function filterGroup(group: ResourceGroup, filters: ResourceFilters) {
+  if (filters.hideGlobalUnplaced && group.isGlobalUnplaced) {
+    return null;
+  }
+
+  const directResources = group.directResources.filter((resource) =>
+    resourceMatchesFilters(resource, filters),
+  );
+  const subsections = group.subsections
+    .map((subsection) => ({
+      ...subsection,
+      resources: subsection.resources.filter((resource) =>
+        resourceMatchesFilters(resource, filters),
+      ),
+    }))
+    .filter((subsection) => subsection.resources.length > 0);
+  const resourceIds = new Set([
+    ...directResources.map((resource) => resource.id),
+    ...subsections.flatMap((subsection) =>
+      subsection.resources.map((resource) => resource.id),
+    ),
+  ]);
+  const resources = group.resources.filter((resource) =>
+    resourceIds.has(resource.id),
+  );
+
+  if (resources.length === 0) {
+    return null;
+  }
+
+  return {
+    ...group,
+    resources,
+    directResources,
+    subsections,
+  };
+}
+
+function Badge({ children, tone }: { children: string; tone: BadgeTone }) {
+  return <span className={`badge ${getStatusClasses(tone)}`}>{children}</span>;
+}
+
+function ResourceItem({
+  jobId,
+  resource,
+}: {
+  jobId: string | undefined;
+  resource: ResourceListItem;
+}) {
+  const accessLabel = getAccessLabel(resource);
+  const isNoAccess = isNoAccessResource(resource);
+  const reasonDetail = getNoAccessDetail(resource);
+  const showTechnicalDetails = hasTechnicalDetails(resource);
+
+  return (
+    <div className="space-y-3 rounded-2xl border border-line bg-white p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-3">
+          <p className="break-words text-base font-semibold text-ink">
+            {resource.title}
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            <Badge tone="neutral">
+              {`Tipo: ${getReviewResourceTypeLabel(resource.type)}`}
+            </Badge>
+            <Badge tone={getAccessTone(resource)}>{accessLabel}</Badge>
+            <Badge tone={getDownloadTone(resource)}>
+              {getDownloadLabel(resource)}
+            </Badge>
+          </div>
+        </div>
+
+        {resource.canDownload && jobId ? (
+          <a
+            aria-label={`Descargar ${resource.title}`}
+            className="button-secondary w-full shrink-0 sm:w-auto"
+            href={getResourceDownloadUrl(jobId, resource.id)}
+          >
+            Descargar
+          </a>
+        ) : null}
+      </div>
+
+      {isNoAccess ? (
+        <div className="space-y-1 text-sm leading-6 text-ink">
+          <p>
+            <span className="font-semibold">Motivo:</span>{' '}
+            {getNoAccessReason(resource)}
+          </p>
+          {reasonDetail ? (
+            <p>
+              <span className="font-semibold">Detalle:</span> {reasonDetail}
+            </p>
+          ) : null}
+          {showTechnicalDetails ? (
+            <details className="mt-2 rounded-xl border border-line bg-[#f8faf7] px-3 py-2">
+              <summary className="cursor-pointer font-semibold text-ink focus:outline-none focus-visible:rounded-md focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-[#0f766e]">
+                Más detalles
+              </summary>
+              <dl className="mt-3 space-y-2 text-sm text-subtle">
+                {typeof resource.httpStatus === 'number' ? (
+                  <div>
+                    <dt className="font-semibold text-ink">Estado HTTP</dt>
+                    <dd>{resource.httpStatus}</dd>
+                  </div>
+                ) : null}
+                {resource.finalUrl ? (
+                  <div>
+                    <dt className="font-semibold text-ink">URL final</dt>
+                    <dd className="break-all">{resource.finalUrl}</dd>
+                  </div>
+                ) : null}
+              </dl>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ResourceTreeList({
+  jobId,
+  nodes,
+  level = 0,
+}: {
+  jobId: string | undefined;
+  nodes: ResourceTreeNode[];
+  level?: number;
+}) {
+  if (nodes.length === 0) {
+    return null;
+  }
+
+  return (
+    <ul
+      className={
+        level > 0 ? 'mt-3 space-y-3 border-l border-line pl-4' : 'space-y-3'
+      }
+    >
+      {nodes.map((node) => (
+        <li key={node.resource.id}>
+          <ResourceItem jobId={jobId} resource={node.resource} />
+          {node.children.length > 0 ? (
+            <div className="mt-3">
+              <p className="mb-2 text-sm font-semibold text-subtle">
+                Recursos detectados dentro
+              </p>
+              <ResourceTreeList
+                jobId={jobId}
+                level={level + 1}
+                nodes={node.children}
+              />
+            </div>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export function ResourcesPage() {
@@ -317,9 +637,10 @@ export function ResourcesPage() {
     globalUnplacedCount: null,
     noAccessCount: null,
   });
-  const [expandedSections, setExpandedSections] = useState<
-    Record<string, boolean>
-  >({});
+  const [filters, setFilters] = useState<ResourceFilters>(EMPTY_FILTERS);
+  const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>(
+    {},
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [isRetrying, setIsRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -390,16 +711,36 @@ export function ResourcesPage() {
       return buildGroupsFromStructure(structure, resources);
     }
 
-    return buildGroupsByPath(resources);
+    return sortGlobalGroupLast(buildGroupsByPath(resources));
   }, [resources, structure]);
+
+  const filteredGroups = useMemo(
+    () =>
+      groups
+        .map((group) => filterGroup(group, filters))
+        .filter((group): group is ResourceGroup => Boolean(group)),
+    [filters, groups],
+  );
   const accessedCount = useMemo(
-    () => resources.filter((resource) => resource.accessStatus === 'OK').length,
+    () =>
+      resources.filter((resource) => getAccessLabel(resource) === 'OK').length,
     [resources],
   );
   const inaccessibleCount = useMemo(
+    () => resources.filter(isNoAccessResource).length,
+    [resources],
+  );
+  const requiresSsoCount = useMemo(
     () =>
       resources.filter(
-        (resource) => !resource.canAccess || isNoAccessResource(resource),
+        (resource) => getAccessLabel(resource) === 'REQUIERE SSO',
+      ).length,
+    [resources],
+  );
+  const requiresInteractionCount = useMemo(
+    () =>
+      resources.filter(
+        (resource) => getAccessLabel(resource) === 'REQUIERE INTERACCIÓN',
       ).length,
     [resources],
   );
@@ -424,9 +765,54 @@ export function ResourcesPage() {
     backendCounts.noAccessCount ?? inaccessibleCount;
   const displayedGlobalUnplacedCount =
     backendCounts.globalUnplacedCount ?? globalUnplacedCount;
-  const shouldShowGlobalUnplacedCount =
-    backendCounts.globalUnplacedCount !== null ||
-    displayedGlobalUnplacedCount > 0;
+  const activeFilterCount = Object.values(filters).filter(Boolean).length;
+
+  const summaryItems = [
+    {
+      label: 'Accedidos',
+      value: `${accessedCount} de ${resources.length}`,
+      show: true,
+    },
+    {
+      label: 'Descargables',
+      value: `${downloadableCount} (${accessibleDownloadableCount} accesibles)`,
+      show: true,
+    },
+    {
+      label: 'No accesibles',
+      value: String(displayedInaccessibleCount),
+      show: true,
+    },
+    {
+      label: 'Requieren SSO',
+      value: String(requiresSsoCount),
+      show: requiresSsoCount > 0,
+    },
+    {
+      label: 'Requieren interacción',
+      value: String(requiresInteractionCount),
+      show: requiresInteractionCount > 0,
+    },
+    {
+      label: 'Recursos globales/no ubicados',
+      value: String(displayedGlobalUnplacedCount),
+      show: displayedGlobalUnplacedCount > 0,
+    },
+  ].filter((item) => item.show);
+
+  const togglePanel = (panelId: string) => {
+    setExpandedPanels((current) => ({
+      ...current,
+      [panelId]: !current[panelId],
+    }));
+  };
+
+  const updateFilter = (name: keyof ResourceFilters, checked: boolean) => {
+    setFilters((current) => ({
+      ...current,
+      [name]: checked,
+    }));
+  };
 
   const handleRetryAnalysis = async () => {
     if (!jobId) {
@@ -455,18 +841,11 @@ export function ResourcesPage() {
     }
   };
 
-  const toggleSection = (section: string) => {
-    setExpandedSections((current) => ({
-      ...current,
-      [section]: !current[section],
-    }));
-  };
-
   return (
     <LayoutSimple
       backLabel="Volver"
       backTo={`/${appMode}${getModeSearch(appMode)}`}
-      description="Resumen del acceso a recursos detectados durante el análisis."
+      description="Diagnóstico de acceso y descarga de los recursos detectados."
       title="Acceso a recursos"
     >
       {error ? (
@@ -484,195 +863,230 @@ export function ResourcesPage() {
           Cargando recursos del curso…
         </section>
       ) : (
-        <div className="space-y-6">
-          <section aria-live="polite" className="card-panel space-y-3 p-5">
+        <div className="space-y-8">
+          <section
+            aria-live="polite"
+            className="rounded-3xl border border-line bg-white p-5 shadow-card sm:p-6"
+          >
             <h2 className="text-lg font-semibold text-ink">
               Resumen del acceso
             </h2>
-            <p className="text-base text-ink">
-              Se ha accedido a {accessedCount} de {resources.length} recursos.
-            </p>
-            <p className="text-base text-ink">
-              Descargables: {downloadableCount} ({accessibleDownloadableCount}{' '}
-              accesibles).
-            </p>
-            <p className="text-base text-ink">
-              No accesibles: {displayedInaccessibleCount}.
-            </p>
-            {shouldShowGlobalUnplacedCount ? (
-              <p className="text-base text-ink">
-                Recursos globales/no ubicados: {displayedGlobalUnplacedCount}.
-              </p>
-            ) : null}
+            <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {summaryItems.map((item) => (
+                <div
+                  className="rounded-2xl border border-line bg-[#f8faf7] p-4"
+                  key={item.label}
+                >
+                  <dt className="text-sm font-medium text-subtle">
+                    {item.label}
+                  </dt>
+                  <dd className="mt-1 text-2xl font-semibold tracking-[-0.03em] text-ink">
+                    {item.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+
+          <section className="rounded-3xl border border-line bg-white p-5 shadow-card sm:p-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <h2 className="text-lg font-semibold text-ink">Filtros</h2>
+                <p className="text-sm leading-6 text-subtle">
+                  Usa estos controles para revisar incidencias y descargables
+                  sin perder contexto.
+                </p>
+              </div>
+
+              <button
+                className="button-secondary w-full sm:w-auto"
+                disabled={activeFilterCount === 0}
+                onClick={() => setFilters(EMPTY_FILTERS)}
+                type="button"
+              >
+                Limpiar filtros
+              </button>
+            </div>
+
+            <fieldset className="mt-5">
+              <legend className="sr-only">Filtrar recursos</legend>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.onlyNoAccess}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('onlyNoAccess', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Mostrar solo NO ACCEDE</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.onlyDownloadable}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('onlyDownloadable', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Mostrar solo descargables</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.hideGlobalUnplaced}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('hideGlobalUnplaced', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Ocultar recursos globales/no ubicados</span>
+                </label>
+              </div>
+            </fieldset>
           </section>
 
           <section className="space-y-4">
-            <h2 className="text-xl font-semibold text-ink">
-              Recursos por módulo o sección
-            </h2>
+            <div className="space-y-1">
+              <h2 className="text-xl font-semibold text-ink">
+                Recursos por módulo o sección
+              </h2>
+              <p className="text-sm leading-6 text-subtle">
+                Las secciones se abren y cierran con teclado. Los recursos
+                detectados dentro de una página aparecen como hijos cuando el
+                inventario lo indica.
+              </p>
+            </div>
 
-            {groups.length === 0 ? (
+            {filteredGroups.length === 0 ? (
               <div className="card-panel p-6 text-sm text-subtle">
-                No hay recursos para mostrar en este análisis.
+                No hay recursos que coincidan con los filtros actuales.
               </div>
             ) : (
-              groups.map((group) => {
-                const isExpanded = expandedSections[group.id] ?? false;
-                const sectionId = toSectionDomId(group.id);
-                const sectionDescriptionId = `${sectionId}-description`;
+              <div className="space-y-3">
+                {filteredGroups.map((group) => {
+                  const panelId = toPanelId('section', group.id);
+                  const isExpanded = expandedPanels[panelId] ?? false;
+                  const sectionDescriptionId = `${panelId}-description`;
 
-                return (
-                  <section
-                    className="card-panel overflow-hidden"
-                    key={group.id}
-                  >
-                    <h3>
-                      <button
-                        aria-controls={sectionId}
-                        aria-describedby={
-                          group.description ? sectionDescriptionId : undefined
-                        }
-                        aria-expanded={isExpanded}
-                        className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
-                        onClick={() => toggleSection(group.id)}
-                        type="button"
-                      >
-                        <span>{group.section}</span>
-                        <span className="text-sm font-medium text-subtle">
-                          {group.resources.length}
-                        </span>
-                      </button>
-                    </h3>
-                    {group.description ? (
-                      <p
-                        className="px-5 pb-4 text-sm leading-6 text-subtle sm:px-6"
-                        id={sectionDescriptionId}
-                      >
-                        {group.description}
-                      </p>
-                    ) : null}
-
+                  return (
                     <div
-                      className="border-t border-line"
-                      hidden={!isExpanded}
-                      id={sectionId}
+                      className="overflow-hidden rounded-3xl border border-line bg-white shadow-card"
+                      key={group.id}
                     >
-                      <ul className="divide-y divide-line">
-                        {group.resources.map((resource) => {
-                          const accessLabel = getAccessLabel(resource);
-                          const downloadLabel = getDownloadLabel(resource);
-                          const isNoAccess = isNoAccessResource(resource);
-                          const reasonDetail = getNoAccessDetail(resource);
-                          const showTechnicalDetails =
-                            hasTechnicalDetails(resource);
-                          const downloadable = jobId
-                            ? isDownloadable(resource, appMode)
-                            : false;
+                      <h3>
+                        <button
+                          aria-controls={panelId}
+                          aria-describedby={
+                            group.description ? sectionDescriptionId : undefined
+                          }
+                          aria-expanded={isExpanded}
+                          aria-label={`${isExpanded ? 'Cerrar' : 'Abrir'} sección ${group.section}, ${group.resources.length} recursos`}
+                          className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
+                          onClick={() => togglePanel(panelId)}
+                          type="button"
+                        >
+                          <span>{group.section}</span>
+                          <span className="shrink-0 text-sm font-medium text-subtle">
+                            {group.resources.length} recursos
+                          </span>
+                        </button>
+                      </h3>
+                      {group.description ? (
+                        <p
+                          className="px-5 pb-4 text-sm leading-6 text-subtle sm:px-6"
+                          id={sectionDescriptionId}
+                        >
+                          {group.description}
+                        </p>
+                      ) : null}
 
-                          return (
-                            <li
-                              className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6"
-                              key={resource.id}
-                            >
-                              <div className="space-y-2">
-                                <p className="text-base font-semibold text-ink">
-                                  {resource.title}
-                                </p>
-                                <div className="flex flex-wrap gap-2 text-sm">
-                                  <span className="inline-flex rounded-full border border-line bg-[#f7faf7] px-3 py-1 font-medium text-subtle">
-                                    Tipo:{' '}
-                                    {getReviewResourceTypeLabel(resource.type)}
-                                  </span>
-                                  <span
-                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getAccessTone(resource))}`}
-                                  >
-                                    Estado: {accessLabel}
-                                  </span>
-                                  <span
-                                    className={`inline-flex rounded-full border px-3 py-1 font-semibold ${getStatusClasses(getDownloadTone(resource))}`}
-                                  >
-                                    Descargable: {downloadLabel}
-                                  </span>
-                                </div>
+                      <div
+                        className="border-t border-line bg-[#fbfcfa] p-4 sm:p-5"
+                        hidden={!isExpanded}
+                        id={panelId}
+                      >
+                        {group.directResources.length > 0 ? (
+                          <ResourceTreeList
+                            jobId={jobId}
+                            nodes={buildResourceTree(group.directResources)}
+                          />
+                        ) : null}
 
-                                {isNoAccess ? (
-                                  <div className="space-y-1 text-sm leading-6 text-ink">
-                                    <p>
-                                      <span className="font-semibold">
-                                        Motivo:
-                                      </span>{' '}
-                                      {getNoAccessReason(resource)}
-                                    </p>
-                                    {reasonDetail ? (
-                                      <p>
-                                        <span className="font-semibold">
-                                          Detalle:
-                                        </span>{' '}
-                                        {reasonDetail}
-                                      </p>
-                                    ) : null}
-                                    {showTechnicalDetails ? (
-                                      <details className="mt-2 rounded-xl border border-line bg-white px-3 py-2">
-                                        <summary className="cursor-pointer font-semibold text-ink focus:outline-none focus-visible:rounded-md focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2">
-                                          Más detalles
-                                        </summary>
-                                        <dl className="mt-2 space-y-2 text-sm text-subtle">
-                                          {typeof resource.httpStatus ===
-                                          'number' ? (
-                                            <div>
-                                              <dt className="font-semibold text-ink">
-                                                Estado HTTP
-                                              </dt>
-                                              <dd>{resource.httpStatus}</dd>
-                                            </div>
-                                          ) : null}
-                                          {resource.finalUrl ? (
-                                            <div>
-                                              <dt className="font-semibold text-ink">
-                                                URL final
-                                              </dt>
-                                              <dd className="break-all">
-                                                {resource.finalUrl}
-                                              </dd>
-                                            </div>
-                                          ) : null}
-                                        </dl>
-                                      </details>
-                                    ) : null}
-                                  </div>
-                                ) : null}
-                              </div>
+                        {group.subsections.length > 0 ? (
+                          <div className="space-y-3">
+                            {group.subsections.map((subsection) => {
+                              const subsectionPanelId = toPanelId(
+                                'subsection',
+                                `${group.id}-${subsection.id}`,
+                              );
+                              const subsectionExpanded =
+                                expandedPanels[subsectionPanelId] ?? false;
 
-                              {downloadable && jobId ? (
-                                <a
-                                  aria-label={`Descargar ${resource.title}`}
-                                  className="button-secondary w-full sm:w-auto"
-                                  href={getResourceDownloadUrl(
-                                    jobId,
-                                    resource.id,
-                                  )}
+                              return (
+                                <div
+                                  className="overflow-hidden rounded-2xl border border-line bg-white"
+                                  key={subsection.id}
                                 >
-                                  Descargar
-                                </a>
-                              ) : null}
-                            </li>
-                          );
-                        })}
-                      </ul>
+                                  <h4>
+                                    <button
+                                      aria-controls={subsectionPanelId}
+                                      aria-expanded={subsectionExpanded}
+                                      aria-label={`${subsectionExpanded ? 'Cerrar' : 'Abrir'} subapartado ${subsection.title}, ${subsection.resources.length} recursos`}
+                                      className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left text-sm font-semibold text-ink"
+                                      onClick={() =>
+                                        togglePanel(subsectionPanelId)
+                                      }
+                                      type="button"
+                                    >
+                                      <span>{subsection.title}</span>
+                                      <span className="shrink-0 text-xs font-medium uppercase tracking-[0.08em] text-subtle">
+                                        {subsection.resources.length} recursos
+                                      </span>
+                                    </button>
+                                  </h4>
+                                  <div
+                                    className="border-t border-line bg-[#fbfcfa] p-4"
+                                    hidden={!subsectionExpanded}
+                                    id={subsectionPanelId}
+                                  >
+                                    <ResourceTreeList
+                                      jobId={jobId}
+                                      nodes={buildResourceTree(
+                                        subsection.resources,
+                                      )}
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
-                  </section>
-                );
-              })
+                  );
+                })}
+              </div>
             )}
           </section>
 
-          <div className="flex flex-col gap-3 sm:flex-row">
+          <div className="flex flex-col gap-3 border-t border-line pt-6 sm:flex-row sm:flex-wrap">
             <Link
               className="button-secondary w-full sm:w-auto"
               to={`/${appMode}${getModeSearch(appMode)}`}
             >
               Volver
             </Link>
+            {jobId ? (
+              <Link
+                className="button-secondary w-full sm:w-auto"
+                to={`/report/${jobId}${getModeSearch(appMode)}`}
+              >
+                Ver informe
+              </Link>
+            ) : null}
             <button
               className="button-primary w-full sm:w-auto"
               disabled={isRetrying}

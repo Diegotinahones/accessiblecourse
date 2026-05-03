@@ -66,6 +66,12 @@ class ChecklistDecision(str, Enum):
     FAIL = "fail"
 
 
+class AnalysisCategory(str, Enum):
+    MAIN_ANALYZABLE = "MAIN_ANALYZABLE"
+    NON_ANALYZABLE_EXTERNAL = "NON_ANALYZABLE_EXTERNAL"
+    TECHNICAL_IGNORED = "TECHNICAL_IGNORED"
+
+
 class ChecklistItem(BaseModel):
     id: str
     label: str
@@ -179,6 +185,7 @@ class ResourceListItemRead(StrictModel):
     title: str
     type: ReviewResourceType
     origin: str | None = None
+    analysisCategory: AnalysisCategory = AnalysisCategory.MAIN_ANALYZABLE
     url: str | None = None
     sourceUrl: str | None = None
     downloadUrl: str | None = None
@@ -248,6 +255,7 @@ class AccessSummaryRead(StrictModel):
     status: str
     progress: int
     total: int
+    totalAnalizables: int | None = None
     accessible: int
     downloadable: int
     downloadableAccessible: int = 0
@@ -259,6 +267,8 @@ class AccessSummaryRead(StrictModel):
     downloadables_ok: int = 0
     byStatus: dict[str, int]
     groups: list[AccessSummaryGroupRead] = Field(default_factory=list)
+    noAnalizablesExternos: int = 0
+    tecnicosIgnorados: int = 0
     discovered: int = 0
     deepScan: dict[str, Any] | None = None
 
@@ -286,11 +296,39 @@ class JobAccessRead(StrictModel):
     progress: int
     summary: AccessSummaryRead
     modules: list[AccessModuleRead] = Field(default_factory=list)
+    nonAnalyzableExternalResources: list["AuxiliaryResourceRead"] = Field(default_factory=list)
+
+
+class AuxiliaryResourceRead(StrictModel):
+    id: str
+    title: str
+    type: str
+    origin: str | None = None
+    analysisCategory: AnalysisCategory
+    source: str | None = None
+    url: str | None = None
+    path: str | None = None
+    coursePath: str | None = None
+    modulePath: str | None = None
+    moduleTitle: str | None = None
+    sectionTitle: str | None = None
+    itemPath: str | None = None
+    status: str | None = None
+    accessStatus: str | None = None
+    canAccess: bool = False
+    canDownload: bool = False
+    accessNote: str | None = None
+    errorMessage: str | None = None
+    notes: str | None = None
 
 
 class ResourceListPayload(StrictModel):
     jobId: str
     resources: list[ResourceListItemRead]
+    totalAnalizables: int = 0
+    noAnalizablesExternos: int = 0
+    tecnicosIgnorados: int = 0
+    nonAnalyzableExternalResources: list[AuxiliaryResourceRead] = Field(default_factory=list)
     reviewSession: ReviewSessionRead
     structure: "CourseStructureRead"
 
@@ -390,9 +428,12 @@ class ReviewFailResourceRead(StrictModel):
 class ReviewSummaryPayload(StrictModel):
     jobId: str
     totalResources: int
+    totalAnalizables: int | None = None
     totalFailItems: int
     accessibleResources: int = 0
     downloadableResources: int = 0
+    noAnalizablesExternos: int = 0
+    tecnicosIgnorados: int = 0
     lastUpdated: datetime
     reviewSession: ReviewSessionRead
     resources: list[ReviewFailResourceRead]

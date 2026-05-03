@@ -42,6 +42,7 @@ from app.services.course_structure import (
 )
 from app.services.jobs import (
     create_job_record,
+    load_inventory_breakdown,
     prepare_access_analysis_retry,
     prepare_retry_job,
     process_job,
@@ -111,6 +112,7 @@ def _resource_read(
         title=resource.title,
         type=resource.type,
         origin=resource.origin,
+        analysisCategory=inventory_item.analysis_category if inventory_item is not None else "MAIN_ANALYZABLE",
         url=source_url,
         sourceUrl=source_url,
         downloadUrl=download_url,
@@ -172,9 +174,10 @@ def _is_broken_inventory_resource(resource: Resource, inventory_item) -> bool:
     return resource.status.value == "ERROR"
 
 
-def _build_access_summary(session: Session, job_id: str) -> AccessSummaryRead:
+def _build_access_summary(session: Session, settings: Settings, job_id: str) -> AccessSummaryRead:
     resources = session.exec(select(Resource).where(Resource.job_id == job_id)).all()
     job = get_processing_job_or_404(session, job_id)
+    _, non_analyzable_external_count, technical_ignored_count = load_inventory_breakdown(settings, job_id)
     resource_payload = [
         {
             "id": resource.id,
@@ -202,6 +205,9 @@ def _build_access_summary(session: Session, job_id: str) -> AccessSummaryRead:
     )
     summary["downloadableAccessible"] = sum(1 for resource in resources if resource.can_access and resource.can_download)
     summary["discovered"] = sum(resource.discovered_children_count for resource in resources)
+    summary["totalAnalizables"] = summary["total"]
+    summary["noAnalizablesExternos"] = non_analyzable_external_count
+    summary["tecnicosIgnorados"] = technical_ignored_count
     return AccessSummaryRead.model_validate(summary)
 
 
@@ -214,7 +220,8 @@ def _coerce_job_phase(value: str | None) -> JobPhase:
 def _build_access_response(session: Session, settings: Settings, job_id: str) -> JobAccessRead:
     _ensure_review_inventory(session, settings, job_id)
     job = get_processing_job_or_404(session, job_id)
-    summary = _build_access_summary(session, job_id)
+    summary = _build_access_summary(session, settings, job_id)
+    non_analyzable_external_resources, _, _ = load_inventory_breakdown(settings, job_id)
     inventory_items = _load_inventory_items_or_empty(settings, job_id)
     inventory_index = {item.id: item for item in inventory_items}
     inventory_order = {item.id: index for index, item in enumerate(inventory_items)}
@@ -262,6 +269,7 @@ def _build_access_response(session: Session, settings: Settings, job_id: str) ->
         progress=job.progress,
         summary=summary,
         modules=modules,
+        nonAnalyzableExternalResources=non_analyzable_external_resources,
     )
 
 
@@ -301,6 +309,7 @@ def _get_review_resource(session: Session, job_id: str, resource_id: str) -> Res
 
 def _build_summary_response(session: Session, settings: Settings, job_id: str) -> ReviewSummaryPayload:
     _ensure_review_inventory(session, settings, job_id)
+    _, non_analyzable_external_count, technical_ignored_count = load_inventory_breakdown(settings, job_id)
     try:
         review_session, review_summary, rows = build_summary_payload(session, job_id)
     except LookupError as exc:
@@ -315,9 +324,12 @@ def _build_summary_response(session: Session, settings: Settings, job_id: str) -
     return ReviewSummaryPayload(
         jobId=job_id,
         totalResources=review_summary.total_resources,
+        totalAnalizables=review_summary.total_resources,
         totalFailItems=review_summary.total_fail_items,
         accessibleResources=review_summary.accessible_resources,
         downloadableResources=review_summary.downloadable_resources,
+        noAnalizablesExternos=non_analyzable_external_count,
+        tecnicosIgnorados=technical_ignored_count,
         lastUpdated=review_summary.last_updated,
         reviewSession=_review_session_read(review_session),
         resources=[
@@ -440,7 +452,10 @@ def get_resources(
     settings: Settings = Depends(get_settings),
 ) -> ResourceListPayload:
     _ensure_review_inventory(session, settings, job_id)
-    review_session, _ = ensure_review_rollups(session, job_id)
+    review_session, review_summary = ensure_review_rollups(session, job_id)
+    non_analyzable_external_resources, non_analyzable_external_count, technical_ignored_count = (
+        load_inventory_breakdown(settings, job_id)
+    )
     inventory_items = _load_inventory_items_or_empty(settings, job_id)
     inventory_index = {item.id: item for item in inventory_items}
     inventory_order = {item.id: index for index, item in enumerate(inventory_items)}
@@ -461,6 +476,10 @@ def get_resources(
     return ResourceListPayload(
         jobId=job_id,
         resources=resources,
+        totalAnalizables=review_summary.total_resources,
+        noAnalizablesExternos=non_analyzable_external_count,
+        tecnicosIgnorados=technical_ignored_count,
+        nonAnalyzableExternalResources=non_analyzable_external_resources,
         reviewSession=_review_session_read(review_session),
         structure=_build_visible_course_structure(settings, job_id, resources),
     )
@@ -518,7 +537,7 @@ def get_access_summary(
     settings: Settings = Depends(get_settings),
 ) -> AccessSummaryRead:
     _ensure_review_inventory(session, settings, job_id)
-    return _build_access_summary(session, job_id)
+    return _build_access_summary(session, settings, job_id)
 
 
 @router.get("/{job_id}/access", response_model=JobAccessRead)

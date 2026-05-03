@@ -6,6 +6,7 @@ import shutil
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlmodel import Session, delete, select
 
@@ -21,6 +22,7 @@ from app.models.entities import (
     ReviewSummary,
 )
 from app.schemas import (
+    AuxiliaryResourceRead,
     ChecklistDecision,
     ChecklistStateResponse,
     ChecklistUpdateRequest,
@@ -36,8 +38,8 @@ from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
 from app.services.course_structure import build_fallback_course_structure
 from app.services.imscc import build_resources_from_extracted
-from app.services.imscc_parser import IMSCCParser, ParserError
-from app.services.review_service import sync_job_inventory_from_payload
+from app.services.imscc_parser import HTML_RESOURCE_EXTENSIONS, IMSCCParser, ParserError
+from app.services.review_service import load_inventory_file, sync_job_inventory_from_payload
 from app.services.storage import (
     get_extracted_dir,
     get_job_dir,
@@ -49,6 +51,14 @@ from app.services.url_check import URLCheckService
 
 logger = logging.getLogger("accessiblecourse.jobs")
 DEFAULT_GENERIC_MODULE_TITLE = "Módulo general"
+ANALYSIS_CATEGORY_MAIN = "MAIN_ANALYZABLE"
+ANALYSIS_CATEGORY_NON_ANALYZABLE_EXTERNAL = "NON_ANALYZABLE_EXTERNAL"
+ANALYSIS_CATEGORY_TECHNICAL_IGNORED = "TECHNICAL_IGNORED"
+NON_ANALYZABLE_TITLE_MARKERS = {"recursos de aprendizaje", "learning tools"}
+NON_ANALYZABLE_HOST_MARKERS = ("ralti.uoc.edu", "id-provider.uoc.edu")
+NON_ANALYZABLE_URL_MARKERS = ("ralti", "sso", "id-provider", "lti_resource_links")
+TECHNICAL_FILENAME_MARKERS = {".ds_store", "thumbs.db", "desktop.ini", "imsmanifest.xml"}
+TECHNICAL_DIR_MARKERS = {"__macosx", "lti_resource_links"}
 
 RESOURCE_TYPE_TO_REVIEW_TYPE = {
     "PDF": "PDF",
@@ -208,7 +218,7 @@ def _build_review_inventory(
                 "id": parsed_resource.resource_id,
                 "title": parsed_resource.title,
                 "type": RESOURCE_TYPE_TO_REVIEW_TYPE.get(parsed_resource.resource_type, "OTHER"),
-                "origin": _normalize_origin(parsed_resource.origin, source_url=source_url),
+                "origin": _normalize_origin(parsed_resource.origin, source_url=source_url, file_path=file_path),
                 "url": source_url,
                 "sourceUrl": source_url,
                 "path": file_path,
@@ -311,11 +321,353 @@ def _should_skip_metadata_resource(
     return Path(normalized_name).suffix.lower() in excluded_extensions
 
 
-def _normalize_origin(origin: str | None, *, source_url: str | None) -> str:
+def _normalize_label(value: str | None) -> str:
+    if value is None:
+        return ""
+    return " ".join(value.strip().lower().split())
+
+
+def _strip_reference_suffix(reference: str | None) -> str | None:
+    if not isinstance(reference, str):
+        return None
+    stripped = reference.strip()
+    if not stripped:
+        return None
+    parsed = urlparse(stripped)
+    if parsed.scheme and parsed.netloc:
+        return parsed.path or "/"
+    return stripped.split("#", 1)[0].split("?", 1)[0]
+
+
+def _normalized_inventory_path(value: str | None) -> str | None:
+    stripped = _strip_reference_suffix(value)
+    if not stripped:
+        return None
+    normalized = PurePosixPath(stripped.replace("\\", "/")).as_posix()
+    return normalized.lstrip("./") or None
+
+
+def _normalized_inventory_url(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    parsed = urlparse(stripped)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    path = parsed.path.rstrip("/") or "/"
+    normalized = parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(), path=path, fragment="")
+    return normalized.geturl()
+
+
+def _extract_manifest_resource_type(resource: dict[str, Any]) -> str:
+    details = resource.get("details")
+    if not isinstance(details, dict):
+        return ""
+    manifest_resource_type = details.get("manifestResourceType")
+    if not isinstance(manifest_resource_type, str):
+        return ""
+    return manifest_resource_type.strip().lower()
+
+
+def _path_looks_technical(file_path: str | None, *, excluded_extensions: set[str]) -> bool:
+    normalized_path = _normalized_inventory_path(file_path)
+    if not normalized_path:
+        return False
+
+    pure_path = PurePosixPath(normalized_path)
+    lower_parts = {part.lower() for part in pure_path.parts}
+    filename = pure_path.name.lower()
+    if filename in TECHNICAL_FILENAME_MARKERS:
+        return True
+    if lower_parts.intersection(TECHNICAL_DIR_MARKERS):
+        return True
+    return pure_path.suffix.lower() in excluded_extensions
+
+
+def _looks_like_non_analyzable_external(
+    *,
+    title: str | None,
+    source_url: str | None,
+    file_path: str | None,
+    manifest_resource_type: str,
+    access_status: str | None,
+    notes: str,
+    access_note: str | None,
+    error_message: str | None,
+) -> bool:
+    normalized_title = _normalize_label(title)
+    if any(marker in normalized_title for marker in NON_ANALYZABLE_TITLE_MARKERS):
+        return True
+
+    normalized_url = _normalized_inventory_url(source_url)
+    if normalized_url:
+        parsed = urlparse(normalized_url)
+        host = parsed.netloc.lower()
+        path = parsed.path.lower()
+        if any(marker in host for marker in NON_ANALYZABLE_HOST_MARKERS):
+            return True
+        normalized_url_lower = normalized_url.lower()
+        if any(marker in normalized_url_lower or marker in path for marker in NON_ANALYZABLE_URL_MARKERS):
+            return True
+
+    normalized_access_status = _normalize_label(access_status)
+    if normalized_access_status in {"requiere_sso", "requiere sso"}:
+        return True
+
+    joined_notes = " ".join(
+        part for part in [notes, _normalize_label(access_note), _normalize_label(error_message)] if part
+    )
+    if any(marker in joined_notes for marker in ("requires_sso", "requiere sso", "learning tools", "ralti", "lti")):
+        return True
+
+    if "lti" in manifest_resource_type and not file_path:
+        return True
+
+    return False
+
+
+def _analysis_category_for_offline_resource(
+    resource: dict[str, Any],
+    *,
+    excluded_extensions: set[str],
+) -> str:
+    source_url = _normalized_inventory_url(resource.get("sourceUrl") or resource.get("url"))
+    file_path = _normalized_inventory_path(resource.get("filePath") or resource.get("localPath") or resource.get("path"))
+    manifest_resource_type = _extract_manifest_resource_type(resource)
+    notes_value = resource.get("notes")
+    if isinstance(notes_value, list):
+        notes = " ".join(_normalize_label(str(item)) for item in notes_value if str(item).strip())
+    else:
+        notes = _normalize_label(str(notes_value)) if isinstance(notes_value, str) else ""
+
+    if _path_looks_technical(file_path, excluded_extensions=excluded_extensions):
+        return ANALYSIS_CATEGORY_TECHNICAL_IGNORED
+
+    if _looks_like_non_analyzable_external(
+        title=str(resource.get("title") or ""),
+        source_url=source_url,
+        file_path=file_path,
+        manifest_resource_type=manifest_resource_type,
+        access_status=(
+            resource.get("accessStatus")
+            if isinstance(resource.get("accessStatus"), str)
+            else resource.get("access_status")
+            if isinstance(resource.get("access_status"), str)
+            else None
+        ),
+        notes=notes,
+        access_note=resource.get("accessNote") if isinstance(resource.get("accessNote"), str) else None,
+        error_message=resource.get("errorMessage") if isinstance(resource.get("errorMessage"), str) else None,
+    ):
+        return ANALYSIS_CATEGORY_NON_ANALYZABLE_EXTERNAL
+
+    if source_url:
+        return ANALYSIS_CATEGORY_MAIN
+
+    if file_path:
+        return ANALYSIS_CATEGORY_MAIN
+
+    if "lti" in manifest_resource_type or any(
+        marker in _normalize_label(str(resource.get("title") or "")) for marker in NON_ANALYZABLE_TITLE_MARKERS
+    ):
+        return ANALYSIS_CATEGORY_NON_ANALYZABLE_EXTERNAL
+
+    return ANALYSIS_CATEGORY_TECHNICAL_IGNORED
+
+
+def _normalize_origin(origin: str | None, *, source_url: str | None, file_path: str | None) -> str:
     normalized = (origin or "").strip().lower()
-    if normalized in {"external", "externo"} or source_url:
-        return "externo"
-    return "interno"
+    normalized_path = _normalized_inventory_path(file_path)
+    if normalized in {"external", "externo", "external_url"} or source_url:
+        return "external_url"
+    if normalized in {"internal_page"}:
+        return "internal_page"
+    if normalized_path and Path(normalized_path).suffix.lower() in HTML_RESOURCE_EXTENSIONS:
+        return "internal_page"
+    return "internal_file"
+
+
+def _merge_inventory_notes(primary: Any, duplicate: Any) -> Any:
+    normalized: list[str] = []
+    for candidate in (primary, duplicate):
+        if isinstance(candidate, list):
+            values = [str(item).strip() for item in candidate if str(item).strip()]
+        elif isinstance(candidate, str):
+            values = [candidate.strip()] if candidate.strip() else []
+        else:
+            values = []
+        for value in values:
+            if value not in normalized:
+                normalized.append(value)
+    if not normalized:
+        return None
+    return normalized if len(normalized) > 1 else normalized[0]
+
+
+def _dedupe_inventory_key(resource: dict[str, Any]) -> tuple[str, str] | None:
+    file_path = _normalized_inventory_path(resource.get("filePath") or resource.get("localPath") or resource.get("path"))
+    if file_path:
+        return ("path", file_path.lower())
+
+    source_url = _normalized_inventory_url(resource.get("sourceUrl") or resource.get("url"))
+    if source_url:
+        return ("url", source_url)
+
+    title = _normalize_label(str(resource.get("title") or ""))
+    course_path = _normalize_label(
+        str(resource.get("itemPath") or resource.get("item_path") or resource.get("coursePath") or "")
+    )
+    if title and course_path:
+        return ("title-course", f"{title}|{course_path}")
+    return None
+
+
+def _dedupe_offline_inventory(inventory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    resource_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for resource in inventory:
+        dedupe_key = _dedupe_inventory_key(resource)
+        if dedupe_key is None:
+            deduped.append(resource)
+            continue
+
+        existing = resource_by_key.get(dedupe_key)
+        if existing is None:
+            resource_by_key[dedupe_key] = resource
+            deduped.append(resource)
+            continue
+
+        for field in (
+            "modulePath",
+            "module_path",
+            "coursePath",
+            "course_path",
+            "itemPath",
+            "item_path",
+            "moduleTitle",
+            "module_title",
+            "sectionTitle",
+            "section_title",
+            "url",
+            "sourceUrl",
+            "filePath",
+            "localPath",
+            "path",
+            "source",
+            "accessNote",
+            "access_note",
+            "errorMessage",
+            "error_message",
+        ):
+            value = existing.get(field)
+            if isinstance(value, str) and value.strip():
+                continue
+            candidate = resource.get(field)
+            if candidate is not None:
+                existing[field] = candidate
+
+        existing["canAccess"] = bool(existing.get("canAccess")) or bool(resource.get("canAccess"))
+        existing["can_access"] = bool(existing.get("canAccess"))
+        existing["canDownload"] = bool(existing.get("canDownload")) or bool(resource.get("canDownload"))
+        existing["can_download"] = bool(existing.get("canDownload"))
+        existing["discoveredChildrenCount"] = max(
+            int(existing.get("discoveredChildrenCount") or 0),
+            int(resource.get("discoveredChildrenCount") or 0),
+        )
+        existing["discovered_children_count"] = existing["discoveredChildrenCount"]
+        existing["notes"] = _merge_inventory_notes(existing.get("notes"), resource.get("notes"))
+
+    return deduped
+
+
+def _inventory_source(resource: dict[str, Any]) -> str | None:
+    for key in ("source", "sourceUrl", "url", "filePath", "localPath", "path", "href"):
+        value = resource.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _technical_ignored_count(settings: Settings, job_id: str, *, excluded_extensions: set[str]) -> int:
+    try:
+        extracted_dir = get_extracted_dir(settings, job_id)
+    except AppError:
+        return 0
+    if not extracted_dir.exists():
+        return 0
+
+    ignored: set[str] = set()
+    for path in extracted_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        relative_path = path.resolve().relative_to(extracted_dir.resolve()).as_posix()
+        if _path_looks_technical(relative_path, excluded_extensions=excluded_extensions):
+            ignored.add(relative_path.lower())
+    return len(ignored)
+
+
+def _enum_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "value"):
+        return str(value.value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return str(value)
+
+
+def _build_auxiliary_resource(item: Any) -> AuxiliaryResourceRead:
+    source = getattr(item, "source", None) or getattr(item, "source_url", None) or getattr(item, "file_path", None)
+    return AuxiliaryResourceRead(
+        id=str(getattr(item, "id")),
+        title=str(getattr(item, "title", "Recurso sin titulo")),
+        type=_enum_value(getattr(item, "type", None)) or "OTHER",
+        origin=_enum_value(getattr(item, "origin", None)),
+        analysisCategory=getattr(item, "analysis_category"),
+        source=source,
+        url=getattr(item, "source_url", None),
+        path=getattr(item, "file_path", None),
+        coursePath=getattr(item, "course_path", None),
+        modulePath=getattr(item, "course_path", None),
+        moduleTitle=getattr(item, "module_title", None),
+        sectionTitle=getattr(item, "section_title", None),
+        itemPath=getattr(item, "item_path", None),
+        status=_enum_value(getattr(item, "status", None)),
+        accessStatus=_enum_value(getattr(item, "access_status", None)),
+        canAccess=bool(getattr(item, "can_access", False)),
+        canDownload=bool(getattr(item, "can_download", False)),
+        accessNote=getattr(item, "access_note", None),
+        errorMessage=getattr(item, "error_message", None),
+        notes=getattr(item, "notes", None),
+    )
+
+
+def load_inventory_breakdown(settings: Settings, job_id: str) -> tuple[list[AuxiliaryResourceRead], int, int]:
+    try:
+        items = load_inventory_file(settings, job_id)
+    except (FileNotFoundError, ValueError):
+        return [], 0, 0
+
+    auxiliary_resources = [
+        _build_auxiliary_resource(item)
+        for item in items
+        if getattr(item, "analysis_category", ANALYSIS_CATEGORY_MAIN) == ANALYSIS_CATEGORY_NON_ANALYZABLE_EXTERNAL
+    ]
+    excluded_extensions = _normalized_excluded_extensions(settings)
+    technical_from_payload = sum(
+        1
+        for item in items
+        if getattr(item, "analysis_category", ANALYSIS_CATEGORY_MAIN) == ANALYSIS_CATEGORY_TECHNICAL_IGNORED
+    )
+    technical_ignored = max(
+        technical_from_payload,
+        _technical_ignored_count(settings, job_id, excluded_extensions=excluded_extensions),
+    )
+    return auxiliary_resources, len(auxiliary_resources), technical_ignored
 
 
 def _normalize_offline_inventory(
@@ -336,13 +688,6 @@ def _normalize_offline_inventory(
             file_path = file_path.strip() or None
         else:
             file_path = None
-
-        if _should_skip_metadata_resource(
-            file_path=file_path,
-            source_url=source_url,
-            excluded_extensions=excluded_extensions,
-        ):
-            continue
 
         module_path = resource.get("modulePath") or resource.get("module_path") or resource.get("coursePath")
         if not isinstance(module_path, str) or not module_path.strip():
@@ -383,13 +728,14 @@ def _normalize_offline_inventory(
             downloadable = bool(
                 not source_url
                 and file_path
-                and Path(file_path).suffix.lower() not in {".html", ".htm", ".xhtml"}
+                and Path(file_path).suffix.lower() not in {*HTML_RESOURCE_EXTENSIONS, ".xhtml"}
             )
 
         normalized = dict(resource)
         normalized["origin"] = _normalize_origin(
             resource.get("origin") if isinstance(resource.get("origin"), str) else None,
             source_url=source_url,
+            file_path=file_path,
         )
         normalized["url"] = source_url
         normalized["sourceUrl"] = source_url
@@ -407,10 +753,21 @@ def _normalize_offline_inventory(
         normalized["section_title"] = section_title
         normalized["sectionTitle"] = section_title
         normalized["downloadable"] = downloadable
+        normalized["canDownload"] = bool(resource.get("canDownload")) or downloadable
+        normalized["can_download"] = normalized["canDownload"]
+        normalized["source"] = _inventory_source(normalized)
+        analysis_category = _analysis_category_for_offline_resource(
+            normalized,
+            excluded_extensions=excluded_extensions,
+        )
+        if analysis_category == ANALYSIS_CATEGORY_TECHNICAL_IGNORED:
+            continue
+        normalized["analysisCategory"] = analysis_category
+        normalized["analysis_category"] = analysis_category
         normalized.setdefault("details", {})
         normalized_resources.append(normalized)
 
-    return normalized_resources
+    return _dedupe_offline_inventory(normalized_resources)
 
 
 def _assign_generic_module_paths(resources: list[dict[str, Any]], module_title: str = DEFAULT_GENERIC_MODULE_TITLE) -> None:
@@ -997,7 +1354,17 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 ),
                 progress=95,
             )
-            inventory = access_analysis.resources
+            inventory = _normalize_offline_inventory(
+                access_analysis.resources,
+                preserve_unmapped_paths=True,
+                excluded_extensions=_normalized_excluded_extensions(settings),
+            )
+            if not inventory:
+                raise AppError(
+                    code="no_resources_found",
+                    message="No se han encontrado recursos analizables dentro del paquete.",
+                    job_id=job_id,
+                )
             access_summary = access_analysis.summary
 
             _update_job_progress(
@@ -1037,8 +1404,16 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 progress=100,
                 details={
                     "resourceCount": len(inventory),
-                    "accessibleCount": access_summary["accessible"],
-                    "downloadableCount": access_summary["downloadable"],
+                    "accessibleCount": sum(
+                        1
+                        for resource in inventory
+                        if resource.get("analysisCategory") == ANALYSIS_CATEGORY_MAIN and resource.get("canAccess")
+                    ),
+                    "downloadableCount": sum(
+                        1
+                        for resource in inventory
+                        if resource.get("analysisCategory") == ANALYSIS_CATEGORY_MAIN and resource.get("canDownload")
+                    ),
                     "discoveredCount": access_analysis.discovered_count,
                     "byStatus": access_summary["byStatus"],
                 },
@@ -1417,15 +1792,23 @@ def rerun_access_analysis(
                 progress=95,
                 clean_discovered=True,
             )
+            if get_extracted_dir(settings, job_id).exists():
+                inventory = _normalize_offline_inventory(
+                    analysis.resources,
+                    preserve_unmapped_paths=True,
+                    excluded_extensions=_normalized_excluded_extensions(settings),
+                )
+            else:
+                inventory = analysis.resources
             course_structure = _load_course_structure_payload(settings, job_id)
             if course_structure is None:
-                course_structure = build_fallback_course_structure(analysis.resources, title=job.original_filename)
+                course_structure = build_fallback_course_structure(inventory, title=job.original_filename)
 
             _persist_analyzed_inventory(
                 session,
                 settings,
                 job_id=job_id,
-                inventory=analysis.resources,
+                inventory=inventory,
                 course_structure=course_structure,
             )
             _update_job(
@@ -1445,7 +1828,7 @@ def rerun_access_analysis(
                 message="Access + Deep Scan recalculado correctamente.",
                 progress=100,
                 details={
-                    "resourceCount": len(analysis.resources),
+                    "resourceCount": len(inventory),
                     "accessible": analysis.summary["accessible"],
                     "downloadable": analysis.summary["downloadable"],
                     "discoveredCount": analysis.discovered_count,

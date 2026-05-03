@@ -35,6 +35,11 @@ class InventoryResourceSeed(BaseModel):
     title: str
     type: ResourceType
     origin: str | None = None
+    analysis_category: str = Field(
+        default="MAIN_ANALYZABLE",
+        validation_alias=AliasChoices("analysis_category", "analysisCategory"),
+    )
+    source: str | None = None
     source_url: str | None = Field(default=None, validation_alias=AliasChoices("source_url", "sourceUrl", "url"))
     file_path: str | None = Field(default=None, validation_alias=AliasChoices("file_path", "filePath", "localPath", "path"))
     course_path: str | None = Field(
@@ -150,6 +155,8 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
         session.flush()
 
     for item in resources:
+        if item.analysis_category != "MAIN_ANALYZABLE":
+            continue
         session.add(
             Resource(
                 id=item.id,
@@ -183,6 +190,7 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
 
 def sync_job_inventory_from_payload(session: Session, job_id: str, resources: list[dict[str, Any]]) -> None:
     items = [InventoryResourceSeed.model_validate(item) for item in resources]
+    persisted_items = [item for item in items if item.analysis_category == "MAIN_ANALYZABLE"]
     job = session.get(Job, job_id)
     if job is None:
         job = Job(id=job_id, name=job_id.replace("-", " ").title())
@@ -191,7 +199,7 @@ def sync_job_inventory_from_payload(session: Session, job_id: str, resources: li
 
     existing_resources = session.exec(select(Resource).where(Resource.job_id == job_id)).all()
     existing_by_id = {resource.id: resource for resource in existing_resources}
-    incoming_ids = {item.id for item in items}
+    incoming_ids = {item.id for item in persisted_items}
     removed_ids = [resource_id for resource_id in existing_by_id if resource_id not in incoming_ids]
 
     if removed_ids:
@@ -204,7 +212,7 @@ def sync_job_inventory_from_payload(session: Session, job_id: str, resources: li
         for resource_id in removed_ids:
             session.delete(existing_by_id[resource_id])
 
-    for item in items:
+    for item in persisted_items:
         resource = existing_by_id.get(item.id)
         if resource is None:
             resource = Resource(id=item.id, job_id=job_id, title=item.title, type=item.type)

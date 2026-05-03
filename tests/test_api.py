@@ -118,6 +118,73 @@ def build_imscc_with_external_link() -> bytes:
     return buffer.getvalue()
 
 
+def build_imscc_with_lti_noise() -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "imsmanifest.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<manifest xmlns="http://www.imsglobal.org/xsd/imsccv1p1/imscp_v1p1">
+  <organizations>
+    <organization identifier="org-1">
+      <title>Curso limpio</title>
+      <item identifier="module-1">
+        <title>Unidad principal</title>
+        <item identifier="item-1" identifierref="res-pdf">
+          <title>Guía principal</title>
+        </item>
+        <item identifier="item-2" identifierref="res-lti-1">
+          <title>Learning Tools</title>
+        </item>
+        <item identifier="item-3" identifierref="res-lti-2">
+          <title>Recursos de Aprendizaje</title>
+        </item>
+        <item identifier="item-4" identifierref="res-meta">
+          <title>Metadata</title>
+        </item>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res-pdf" type="webcontent" href="course/guide.pdf">
+      <file href="course/guide.pdf" />
+    </resource>
+    <resource identifier="res-lti-1" type="imsbasiclti_xmlv1p0" href="lti_resource_links/tool-1.xml">
+      <file href="lti_resource_links/tool-1.xml" />
+    </resource>
+    <resource identifier="res-lti-2" type="imsbasiclti_xmlv1p0" href="lti_resource_links/tool-2.xml">
+      <file href="lti_resource_links/tool-2.xml" />
+    </resource>
+    <resource identifier="res-meta" type="webcontent" href="metadata/descriptor.xml">
+      <file href="metadata/descriptor.xml" />
+    </resource>
+  </resources>
+</manifest>
+""",
+        )
+        archive.writestr("course/guide.pdf", b"%PDF-1.4\n%clean guide\n")
+        archive.writestr(
+            "lti_resource_links/tool-1.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<webLink xmlns="http://www.imsglobal.org/xsd/imswl_v1p1">
+  <title>Learning Tools</title>
+  <url href="https://ralti.uoc.edu/launch?tool=abc" />
+</webLink>
+""",
+        )
+        archive.writestr(
+            "lti_resource_links/tool-2.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<webLink xmlns="http://www.imsglobal.org/xsd/imswl_v1p1">
+  <title>Recursos de Aprendizaje</title>
+  <url href="https://ralti.uoc.edu/launch?tool=abc" />
+</webLink>
+""",
+        )
+        archive.writestr("metadata/descriptor.xml", "<metadata />")
+    return buffer.getvalue()
+
+
 def build_imscc_with_unmapped_resource() -> bytes:
     buffer = io.BytesIO()
     with ZipFile(buffer, "w") as archive:
@@ -493,6 +560,70 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     download_external_response = client.get(f"/api/jobs/{job_id}/resources/res-link/download")
     assert download_external_response.status_code == 409, download_external_response.text
     assert download_external_response.json()["code"] == "resource_not_downloadable"
+
+
+def test_offline_inventory_moves_lti_and_sso_noise_out_of_main_listing(client, monkeypatch) -> None:
+    class StubURLChecker:
+        def check_url(self, url: str):
+            checked_at = datetime(2026, 5, 1, 8, 30, tzinfo=timezone.utc)
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                reason="sso_redirect",
+                status_code=302,
+                url_status="302",
+                final_url=url,
+                redirect_location="https://id-provider.uoc.edu/sso/login",
+                checked_at=checked_at,
+            )
+
+    monkeypatch.setattr("app.services.jobs.build_url_checker", lambda settings: StubURLChecker())
+
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_imscc_with_lti_noise(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    resources_payload = resources_response.json()
+    assert [resource["title"] for resource in resources_payload["resources"]] == ["Guía principal"]
+    assert resources_payload["totalAnalizables"] == 1
+    assert resources_payload["noAnalizablesExternos"] == 1
+    assert resources_payload["tecnicosIgnorados"] >= 3
+
+    external_block = resources_payload["nonAnalyzableExternalResources"]
+    assert len(external_block) == 1
+    assert external_block[0]["analysisCategory"] == "NON_ANALYZABLE_EXTERNAL"
+    assert external_block[0]["title"] == "Learning Tools"
+    assert external_block[0]["url"] == "https://ralti.uoc.edu/launch?tool=abc"
+    assert external_block[0]["accessStatus"] == "REQUIERE_SSO"
+
+    access_summary_response = client.get(f"/api/jobs/{job_id}/access-summary")
+    assert access_summary_response.status_code == 200, access_summary_response.text
+    access_summary = access_summary_response.json()
+    assert access_summary["total"] == 1
+    assert access_summary["totalAnalizables"] == 1
+    assert access_summary["noAnalizablesExternos"] == 1
+    assert access_summary["tecnicosIgnorados"] >= 3
+
+    access_response = client.get(f"/api/jobs/{job_id}/access")
+    assert access_response.status_code == 200, access_response.text
+    access_payload = access_response.json()
+    assert [resource["title"] for resource in access_payload["modules"][0]["resources"]] == ["Guía principal"]
+    assert len(access_payload["nonAnalyzableExternalResources"]) == 1
+
+    summary_response = client.get(f"/api/jobs/{job_id}/summary")
+    assert summary_response.status_code == 200, summary_response.text
+    summary_payload = summary_response.json()
+    assert summary_payload["totalResources"] == 1
+    assert summary_payload["totalAnalizables"] == 1
+    assert summary_payload["noAnalizablesExternos"] == 1
+    assert summary_payload["tecnicosIgnorados"] >= 3
 
 
 def test_offline_inventory_returns_unmapped_resources_without_technical_grouping(client) -> None:

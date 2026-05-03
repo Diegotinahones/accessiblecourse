@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.models import Job as ProcessingJob
@@ -37,6 +38,32 @@ def build_large_imscc(payload_size: int) -> bytes:
         )
         archive.writestr("module_1/large.bin", b"A" * payload_size)
     return buffer.getvalue()
+
+
+def test_offline_processing_marks_error_if_persistence_fails(client, monkeypatch) -> None:
+    def fail_after_save_progress(session, settings, **kwargs) -> None:
+        try:
+            session.connection().exec_driver_sql("INSERT INTO job (id) VALUES (?)", ("broken-job",))
+        except IntegrityError as exc:
+            raise RuntimeError("forced persistence failure") from exc
+
+    monkeypatch.setattr("app.services.jobs._persist_analyzed_inventory", fail_after_save_progress)
+
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_sample_imscc(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    status_response = client.get(f"/api/jobs/{job_id}")
+    assert status_response.status_code == 200, status_response.text
+    payload = status_response.json()
+    assert payload["status"] == "error"
+    assert payload["phase"] == "ERROR"
+    assert payload["progress"] == 95
+    assert payload["errorCode"] == "unexpected_processing_error"
 
 
 def build_imscc_with_external_link() -> bytes:

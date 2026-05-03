@@ -1045,6 +1045,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
             )
             session.commit()
         except AppError as exc:
+            session.rollback()
             _update_job(
                 session,
                 job,
@@ -1068,6 +1069,7 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
             )
             session.commit()
         except Exception as exc:  # pragma: no cover
+            session.rollback()
             _update_job(
                 session,
                 job,
@@ -1277,6 +1279,7 @@ def process_online_job(
             )
             session.commit()
         except AppError as exc:
+            session.rollback()
             _update_job(
                 session,
                 job,
@@ -1300,6 +1303,7 @@ def process_online_job(
             )
             session.commit()
         except Exception as exc:  # pragma: no cover
+            session.rollback()
             _update_job(
                 session,
                 job,
@@ -1450,6 +1454,7 @@ def rerun_access_analysis(
             )
             session.commit()
         except AppError as exc:
+            session.rollback()
             _update_job(
                 session,
                 job,
@@ -1472,6 +1477,7 @@ def rerun_access_analysis(
             )
             session.commit()
         except Exception as exc:  # pragma: no cover
+            session.rollback()
             _update_job(
                 session,
                 job,

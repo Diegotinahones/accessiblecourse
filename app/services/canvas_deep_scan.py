@@ -25,10 +25,16 @@ HTML_LINK_ATTRIBUTES = ("href", "src", "data-api-endpoint", "data-url", "data-do
 ACCESS_STATUS_OK = "OK"
 ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
 ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
+ACCESS_STATUS_REQUIRES_SSO = "REQUIERE_SSO"
 ACCESS_STATUS_ERROR = ACCESS_STATUS_NO_ACCEDE
+ORIGIN_ONLINE_CANVAS = "ONLINE_CANVAS"
+ORIGIN_EXTERNAL_URL = "EXTERNAL_URL"
+ORIGIN_RALTI = "RALTI"
 DEEP_SCAN_NAMESPACE = uuid5(NAMESPACE_URL, "accessiblecourse.canvas.deep-scan.resource")
 FILE_ID_PATTERN = re.compile(r"/files/([^/?#]+)(?:/download)?(?:[/?#]|$)")
 PAGE_URL_PATTERN = re.compile(r"/courses/([^/]+)/pages/([^/?#]+)")
+SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu", "login.uoc.edu", "sso.uoc.edu")
+SSO_PATH_MARKERS = ("sso", "saml", "oauth", "login", "id-provider", "ralti")
 
 
 @dataclass(slots=True, frozen=True)
@@ -399,8 +405,8 @@ def _build_discovered_resource(
 ) -> dict[str, Any]:
     parent_id = str(parent_resource["id"])
     resource_id = str(uuid5(DEEP_SCAN_NAMESPACE, f"{course_id}|{parent_id}|{link.file_id or link.normalized_url}"))
-    module_path = parent_resource.get("modulePath") or parent_resource.get("coursePath") or "Curso online"
-    parent_path = parent_resource.get("itemPath") or parent_resource.get("title") or module_path
+    parent_path = parent_resource.get("itemPath") or parent_resource.get("title")
+    module_path = parent_path or parent_resource.get("modulePath") or parent_resource.get("coursePath") or "Curso online"
     return {
         "id": resource_id,
         "courseId": course_id,
@@ -411,7 +417,7 @@ def _build_discovered_resource(
         "fileId": link.file_id,
         "title": link.title,
         "type": link.resource_type.value,
-        "origin": "interno" if link.is_internal else "externo",
+        "origin": _origin_for_link(link.url, is_internal=link.is_internal),
         "source": "Canvas",
         "url": link.url,
         "sourceUrl": link.url,
@@ -427,6 +433,7 @@ def _build_discovered_resource(
         "item_path": f"{parent_path} > {link.title}",
         "itemPath": f"{parent_path} > {link.title}",
         "parentResourceId": parent_id,
+        "parentId": parent_id,
         "parent_resource_id": parent_id,
         "discovered": True,
         "discoveredChildrenCount": 0,
@@ -617,7 +624,7 @@ def _set_resource_state(
         ResourceHealthStatus.OK.value
         if access_status == ACCESS_STATUS_OK
         else ResourceHealthStatus.WARN.value
-        if access_status == ACCESS_STATUS_REQUIRES_INTERACTION
+        if access_status in {ACCESS_STATUS_REQUIRES_INTERACTION, ACCESS_STATUS_REQUIRES_SSO}
         else ResourceHealthStatus.ERROR.value
     )
 
@@ -639,6 +646,8 @@ def _url_result_payload(result: UrlCheckResult, *, url: str) -> dict[str, Any]:
 
 
 def _result_access_status(result: UrlCheckResult) -> str:
+    if _is_sso_url(result.final_url) or _is_sso_url(result.redirect_location) or _is_sso_url(result.url):
+        return ACCESS_STATUS_REQUIRES_SSO
     return ACCESS_STATUS_NO_ACCEDE
 
 
@@ -654,6 +663,22 @@ def _result_error_message(result: UrlCheckResult) -> str:
 
 def _app_error_status(exc: AppError) -> str:
     return ACCESS_STATUS_NO_ACCEDE
+
+
+def _is_sso_url(url: str | None) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if any(marker in host for marker in SSO_HOST_MARKERS):
+        return True
+    return host.endswith(".uoc.edu") and any(marker in f"{parsed.path.lower()}?{parsed.query.lower()}" for marker in SSO_PATH_MARKERS)
+
+
+def _origin_for_link(url: str | None, *, is_internal: bool) -> str:
+    if _is_sso_url(url):
+        return ORIGIN_RALTI
+    return ORIGIN_ONLINE_CANVAS if is_internal else ORIGIN_EXTERNAL_URL
 
 
 def _attach_deep_scan_error(resource: dict[str, Any], exc: AppError) -> None:

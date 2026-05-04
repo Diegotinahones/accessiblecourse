@@ -30,9 +30,15 @@ def _apply_sqlite_schema_updates(engine) -> None:
         "access_status_code": "ALTER TABLE resources ADD COLUMN access_status_code INTEGER",
         "can_download": "ALTER TABLE resources ADD COLUMN can_download BOOLEAN NOT NULL DEFAULT 0",
         "download_url": "ALTER TABLE resources ADD COLUMN download_url VARCHAR(2000)",
+        "final_url": "ALTER TABLE resources ADD COLUMN final_url VARCHAR(2000)",
         "download_status": "ALTER TABLE resources ADD COLUMN download_status VARCHAR(64)",
         "download_status_code": "ALTER TABLE resources ADD COLUMN download_status_code INTEGER",
         "discovered_children_count": "ALTER TABLE resources ADD COLUMN discovered_children_count INTEGER NOT NULL DEFAULT 0",
+        "parent_resource_id": "ALTER TABLE resources ADD COLUMN parent_resource_id VARCHAR(255)",
+        "discovered": "ALTER TABLE resources ADD COLUMN discovered BOOLEAN NOT NULL DEFAULT 0",
+        "reason_code": "ALTER TABLE resources ADD COLUMN reason_code VARCHAR(64)",
+        "reason_detail": "ALTER TABLE resources ADD COLUMN reason_detail TEXT",
+        "content_available": "ALTER TABLE resources ADD COLUMN content_available BOOLEAN NOT NULL DEFAULT 0",
         "access_note": "ALTER TABLE resources ADD COLUMN access_note TEXT",
         "error_message": "ALTER TABLE resources ADD COLUMN error_message TEXT",
     }
@@ -71,10 +77,17 @@ def _apply_postgres_schema_updates(engine) -> None:
     if engine.dialect.name != "postgresql":
         return
 
-    enum_values = ("NO_ACCEDE", "REQUIERE_INTERACCION", "REQUIERE_SSO")
+    enum_values = ("NO_ACCEDE", "REQUIERE_INTERACCION", "REQUIERE_SSO", "NO_ANALIZABLE")
+    resource_type_values = ("FILE",)
     resource_columns = (
         "ALTER TABLE resources ADD COLUMN IF NOT EXISTS download_url VARCHAR(2000)",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS final_url VARCHAR(2000)",
         "ALTER TABLE resources ADD COLUMN IF NOT EXISTS download_status VARCHAR(64)",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS parent_resource_id VARCHAR(255)",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS discovered BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS reason_code VARCHAR(64)",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS reason_detail TEXT",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS content_available BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE resources ADD COLUMN IF NOT EXISTS access_note TEXT",
     )
 
@@ -84,6 +97,11 @@ def _apply_postgres_schema_updates(engine) -> None:
                 connection.exec_driver_sql(f"ALTER TYPE resourceaccessstatus ADD VALUE IF NOT EXISTS '{value}'")
             except SQLAlchemyError:
                 # Fresh databases create the enum during SQLModel.create_all; existing ones may already have it.
+                pass
+        for value in resource_type_values:
+            try:
+                connection.exec_driver_sql(f"ALTER TYPE resourcetype ADD VALUE IF NOT EXISTS '{value}'")
+            except SQLAlchemyError:
                 pass
         for ddl in resource_columns:
             connection.exec_driver_sql(ddl)

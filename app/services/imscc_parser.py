@@ -405,11 +405,12 @@ class IMSCCParser:
 
             path: str | None = None
             url: str | None = None
-            origin = "internal"
+            origin = "INTERNAL_FILE"
             declared_href = self._normalize_reference(resource.href)
+            content_available = False
 
             if external_url:
-                origin = "external"
+                origin = "EXTERNAL_URL"
                 url = external_url
                 primary_reference = external_url
             else:
@@ -417,8 +418,10 @@ class IMSCCParser:
                     resolved_href = self._resolve_reference(declared_href, manifest_dir, extracted_root)
                     if resolved_href is not None:
                         path = resolved_href.relative_to(resolved_root).as_posix()
+                        content_available = True
                     elif resolved_file_refs:
                         path = resolved_file_refs[0]
+                        content_available = True
                         notes.append(
                             f"El href principal '{declared_href}' no existe dentro del paquete; se usa el primer file disponible."
                         )
@@ -429,6 +432,7 @@ class IMSCCParser:
                         path = declared_href
                 elif resolved_file_refs:
                     path = resolved_file_refs[0]
+                    content_available = True
                 elif declared_files:
                     path = declared_files[0]
                     notes.append(f"El recurso referencia '{declared_files[0]}' pero no se encontró en el paquete.")
@@ -439,10 +443,15 @@ class IMSCCParser:
 
                 primary_reference = path or declared_href or resource.href
 
+                if path and Path(path).suffix.lower() in HTML_RESOURCE_EXTENSIONS:
+                    origin = "INTERNAL_PAGE"
+
             title = (item_ref.title if item_ref else None) or resource.title or _derive_title(primary_reference) or "Sin título"
             module_title = _module_title_from_item_ref(item_ref)
             section_title = _section_title_from_item_ref(item_ref, fallback_title=title)
-            downloadable = bool(origin == "internal" and path and Path(path).suffix.lower() not in HTML_RESOURCE_EXTENSIONS)
+            downloadable = bool(
+                origin == "INTERNAL_FILE" and path and Path(path).suffix.lower() not in HTML_RESOURCE_EXTENSIONS
+            )
 
             inventory.append(
                 {
@@ -453,9 +462,9 @@ class IMSCCParser:
                     "origin": origin,
                     "url": url,
                     "sourceUrl": url,
-                    "path": path if origin == "internal" else None,
-                    "filePath": path if origin == "internal" else None,
-                    "localPath": path if origin == "internal" else None,
+                    "path": path if origin != "EXTERNAL_URL" else None,
+                    "filePath": path if origin != "EXTERNAL_URL" else None,
+                    "localPath": path if origin != "EXTERNAL_URL" else None,
                     "href": resource.href,
                     "files": resolved_file_refs or declared_files,
                     "dependencies": resource.dependencies,
@@ -469,7 +478,14 @@ class IMSCCParser:
                     "module_title": module_title,
                     "sectionTitle": section_title,
                     "section_title": section_title,
+                    "parentId": None,
+                    "parent_id": None,
+                    "parentResourceId": None,
+                    "parent_resource_id": None,
+                    "discovered": False,
                     "downloadable": downloadable,
+                    "contentAvailable": content_available,
+                    "content_available": content_available,
                     "details": {
                         "mappedToCourseStructure": bool(item_ref),
                         "manifestResourceType": resource.resource_type,
@@ -909,7 +925,7 @@ class IMSCCParser:
             "identifier": resource_id,
             "title": title,
             "type": classify_resource(primary_reference, is_external=is_external),
-            "origin": "external" if is_external else "internal",
+            "origin": "EXTERNAL_URL" if is_external else "INTERNAL_FILE",
             "url": primary_reference if is_external else None,
             "sourceUrl": primary_reference if is_external else None,
             "path": None if is_external else primary_reference,
@@ -932,11 +948,16 @@ class IMSCCParser:
             "discovered_children_count": 0,
             "parentResourceId": details["htmlDiscovery"]["parentResourceId"],
             "parent_resource_id": details["htmlDiscovery"]["parentResourceId"],
+            "parentId": details["htmlDiscovery"]["parentResourceId"],
+            "parent_id": details["htmlDiscovery"]["parentResourceId"],
+            "discovered": True,
             "notes": None,
             "localFile": not is_external,
             "local_file": not is_external,
             "downloadable": not is_external,
             "external": is_external,
+            "contentAvailable": not is_external,
+            "content_available": not is_external,
             "details": details,
         }
 

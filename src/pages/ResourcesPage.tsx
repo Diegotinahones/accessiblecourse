@@ -122,6 +122,10 @@ function getAccessLabel(resource: ResourceListItem) {
     return 'REQUIERE SSO';
   }
 
+  if (resource.accessStatus === 'NO_ANALIZABLE') {
+    return 'NO ANALIZABLE';
+  }
+
   return resource.canAccess && resource.accessStatus === 'OK'
     ? 'OK'
     : 'NO ACCEDE';
@@ -136,7 +140,8 @@ function getAccessTone(resource: ResourceListItem): BadgeTone {
 
   if (
     accessLabel === 'REQUIERE INTERACCIÓN' ||
-    accessLabel === 'REQUIERE SSO'
+    accessLabel === 'REQUIERE SSO' ||
+    accessLabel === 'NO ANALIZABLE'
   ) {
     return 'warning';
   }

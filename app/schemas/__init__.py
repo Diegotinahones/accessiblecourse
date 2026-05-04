@@ -24,6 +24,7 @@ from app.models.entities import (
 from app.models.entities import (
     ReviewState as ReviewStateEnum,
 )
+from app.services.resource_core import ResourceCore, ResourceContentResult
 
 
 class JobLifecycleStatus(str, Enum):
@@ -210,8 +211,10 @@ class ResourceListItemRead(StrictModel):
     canDownload: bool = False
     downloadStatus: str | None = None
     downloadStatusCode: int | None = None
+    contentAvailable: bool = False
     discoveredChildrenCount: int = 0
     parentResourceId: str | None = None
+    parentId: str | None = None
     discovered: bool = False
     accessNote: str | None = None
     errorMessage: str | None = None
@@ -221,6 +224,11 @@ class ResourceListItemRead(StrictModel):
     reviewState: ReviewStateEnum
     failCount: int
     updatedAt: datetime
+    core: ResourceCore
+
+
+class ResourceContentRead(ResourceContentResult):
+    pass
 
 
 class AccessSummaryResourceRead(StrictModel):
@@ -328,8 +336,10 @@ class AuxiliaryResourceRead(StrictModel):
     httpStatus: int | None = None
     canAccess: bool = False
     canDownload: bool = False
+    contentAvailable: bool = False
     accessNote: str | None = None
     errorMessage: str | None = None
+    parentId: str | None = None
     reasonCode: str | None = None
     reasonDetail: str | None = None
     notes: str | None = None

@@ -26,6 +26,7 @@ from app.models.entities import (
     ReviewState,
     ReviewSummary,
 )
+from app.services.resource_core import normalize_resource
 
 
 class InventoryResourceSeed(BaseModel):
@@ -97,7 +98,11 @@ class InventoryResourceSeed(BaseModel):
     )
     parent_resource_id: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("parent_resource_id", "parentResourceId"),
+        validation_alias=AliasChoices("parent_resource_id", "parentResourceId", "parent_id", "parentId"),
+    )
+    content_available: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("content_available", "contentAvailable"),
     )
     discovered: bool = False
     error_message: str | None = Field(
@@ -167,15 +172,17 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
     for item in resources:
         if item.analysis_category != "MAIN_ANALYZABLE":
             continue
+        core = normalize_resource(item)
         session.add(
             Resource(
                 id=item.id,
                 job_id=job_id,
                 title=item.title,
                 type=item.type,
-                origin=item.origin,
+                origin=core.origin,
                 url=item.source_url,
                 download_url=item.download_url,
+                final_url=item.final_url,
                 path=item.file_path,
                 course_path=item.course_path,
                 status=item.status,
@@ -187,6 +194,11 @@ def ensure_job_inventory(session: Session, settings: Settings, job_id: str) -> N
                 download_status=item.download_status,
                 download_status_code=item.download_status_code,
                 discovered_children_count=item.discovered_children_count,
+                parent_resource_id=item.parent_resource_id,
+                discovered=item.discovered,
+                reason_code=core.reasonCode,
+                reason_detail=core.reasonDetail,
+                content_available=core.contentAvailable,
                 access_note=item.access_note,
                 error_message=item.error_message,
                 notes=item.notes,
@@ -223,14 +235,16 @@ def sync_job_inventory_from_payload(session: Session, job_id: str, resources: li
             session.delete(existing_by_id[resource_id])
 
     for item in persisted_items:
+        core = normalize_resource(item)
         resource = existing_by_id.get(item.id)
         if resource is None:
             resource = Resource(id=item.id, job_id=job_id, title=item.title, type=item.type)
         resource.title = item.title
         resource.type = item.type
-        resource.origin = item.origin
+        resource.origin = core.origin
         resource.url = item.source_url
         resource.download_url = item.download_url
+        resource.final_url = item.final_url
         resource.path = item.file_path
         resource.course_path = item.course_path
         resource.status = item.status
@@ -242,6 +256,11 @@ def sync_job_inventory_from_payload(session: Session, job_id: str, resources: li
         resource.download_status = item.download_status
         resource.download_status_code = item.download_status_code
         resource.discovered_children_count = item.discovered_children_count
+        resource.parent_resource_id = item.parent_resource_id
+        resource.discovered = item.discovered
+        resource.reason_code = core.reasonCode
+        resource.reason_detail = core.reasonDetail
+        resource.content_available = core.contentAvailable
         resource.access_note = item.access_note
         resource.error_message = item.error_message
         resource.notes = item.notes

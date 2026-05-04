@@ -350,6 +350,10 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
         lambda credentials, settings: StubCanvasClient(credentials),
     )
     monkeypatch.setattr(
+        "app.api.routes.jobs._canvas_client_factory",
+        lambda credentials, settings: StubCanvasClient(credentials),
+    )
+    monkeypatch.setattr(
         "app.api.routes.online.build_url_checker",
         lambda settings: StubUrlChecker(),
     )
@@ -382,8 +386,8 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     assert access_response.status_code == 200, access_response.text
     access_payload = access_response.json()
     assert access_payload["summary"]["total"] == 9
-    assert access_payload["summary"]["accessible"] == 6
-    assert access_payload["summary"]["requiere_interaccion_count"] == 1
+    assert access_payload["summary"]["accessible"] == 5
+    assert access_payload["summary"]["requiere_interaccion_count"] == 2
     assert access_payload["summary"]["requiere_sso_count"] == 1
     assert access_payload["modules"][0]["modulePath"] == "Modulo 1 > Recursos principales"
 
@@ -391,19 +395,25 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     assert pdf_resource["coursePath"] == "Modulo 1 > Recursos principales"
     assert pdf_resource["localPath"] == "course files/modulo-1/guia-docente.pdf"
     assert pdf_resource["type"] == "PDF"
+    assert pdf_resource["origin"] == "ONLINE_CANVAS"
     assert pdf_resource["canAccess"] is True
     assert pdf_resource["canDownload"] is True
+    assert pdf_resource["contentAvailable"] is True
     assert pdf_resource["accessStatus"] == "OK"
+    assert pdf_resource["downloadUrl"] == f"/api/jobs/{job_id}/resources/{pdf_resource['id']}/download"
 
     broken_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Video externo")
     assert broken_resource["status"] == "ERROR"
     assert "broken_link" in broken_resource["notes"]
+    assert broken_resource["origin"] == "EXTERNAL_URL"
     assert broken_resource["accessStatus"] == "NO_ACCEDE"
+    assert broken_resource["reasonCode"] == "NOT_FOUND"
 
     assignment_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Entrega final")
-    assert assignment_resource["status"] == "OK"
-    assert assignment_resource["accessStatus"] == "OK"
+    assert assignment_resource["status"] == "WARN"
+    assert assignment_resource["accessStatus"] == "REQUIERE_INTERACCION"
     assert assignment_resource["canDownload"] is False
+    assert assignment_resource["contentAvailable"] is True
     assert assignment_resource["discoveredChildrenCount"] == 1
 
     quiz_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Quiz bloqueado")
@@ -413,25 +423,48 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
 
     ralti_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "RALTI")
     assert ralti_resource["status"] == "WARN"
+    assert ralti_resource["origin"] == "RALTI"
     assert ralti_resource["accessStatus"] == "REQUIERE_SSO"
+    assert ralti_resource["reasonCode"] == "AUTH_REQUIRED"
     assert "requires_sso" in ralti_resource["notes"]
 
     page_resource = next(resource for resource in resources_payload["resources"] if resource["title"] == "Bienvenida")
     assert page_resource["canAccess"] is True
     assert page_resource["canDownload"] is False
+    assert page_resource["contentAvailable"] is True
     assert page_resource["discoveredChildrenCount"] == 2
 
     discovered_file = next(resource for resource in resources_payload["resources"] if resource["title"] == "Plantilla accesible.docx")
+    assert discovered_file["origin"] == "ONLINE_CANVAS"
     assert discovered_file["canAccess"] is True
     assert discovered_file["canDownload"] is True
     assert discovered_file["downloadStatus"] == "OK"
     assert discovered_file["downloadStatusCode"] == 200
     assert discovered_file["parentResourceId"] == page_resource["id"]
+    assert discovered_file["parentId"] == page_resource["id"]
+    assert discovered_file["modulePath"] == "Modulo 2 > Bienvenida"
 
     assignment_file = next(resource for resource in resources_payload["resources"] if resource["title"] == "PEC1.pdf")
     assert assignment_file["canAccess"] is True
     assert assignment_file["canDownload"] is True
     assert assignment_file["parentResourceId"] == assignment_resource["id"]
+    assert assignment_file["modulePath"] == "Modulo 1 > Recursos principales > Entrega final"
+
+    page_content_response = client.get(f"/api/jobs/{job_id}/resources/{page_resource['id']}/content")
+    assert page_content_response.status_code == 200, page_content_response.text
+    assert "Plantilla accesible" in page_content_response.text
+
+    file_content_response = client.get(f"/api/jobs/{job_id}/resources/{pdf_resource['id']}/content")
+    assert file_content_response.status_code == 200, file_content_response.text
+    assert file_content_response.content == b"%PDF-1.4 test canvas pdf"
+
+    file_download_response = client.get(f"/api/jobs/{job_id}/resources/{pdf_resource['id']}/download")
+    assert file_download_response.status_code == 200, file_download_response.text
+    assert file_download_response.content == b"%PDF-1.4 test canvas pdf"
+
+    ralti_content_response = client.get(f"/api/jobs/{job_id}/resources/{ralti_resource['id']}/content")
+    assert ralti_content_response.status_code == 409
+    assert ralti_content_response.json()["code"] == "resource_requires_sso"
 
     detail_response = client.get(f"/api/jobs/{job_id}/resources/{pdf_resource['id']}")
     assert detail_response.status_code == 200, detail_response.text

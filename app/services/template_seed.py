@@ -257,6 +257,7 @@ TEMPLATE_DEFINITIONS: dict[ResourceType, list[dict[str, str | None]]] = {
         },
     ],
 }
+TEMPLATE_DEFINITIONS[ResourceType.FILE] = TEMPLATE_DEFINITIONS[ResourceType.OTHER]
 
 
 def seed_templates(session: Session) -> None:

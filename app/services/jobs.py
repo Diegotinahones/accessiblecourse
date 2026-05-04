@@ -39,6 +39,7 @@ from app.services.catalog import get_checklist_template
 from app.services.course_structure import build_fallback_course_structure, build_section_key, section_key_from_path
 from app.services.imscc import build_resources_from_extracted
 from app.services.imscc_parser import HTML_RESOURCE_EXTENSIONS, IMSCCParser, ParserError
+from app.services.resource_core import normalize_resource
 from app.services.review_service import load_inventory_file, sync_job_inventory_from_payload
 from app.services.storage import (
     get_extracted_dir,
@@ -629,12 +630,13 @@ def _enum_value(value: Any) -> str | None:
 
 
 def _build_auxiliary_resource(item: Any) -> AuxiliaryResourceRead:
+    core = normalize_resource(item)
     source = getattr(item, "source", None) or getattr(item, "source_url", None) or getattr(item, "file_path", None)
     return AuxiliaryResourceRead(
         id=str(getattr(item, "id")),
         title=str(getattr(item, "title", "Recurso sin titulo")),
         type=_enum_value(getattr(item, "type", None)) or "OTHER",
-        origin=_enum_value(getattr(item, "origin", None)),
+        origin=core.origin,
         analysisCategory=getattr(item, "analysis_category"),
         source=source,
         url=getattr(item, "source_url", None),
@@ -652,8 +654,10 @@ def _build_auxiliary_resource(item: Any) -> AuxiliaryResourceRead:
         httpStatus=getattr(item, "http_status", None),
         canAccess=bool(getattr(item, "can_access", False)),
         canDownload=bool(getattr(item, "can_download", False)),
+        contentAvailable=core.contentAvailable,
         accessNote=getattr(item, "access_note", None),
         errorMessage=getattr(item, "error_message", None),
+        parentId=core.parentId,
         reasonCode=getattr(item, "reason_code", None),
         reasonDetail=getattr(item, "reason_detail", None),
         notes=getattr(item, "notes", None),
@@ -825,6 +829,16 @@ def _normalize_offline_inventory(
         normalized["canDownload"] = bool(resource.get("canDownload")) or downloadable
         normalized["can_download"] = normalized["canDownload"]
         normalized["source"] = _inventory_source(normalized)
+        parent_id = (
+            resource.get("parentId")
+            or resource.get("parent_id")
+            or resource.get("parentResourceId")
+            or resource.get("parent_resource_id")
+        )
+        normalized["parentId"] = parent_id
+        normalized["parent_id"] = parent_id
+        normalized["parentResourceId"] = parent_id
+        normalized["parent_resource_id"] = parent_id
         normalized["reasonCode"] = resource.get("reasonCode") or resource.get("reason_code")
         normalized["reason_code"] = normalized["reasonCode"]
         normalized["reasonDetail"] = resource.get("reasonDetail") or resource.get("reason_detail")
@@ -838,6 +852,19 @@ def _normalize_offline_inventory(
         normalized["analysisCategory"] = analysis_category
         normalized["analysis_category"] = analysis_category
         normalized.setdefault("details", {})
+        core = normalize_resource(normalized)
+        normalized["origin"] = core.origin
+        normalized["contentAvailable"] = core.contentAvailable
+        normalized["content_available"] = core.contentAvailable
+        normalized["parentId"] = core.parentId
+        normalized["parent_id"] = core.parentId
+        normalized["parentResourceId"] = core.parentId
+        normalized["parent_resource_id"] = core.parentId
+        normalized["reasonCode"] = core.reasonCode
+        normalized["reason_code"] = core.reasonCode
+        if core.reasonDetail:
+            normalized["reasonDetail"] = core.reasonDetail
+            normalized["reason_detail"] = core.reasonDetail
         normalized_resources.append(normalized)
 
     return _dedupe_offline_inventory(normalized_resources)

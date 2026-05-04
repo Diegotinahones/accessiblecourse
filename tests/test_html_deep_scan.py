@@ -131,9 +131,14 @@ def test_discover_html_linked_resources_extracts_and_dedupes_nested_links() -> N
         assert references["course/downloads/guide.pdf"]["title"] == "Guía descargable"
         assert references["course/images/chart.png"]["title"] == "Gráfico resumen"
         assert references["course/downloads/guide.pdf"]["parentResourceId"] == "html-1"
+        assert references["course/downloads/guide.pdf"]["parentId"] == "html-1"
         assert references["course/downloads/guide.pdf"]["coursePath"] == "Módulo 1"
         assert references["course/downloads/guide.pdf"]["moduleTitle"] == "Módulo 1"
         assert references["course/downloads/guide.pdf"]["sectionTitle"] == "Módulo 1"
+        assert references["course/downloads/guide.pdf"]["origin"] == "INTERNAL_FILE"
+        assert references["course/downloads/guide.pdf"]["contentAvailable"] is True
+        assert references["https://example.com/resource"]["origin"] == "EXTERNAL_URL"
+        assert references["https://example.com/resource"]["contentAvailable"] is False
         assert inventory[0]["discoveredChildrenCount"] == 4
         assert inventory[1]["discoveredChildrenCount"] == 1
 

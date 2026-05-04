@@ -9,6 +9,7 @@ import type {
   GeneratedReport,
   JobStatus,
   OnlineCourse,
+  ResourceCore,
   ResourceDetailResponse,
   ResourceListItem,
   ResourceListResponse,
@@ -69,6 +70,7 @@ const ACCESS_STATUSES: ResourceAccessStatus[] = [
   'NO_ACCEDE',
   'REQUIERE_INTERACCION',
   'REQUIERE_SSO',
+  'NO_ANALIZABLE',
   'NOT_FOUND',
   'FORBIDDEN',
   'TIMEOUT',
@@ -213,6 +215,9 @@ function normalizeReviewType(
   if (value === 'IMAGE') {
     return 'IMAGE';
   }
+  if (value === 'FILE') {
+    return 'FILE';
+  }
 
   return 'OTHER';
 }
@@ -297,6 +302,71 @@ function normalizeAccessStatus(
   return 'OK';
 }
 
+function normalizeCoreAccessStatus(value: ResourceAccessStatus) {
+  if (
+    value === 'OK' ||
+    value === 'NO_ACCEDE' ||
+    value === 'REQUIERE_INTERACCION' ||
+    value === 'REQUIERE_SSO' ||
+    value === 'NO_ANALIZABLE'
+  ) {
+    return value;
+  }
+  return 'NO_ACCEDE';
+}
+
+function normalizeReasonCode(value: unknown): ResourceCore['reasonCode'] {
+  const normalizedValue = readString(value)?.toUpperCase();
+  const validReasonCodes: ResourceCore['reasonCode'][] = [
+    'OK',
+    'NOT_FOUND',
+    'AUTH_REQUIRED',
+    'FORBIDDEN',
+    'TIMEOUT',
+    'DNS_ERROR',
+    'SSL_ERROR',
+    'NETWORK_ERROR',
+    'INVALID_URL',
+    'UNKNOWN',
+  ];
+  if (normalizedValue && validReasonCodes.includes(normalizedValue as ResourceCore['reasonCode'])) {
+    return normalizedValue as ResourceCore['reasonCode'];
+  }
+  return 'UNKNOWN';
+}
+
+function normalizeDownloadStatus(value: unknown, downloadable: boolean): ResourceCore['downloadStatus'] {
+  const normalizedValue = readString(value)?.toUpperCase();
+  if (
+    normalizedValue === 'OK' ||
+    normalizedValue === 'FAIL' ||
+    normalizedValue === 'N_A'
+  ) {
+    return normalizedValue;
+  }
+  return downloadable ? 'OK' : 'N_A';
+}
+
+function normalizeCoreOrigin(value: unknown, fallbackOrigin: string | null): ResourceCore['origin'] {
+  const normalizedValue = readString(value)?.toUpperCase();
+  const validOrigins: ResourceCore['origin'][] = [
+    'ONLINE_CANVAS',
+    'OFFLINE_IMSCC',
+    'INTERNAL_FILE',
+    'INTERNAL_PAGE',
+    'EXTERNAL_URL',
+    'RALTI',
+    'LTI',
+  ];
+  if (normalizedValue && validOrigins.includes(normalizedValue as ResourceCore['origin'])) {
+    return normalizedValue as ResourceCore['origin'];
+  }
+  if (fallbackOrigin === 'externo') {
+    return 'EXTERNAL_URL';
+  }
+  return 'OFFLINE_IMSCC';
+}
+
 function normalizeHealthStatus(
   status: string | null | undefined,
 ): ReviewResourceHealthStatus {
@@ -319,6 +389,79 @@ function normalizeReviewState(state: string | null | undefined): ReviewState {
     return 'NEEDS_FIX';
   }
   return 'IN_REVIEW';
+}
+
+function normalizeResourceCore(
+  item: RawResourceListItem,
+  fallback: {
+    id: string;
+    title: string;
+    type: ReviewResourceType;
+    origin: string | null;
+    modulePath: string | null;
+    sectionTitle: string | null;
+    parentResourceId: string | null;
+    discovered: boolean;
+    accessStatus: ResourceAccessStatus;
+    reasonCode: string | null;
+    reasonDetail: string | null;
+    httpStatus: number | null;
+    finalUrl: string | null;
+    canDownload: boolean;
+    downloadStatus: string | null;
+    localPath: string | null;
+    sourceUrl: string | null;
+  },
+): ResourceCore {
+  const rawCore =
+    item.core && typeof item.core === 'object'
+      ? (item.core as unknown as Record<string, unknown>)
+      : {};
+  const rawModulePath = rawCore.modulePath;
+  const modulePath = Array.isArray(rawModulePath)
+    ? rawModulePath
+        .map((part) => readString(part))
+        .filter((part): part is string => Boolean(part))
+    : fallback.modulePath
+      ? fallback.modulePath
+          .split('>')
+          .map((part) => part.trim())
+          .filter(Boolean)
+      : [];
+  const coreAccessStatus = normalizeCoreAccessStatus(
+    normalizeAccessStatus(rawCore.accessStatus, fallback.accessStatus),
+  );
+  const downloadable =
+    readBoolean(rawCore.downloadable) ?? fallback.canDownload;
+
+  return {
+    id: readString(rawCore.id) ?? fallback.id,
+    title: readString(rawCore.title) ?? fallback.title,
+    type: normalizeReviewType(readString(rawCore.type) ?? fallback.type),
+    origin: normalizeCoreOrigin(rawCore.origin, fallback.origin),
+    modulePath,
+    sectionTitle:
+      readString(rawCore.sectionTitle) ?? fallback.sectionTitle ?? null,
+    parentId: readString(rawCore.parentId) ?? fallback.parentResourceId,
+    discovered: readBoolean(rawCore.discovered) ?? fallback.discovered,
+    accessStatus: coreAccessStatus,
+    reasonCode: normalizeReasonCode(rawCore.reasonCode ?? fallback.reasonCode),
+    reasonDetail:
+      readString(rawCore.reasonDetail) ?? fallback.reasonDetail ?? null,
+    httpStatus: readNumber(rawCore.httpStatus) ?? fallback.httpStatus,
+    finalUrl: readString(rawCore.finalUrl) ?? fallback.finalUrl,
+    downloadable,
+    downloadStatus: normalizeDownloadStatus(
+      rawCore.downloadStatus ?? fallback.downloadStatus,
+      downloadable,
+    ),
+    localPath: readString(rawCore.localPath) ?? fallback.localPath,
+    sourceUrl: readString(rawCore.sourceUrl) ?? fallback.sourceUrl,
+    contentAvailable:
+      readBoolean(rawCore.contentAvailable) ??
+      (coreAccessStatus === 'OK' &&
+        (Boolean(fallback.localPath) || Boolean(fallback.sourceUrl))),
+  };
 }
 
 function normalizeResource(item: RawResourceListItem): ResourceListItem {
@@ -383,28 +526,51 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     readString(item.reason_detail) ??
     readString(item.errorMessage) ??
     readString(item.error_message) ??
-    readString(item.accessNote) ??
-    readString(item.access_note) ??
-    null;
+      readString(item.accessNote) ??
+      readString(item.access_note) ??
+      null;
+  const id =
+    readString(item.id) ??
+    readString(item.resourceId) ??
+    readString(item.resource_id) ??
+    readString(item.path) ??
+    readString(item.url) ??
+    readString(item.title) ??
+    'resource-unknown';
+  const title =
+    readString(item.title) ?? readString(item.name) ?? 'Recurso sin título';
+  const type = normalizeReviewType(readString(item.type));
+  const status = normalizeHealthStatus(readString(item.status));
+  const reviewState = normalizeReviewState(
+    readString(item.reviewState) ?? readString(item.review_state),
+  );
+  const httpStatus = readNumber(item.httpStatus ?? item.http_status);
+  const accessStatusCode = readNumber(
+    item.accessStatusCode ?? item.access_status_code ?? item.httpStatus,
+  );
+  const downloadStatus =
+    readString(item.downloadStatus) ??
+    readString(item.download_status) ??
+    (canDownload ? 'OK' : 'NO_DESCARGABLE');
+  const parentResourceId =
+    readString(item.parentResourceId) ??
+    readString(item.parent_resource_id) ??
+    readString(item.parentId) ??
+    readString(item.parent_id);
+  const discovered = readBoolean(item.discovered) ?? false;
+  const contentAvailable =
+    readBoolean(item.contentAvailable) ??
+    readBoolean(item.content_available) ??
+    canDownload;
 
   return {
     ...item,
-    id:
-      readString(item.id) ??
-      readString(item.resourceId) ??
-      readString(item.resource_id) ??
-      readString(item.path) ??
-      readString(item.url) ??
-      readString(item.title) ??
-      'resource-unknown',
+    id,
     jobId: readString(item.jobId) ?? readString(item.job_id) ?? '',
-    title:
-      readString(item.title) ?? readString(item.name) ?? 'Recurso sin título',
-    type: normalizeReviewType(readString(item.type)),
-    status: normalizeHealthStatus(readString(item.status)),
-    reviewState: normalizeReviewState(
-      readString(item.reviewState) ?? readString(item.review_state),
-    ),
+    title,
+    type,
+    status,
+    reviewState,
     origin: readString(item.origin),
     url: sourceUrl,
     sourceUrl,
@@ -426,28 +592,21 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     checkedAt: readString(item.checkedAt) ?? readString(item.checked_at),
     canAccess,
     accessStatus,
-    httpStatus: readNumber(item.httpStatus ?? item.http_status),
-    accessStatusCode: readNumber(
-      item.accessStatusCode ?? item.access_status_code ?? item.httpStatus,
-    ),
+    httpStatus,
+    accessStatusCode,
     canDownload,
-    downloadStatus:
-      readString(item.downloadStatus) ??
-      readString(item.download_status) ??
-      (canDownload ? 'OK' : 'NO_DESCARGABLE'),
+    downloadStatus,
     downloadStatusCode: readNumber(
       item.downloadStatusCode ?? item.download_status_code,
     ),
+    contentAvailable,
     discoveredChildrenCount:
       readNumber(item.discoveredChildrenCount) ??
       readNumber(item.discovered_children_count) ??
       0,
-    parentResourceId:
-      readString(item.parentResourceId) ??
-      readString(item.parent_resource_id) ??
-      readString(item.parentId) ??
-      readString(item.parent_id),
-    discovered: readBoolean(item.discovered) ?? false,
+    parentResourceId,
+    parentId: parentResourceId,
+    discovered,
     accessNote: readString(item.accessNote) ?? readString(item.access_note),
     errorMessage:
       readString(item.errorMessage) ?? readString(item.error_message),
@@ -459,6 +618,26 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
       readString(item.updatedAt) ??
       readString(item.updated_at) ??
       new Date().toISOString(),
+    core: normalizeResourceCore(item, {
+      id,
+      title,
+      type,
+      origin: readString(item.origin),
+      modulePath,
+      sectionTitle,
+      parentResourceId,
+      discovered,
+      accessStatus,
+      reasonCode,
+      reasonDetail,
+      httpStatus: accessStatusCode ?? httpStatus,
+      finalUrl:
+        readString(item.finalUrl) ?? readString(item.final_url) ?? sourceUrl,
+      canDownload,
+      downloadStatus,
+      localPath: filePath,
+      sourceUrl,
+    }),
   };
 }
 

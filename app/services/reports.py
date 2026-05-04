@@ -55,6 +55,7 @@ TYPE_LABELS = {
     ResourceType.VIDEO: "Video",
     ResourceType.NOTEBOOK: "Notebook",
     ResourceType.IMAGE: "Imagen",
+    ResourceType.FILE: "Archivo",
     ResourceType.OTHER: "Otro",
 }
 

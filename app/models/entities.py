@@ -22,6 +22,7 @@ class ResourceType(str, Enum):
     VIDEO = "VIDEO"
     NOTEBOOK = "NOTEBOOK"
     IMAGE = "IMAGE"
+    FILE = "FILE"
     OTHER = "OTHER"
 
 
@@ -36,6 +37,7 @@ class ResourceAccessStatus(str, Enum):
     NO_ACCEDE = "NO_ACCEDE"
     REQUIERE_INTERACCION = "REQUIERE_INTERACCION"
     REQUIERE_SSO = "REQUIERE_SSO"
+    NO_ANALIZABLE = "NO_ANALIZABLE"
     # Legacy values are kept so older persisted jobs remain readable.
     NOT_FOUND = "NOT_FOUND"
     FORBIDDEN = "FORBIDDEN"
@@ -80,6 +82,7 @@ class Resource(SQLModel, table=True):
     origin: str | None = Field(default=None, max_length=255)
     url: str | None = Field(default=None, max_length=2000)
     download_url: str | None = Field(default=None, max_length=2000)
+    final_url: str | None = Field(default=None, max_length=2000)
     path: str | None = Field(default=None, max_length=2000)
     course_path: str | None = Field(default=None, max_length=2000)
     status: ResourceHealthStatus = Field(
@@ -97,6 +100,11 @@ class Resource(SQLModel, table=True):
     download_status: str | None = Field(default=None, max_length=64)
     download_status_code: int | None = Field(default=None, nullable=True)
     discovered_children_count: int = Field(default=0, nullable=False)
+    parent_resource_id: str | None = Field(default=None, max_length=255)
+    discovered: bool = Field(default=False, nullable=False)
+    reason_code: str | None = Field(default=None, max_length=64)
+    reason_detail: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    content_available: bool = Field(default=False, nullable=False)
     access_note: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     error_message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     notes: str | None = Field(default=None, sa_column=Column(Text, nullable=True))

@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 
 from app.models import Job as ProcessingJob
 from app.models.entities import ChecklistResponse
+from app.services.resource_core import get_resource_content
 from app.services.url_check import UrlCheckResult
 from tests.conftest import build_sample_imscc
 
@@ -555,6 +556,10 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert pdf_resource["canDownload"] is True
     assert pdf_resource["downloadStatusCode"] == 200
     assert pdf_resource["errorMessage"] is None
+    assert pdf_resource["origin"] == "INTERNAL_FILE"
+    assert pdf_resource["contentAvailable"] is True
+    assert pdf_resource["core"]["origin"] == "INTERNAL_FILE"
+    assert pdf_resource["core"]["contentAvailable"] is True
 
     assert link_resource["modulePath"] == "Tema 1"
     assert link_resource["itemPath"] == "Tema 1 > Enlace externo"
@@ -569,6 +574,9 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert link_resource["reasonCode"] == "NOT_FOUND"
     assert link_resource["reasonDetail"] == "La URL devolvió 404."
     assert link_resource["errorMessage"] == "La URL devolvió 404."
+    assert link_resource["origin"] == "EXTERNAL_URL"
+    assert link_resource["contentAvailable"] is False
+    assert link_resource["core"]["origin"] == "EXTERNAL_URL"
     assert "broken_link" in link_resource["notes"]
     assert resources_payload["noAccessCount"] == 1
     assert resources_payload["noAccessByReason"] == {"NOT_FOUND": 1}
@@ -592,6 +600,7 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
         "NO_ACCEDE": 1,
         "REQUIERE_INTERACCION": 0,
         "REQUIERE_SSO": 0,
+        "NO_ANALIZABLE": 0,
     }
     assert access_summary["noAccessCount"] == 1
     assert access_summary["noAccessByReason"] == {"NOT_FOUND": 1}
@@ -710,7 +719,9 @@ def test_offline_inventory_returns_unmapped_resources_without_technical_grouping
     assert unmapped_resource["modulePath"] is None
     assert unmapped_resource["coursePath"] is None
     assert unmapped_resource["itemPath"] is None
+    assert unmapped_resource["origin"] == "INTERNAL_PAGE"
     assert unmapped_resource["sectionType"] == "global_unplaced"
+    assert unmapped_resource["contentAvailable"] is True
     assert payload["globalUnplacedCount"] == 1
     assert payload["noAccessCount"] == 0
     assert payload["noAccessByReason"] == {}
@@ -763,24 +774,36 @@ def test_offline_deep_scan_discovers_nested_local_and_external_resources(client,
     assert worksheet["accessStatusCode"] == 200
     assert worksheet["canDownload"] is True
     assert worksheet["parentResourceId"] == "res-html"
+    assert worksheet["parentId"] == "res-html"
     assert worksheet["modulePath"] == "Unidad 1"
     assert worksheet["moduleTitle"] == "Unidad 1"
     assert worksheet["sectionTitle"] == "Unidad 1"
+    assert worksheet["origin"] == "INTERNAL_FILE"
+    assert worksheet["contentAvailable"] is True
+    assert worksheet["core"]["origin"] == "INTERNAL_FILE"
 
     assert slides["canAccess"] is True
     assert slides["canDownload"] is True
     assert slides["modulePath"] == "Unidad 1"
     assert slides["moduleTitle"] == "Unidad 1"
     assert slides["sectionTitle"] == "Unidad 1"
+    assert slides["origin"] == "INTERNAL_FILE"
     assert image["type"] == "IMAGE"
     assert image["canAccess"] is True
     assert image["canDownload"] is True
+    assert image["origin"] == "INTERNAL_FILE"
     assert web["type"] == "WEB"
     assert web["canAccess"] is True
     assert web["canDownload"] is False
+    assert web["origin"] == "EXTERNAL_URL"
+    assert web["contentAvailable"] is False
     assert video["type"] == "VIDEO"
     assert video["canAccess"] is True
     assert video["canDownload"] is False
+    assert video["origin"] == "EXTERNAL_URL"
+    assert video["contentAvailable"] is False
+    assert html_page["origin"] == "INTERNAL_PAGE"
+    assert html_page["contentAvailable"] is True
     assert html_page["discoveredChildrenCount"] == 4
 
     summary_response = client.get(f"/api/jobs/{job_id}/summary")
@@ -840,8 +863,12 @@ def test_offline_deep_scan_keeps_discovered_links_inside_existing_pec_section(cl
 
     assert by_title["Brief de la PEC"]["discovered"] is True
     assert by_title["Brief de la PEC"]["parentResourceId"] == "res-html"
+    assert by_title["Brief de la PEC"]["parentId"] == "res-html"
+    assert by_title["Brief de la PEC"]["origin"] == "INTERNAL_FILE"
     assert by_title["¿Cómo citar la IA…"]["discovered"] is True
     assert by_title["¿Cómo citar la IA…"]["parentResourceId"] == "res-html"
+    assert by_title["¿Cómo citar la IA…"]["parentId"] == "res-html"
+    assert by_title["¿Cómo citar la IA…"]["origin"] == "EXTERNAL_URL"
     assert by_title["¿Cómo citar la IA…"]["reasonCode"] == "NOT_FOUND"
     assert by_title["¿Cómo citar la IA…"]["reasonDetail"] == "La URL devolvió 404."
     assert payload["noAccessCount"] == 1
@@ -854,6 +881,35 @@ def test_offline_deep_scan_keeps_discovered_links_inside_existing_pec_section(cl
     assert access_payload["modules"][0]["modulePath"] == "PEC 1: Actividad inicial"
     assert access_payload["summary"]["noAccessCount"] == 1
     assert access_payload["summary"]["noAccessByReason"] == {"NOT_FOUND": 1}
+
+
+def test_offline_get_resource_content_returns_html_and_binary_path(client, test_settings) -> None:
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_imscc_with_pec_section_deep_scan(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    resources_response = client.get(f"/api/jobs/{job_id}/resources")
+    assert resources_response.status_code == 200, resources_response.text
+    resources = resources_response.json()["resources"]
+    brief_resource = next(resource for resource in resources if resource["title"] == "Brief de la PEC")
+
+    html_content = get_resource_content("res-html", settings=test_settings, job_id=job_id)
+    assert html_content.ok is True
+    assert html_content.content_type == "text/html"
+    assert html_content.text_content is not None
+    assert "Brief de la PEC" in html_content.text_content
+    assert html_content.binary_path.endswith("course/pec1/activity.html")
+
+    pdf_content = get_resource_content(brief_resource["id"], settings=test_settings, job_id=job_id)
+    assert pdf_content.ok is True
+    assert pdf_content.content_type == "application/pdf"
+    assert pdf_content.text_content is None
+    assert pdf_content.binary_path is not None
+    assert pdf_content.binary_path.endswith("course/downloads/brief.pdf")
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

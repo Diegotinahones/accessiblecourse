@@ -159,17 +159,17 @@ def test_canvas_access_summary_groups_resources_by_module(client, monkeypatch) -
     payload = response.json()
     assert payload["courseId"] == "77"
     assert payload["total"] == 9
-    assert payload["accessible"] == 6
-    assert payload["requiere_interaccion_count"] == 1
+    assert payload["accessible"] == 5
+    assert payload["requiere_interaccion_count"] == 2
     assert payload["requiere_sso_count"] == 1
     assert payload["downloadable"] == 3
     assert payload["downloadableAccessible"] == 3
-    assert payload["byStatus"]["OK"] == 6
+    assert payload["byStatus"]["OK"] == 5
     assert payload["byStatus"]["NO_ACCEDE"] == 1
-    assert payload["byStatus"]["REQUIERE_INTERACCION"] == 1
+    assert payload["byStatus"]["REQUIERE_INTERACCION"] == 2
     assert payload["byStatus"]["REQUIERE_SSO"] == 1
     assert payload["deepScan"]["scannedPages"] == 3
-    assert len(payload["modules"]) == 2
+    assert len(payload["modules"]) == 4
     assert payload["modules"][0]["moduleName"] == "Modulo 1 > Recursos principales"
     assert payload["modules"][0]["resources"][0]["title"] == "Guia docente.pdf"
 

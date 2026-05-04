@@ -4,7 +4,7 @@ import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Request, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from sqlmodel import Session, select
 
 from app.api.deps import get_engine, get_rate_limiter, get_session, get_settings
@@ -54,6 +54,7 @@ from app.services.jobs import (
     get_job_or_404 as get_processing_job_or_404,
 )
 from app.services.reports import generate_job_report, get_report_file_info, load_job_report
+from app.services.resource_core import ResourceContentResult, get_resource_content, normalize_resource
 from app.services.review_service import (
     build_summary_payload,
     ensure_job_inventory,
@@ -85,6 +86,55 @@ def _url_check_factory(settings: Settings) -> URLCheckService:
     return URLCheckService(timeout_seconds=settings.url_check_timeout_seconds, max_urls=settings.url_check_max_urls)
 
 
+def _no_store_headers() -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
+
+def _load_resource_content(
+    *,
+    request: Request,
+    settings: Settings,
+    job_id: str,
+    resource_id: str,
+) -> ResourceContentResult:
+    context_store = getattr(request.app.state, "online_job_contexts", None)
+    context = context_store.get(job_id) if context_store is not None else None
+    canvas_client = _canvas_client_factory(context.credentials, settings) if context is not None else None
+    canvas_credentials = context.credentials if context is not None else None
+    course_id = context.course_id if context is not None else None
+    return get_resource_content(
+        resource_id,
+        settings=settings,
+        job_id=job_id,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+
+
+def _raise_content_error(content: ResourceContentResult, *, job_id: str) -> None:
+    error_code = content.error_code or "UNKNOWN"
+    status_code = status.HTTP_404_NOT_FOUND if error_code == "NOT_FOUND" else status.HTTP_409_CONFLICT
+    code = {
+        "REQUIERE_SSO": "resource_requires_sso",
+        "NO_ANALIZABLE": "resource_not_analyzable",
+        "AUTH_REQUIRED": "resource_auth_required",
+        "NOT_FOUND": "resource_content_not_found",
+    }.get(error_code, "resource_content_unavailable")
+    message = content.error_detail or "No hay contenido reutilizable para este recurso."
+    raise AppError(
+        code=code,
+        message=message,
+        status_code=status_code,
+        details={"resourceId": content.resource_id, "reason": error_code, "url": content.url},
+        job_id=job_id,
+    )
+
+
 def _review_session_read(review_session: ReviewSession) -> ReviewSessionRead:
     return ReviewSessionRead(
         jobId=review_session.job_id,
@@ -100,7 +150,6 @@ def _resource_read(
     inventory_item=None,
 ) -> ResourceListItemRead:
     source_url = inventory_item.source_url if inventory_item is not None else resource.url
-    download_url = inventory_item.download_url if inventory_item is not None else resource.download_url
     file_path = inventory_item.file_path if inventory_item is not None else resource.path
     module_path = inventory_item.course_path if inventory_item is not None else resource.course_path
     module_title = inventory_item.module_title if inventory_item is not None else None
@@ -108,13 +157,17 @@ def _resource_read(
     section_key = inventory_item.section_key if inventory_item is not None else None
     section_type = inventory_item.section_type if inventory_item is not None else None
     item_path = inventory_item.item_path if inventory_item is not None else None
-    parent_resource_id = inventory_item.parent_resource_id if inventory_item is not None else None
+    parent_resource_id = inventory_item.parent_resource_id if inventory_item is not None else resource.parent_resource_id
+    can_download = inventory_item.can_download if inventory_item is not None else resource.can_download
+    download_url = f"/api/jobs/{resource.job_id}/resources/{resource.id}/download" if can_download else None
+    core = normalize_resource(resource, inventory_item)
+    content_available = core.contentAvailable
     return ResourceListItemRead(
         id=resource.id,
         jobId=resource.job_id,
         title=resource.title,
         type=resource.type,
-        origin=resource.origin,
+        origin=core.origin,
         analysisCategory=inventory_item.analysis_category if inventory_item is not None else "MAIN_ANALYZABLE",
         url=source_url,
         sourceUrl=source_url,
@@ -131,7 +184,7 @@ def _resource_read(
         itemPath=item_path,
         status=resource.status,
         urlStatus=inventory_item.url_status if inventory_item is not None else None,
-        finalUrl=inventory_item.final_url if inventory_item is not None else source_url,
+        finalUrl=core.finalUrl,
         checkedAt=inventory_item.checked_at if inventory_item is not None else None,
         canAccess=inventory_item.can_access if inventory_item is not None else resource.can_access,
         accessStatus=inventory_item.access_status if inventory_item is not None else resource.access_status,
@@ -139,26 +192,29 @@ def _resource_read(
         accessStatusCode=(
             inventory_item.access_status_code if inventory_item is not None else resource.access_status_code
         ),
-        canDownload=inventory_item.can_download if inventory_item is not None else resource.can_download,
+        canDownload=can_download,
         downloadStatus=inventory_item.download_status if inventory_item is not None else resource.download_status,
         downloadStatusCode=(
             inventory_item.download_status_code if inventory_item is not None else resource.download_status_code
         ),
+        contentAvailable=content_available,
         discoveredChildrenCount=(
             inventory_item.discovered_children_count
             if inventory_item is not None
             else resource.discovered_children_count
         ),
-        parentResourceId=parent_resource_id,
-        discovered=inventory_item.discovered if inventory_item is not None else False,
+        parentResourceId=core.parentId or parent_resource_id,
+        parentId=core.parentId or parent_resource_id,
+        discovered=inventory_item.discovered if inventory_item is not None else resource.discovered,
         accessNote=inventory_item.access_note if inventory_item is not None else resource.access_note,
         errorMessage=inventory_item.error_message if inventory_item is not None else resource.error_message,
-        reasonCode=inventory_item.reason_code if inventory_item is not None else None,
-        reasonDetail=inventory_item.reason_detail if inventory_item is not None else resource.error_message,
+        reasonCode=core.reasonCode,
+        reasonDetail=core.reasonDetail,
         notes=resource.notes,
         reviewState=resource.review_state,
         failCount=fail_count,
         updatedAt=resource.updated_at,
+        core=core,
     )
 
 
@@ -587,6 +643,7 @@ def retry_access_analysis(
 def download_resource_file(
     job_id: str,
     resource_id: str,
+    request: Request,
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ):
@@ -604,41 +661,73 @@ def download_resource_file(
         )
 
     file_path = inventory_item.file_path if inventory_item is not None else resource.path
-    if not file_path:
-        raise AppError(
-            code="resource_not_downloadable",
-            message="Este recurso no tiene un archivo offline disponible para descarga.",
-            status_code=status.HTTP_409_CONFLICT,
-            job_id=job_id,
+    if file_path:
+        try:
+            resolved_path = resolve_job_resource_path(settings, job_id, file_path)
+        except AppError:
+            resolved_path = None
+        if resolved_path is not None and resolved_path.exists() and resolved_path.is_file():
+            return FileResponse(
+                path=resolved_path,
+                filename=resolved_path.name,
+                headers=_no_store_headers(),
+            )
+
+    content = _load_resource_content(
+        request=request,
+        settings=settings,
+        job_id=job_id,
+        resource_id=resource_id,
+    )
+    if content.ok and content.binary_path:
+        return FileResponse(
+            path=content.binary_path,
+            filename=content.filename,
+            media_type=content.content_type or "application/octet-stream",
+            headers=_no_store_headers(),
         )
 
-    try:
-        resolved_path = resolve_job_resource_path(settings, job_id, file_path)
-    except AppError as exc:
-        raise AppError(
-            code="resource_not_downloadable",
-            message="La ruta interna de este recurso no es válida para descarga.",
-            status_code=status.HTTP_409_CONFLICT,
-            details={"reason": str(exc.message)},
-            job_id=job_id,
-        ) from exc
+    _raise_content_error(content, job_id=job_id)
 
-    if not resolved_path.exists() or not resolved_path.is_file():
-        raise AppError(
-            code="resource_file_not_found",
-            message="No hemos encontrado el fichero descargable de este recurso.",
-            status_code=status.HTTP_404_NOT_FOUND,
-            job_id=job_id,
+
+@router.get("/{job_id}/resources/{resource_id}/content")
+def get_resource_content_endpoint(
+    job_id: str,
+    resource_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+):
+    _ensure_review_inventory(session, settings, job_id)
+    _get_review_resource(session, job_id, resource_id)
+    content = _load_resource_content(
+        request=request,
+        settings=settings,
+        job_id=job_id,
+        resource_id=resource_id,
+    )
+    if not content.ok:
+        _raise_content_error(content, job_id=job_id)
+
+    if content.text_content is not None:
+        return HTMLResponse(
+            content=content.text_content,
+            media_type=content.content_type or "text/html",
+            headers=_no_store_headers(),
+        )
+    if content.binary_path:
+        return FileResponse(
+            path=content.binary_path,
+            filename=content.filename,
+            media_type=content.content_type or "application/octet-stream",
+            headers=_no_store_headers(),
         )
 
-    return FileResponse(
-        path=resolved_path,
-        filename=resolved_path.name,
-        headers={
-            "Cache-Control": "no-store, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
+    raise AppError(
+        code="resource_content_unavailable",
+        message="No hay contenido reutilizable para este recurso.",
+        status_code=status.HTTP_409_CONFLICT,
+        job_id=job_id,
     )
 
 

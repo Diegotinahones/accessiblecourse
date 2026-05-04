@@ -90,8 +90,55 @@ export type ReviewResourceType =
   | 'VIDEO'
   | 'NOTEBOOK'
   | 'IMAGE'
+  | 'FILE'
   | 'OTHER';
 export type ReviewResourceHealthStatus = 'OK' | 'WARN' | 'ERROR';
+export type ResourceCoreOrigin =
+  | 'ONLINE_CANVAS'
+  | 'OFFLINE_IMSCC'
+  | 'INTERNAL_FILE'
+  | 'INTERNAL_PAGE'
+  | 'EXTERNAL_URL'
+  | 'RALTI'
+  | 'LTI';
+export type ResourceCoreAccessStatus =
+  | 'OK'
+  | 'NO_ACCEDE'
+  | 'REQUIERE_SSO'
+  | 'REQUIERE_INTERACCION'
+  | 'NO_ANALIZABLE';
+export type ResourceCoreReasonCode =
+  | 'OK'
+  | 'NOT_FOUND'
+  | 'AUTH_REQUIRED'
+  | 'FORBIDDEN'
+  | 'TIMEOUT'
+  | 'DNS_ERROR'
+  | 'SSL_ERROR'
+  | 'NETWORK_ERROR'
+  | 'INVALID_URL'
+  | 'UNKNOWN';
+export type ResourceCoreDownloadStatus = 'OK' | 'FAIL' | 'N_A';
+export interface ResourceCore {
+  id: string;
+  title: string;
+  type: ReviewResourceType;
+  origin: ResourceCoreOrigin;
+  modulePath: string[];
+  sectionTitle: string | null;
+  parentId: string | null;
+  discovered: boolean;
+  accessStatus: ResourceCoreAccessStatus;
+  reasonCode: ResourceCoreReasonCode;
+  reasonDetail: string | null;
+  httpStatus: number | null;
+  finalUrl: string | null;
+  downloadable: boolean;
+  downloadStatus: ResourceCoreDownloadStatus;
+  localPath: string | null;
+  sourceUrl: string | null;
+  contentAvailable: boolean;
+}
 export type ReviewState = 'OK' | 'IN_REVIEW' | 'NEEDS_FIX';
 export type ReviewChecklistValue = 'PENDING' | 'PASS' | 'FAIL';
 export type ReviewSessionStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETE';
@@ -132,6 +179,7 @@ export interface ResourceListItem {
     | 'NO_ACCEDE'
     | 'REQUIERE_INTERACCION'
     | 'REQUIERE_SSO'
+    | 'NO_ANALIZABLE'
     | 'NOT_FOUND'
     | 'FORBIDDEN'
     | 'TIMEOUT'
@@ -141,8 +189,10 @@ export interface ResourceListItem {
   canDownload: boolean;
   downloadStatus: string | null;
   downloadStatusCode: number | null;
+  contentAvailable: boolean;
   discoveredChildrenCount: number;
   parentResourceId: string | null;
+  parentId: string | null;
   discovered: boolean;
   accessNote: string | null;
   errorMessage: string | null;
@@ -152,6 +202,7 @@ export interface ResourceListItem {
   reviewState: ReviewState;
   failCount: number;
   updatedAt: string;
+  core: ResourceCore;
 }
 
 export interface CourseStructureNode {
@@ -307,6 +358,8 @@ export function getReviewResourceTypeLabel(type: ReviewResourceType): string {
       return 'Notebook';
     case 'IMAGE':
       return 'Imagen';
+    case 'FILE':
+      return 'Archivo';
     default:
       return 'Otro';
   }

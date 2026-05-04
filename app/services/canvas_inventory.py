@@ -24,8 +24,12 @@ EXCLUDED_EXTENSIONS = {
     ".dtd",
 }
 
-ORIGIN_INTERNO = "interno"
-ORIGIN_EXTERNO = "externo"
+ORIGIN_ONLINE_CANVAS = "ONLINE_CANVAS"
+ORIGIN_EXTERNAL_URL = "EXTERNAL_URL"
+ORIGIN_RALTI = "RALTI"
+ORIGIN_LTI = "LTI"
+ORIGIN_INTERNO = ORIGIN_ONLINE_CANVAS
+ORIGIN_EXTERNO = ORIGIN_EXTERNAL_URL
 SOURCE_CANVAS = "Canvas"
 ACCESS_STATUS_OK = "OK"
 ACCESS_STATUS_NO_ACCEDE = "NO_ACCEDE"
@@ -33,7 +37,8 @@ ACCESS_STATUS_REQUIRES_INTERACTION = "REQUIERE_INTERACCION"
 ACCESS_STATUS_REQUIRES_SSO = "REQUIERE_SSO"
 ACCESS_STATUS_ERROR = ACCESS_STATUS_NO_ACCEDE
 RESOURCE_ID_NAMESPACE = uuid5(NAMESPACE_URL, "accessiblecourse.canvas.resource")
-SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu")
+SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu", "login.uoc.edu", "sso.uoc.edu")
+SSO_PATH_MARKERS = ("sso", "saml", "oauth", "login", "id-provider", "ralti")
 
 
 @dataclass(slots=True, frozen=True)
@@ -281,7 +286,7 @@ def _build_non_file_resource(
     if resource_type is None:
         return None
 
-    origin = ORIGIN_EXTERNO if item.type == "ExternalUrl" or (item.type == "ExternalTool" and item.external_url) else ORIGIN_INTERNO
+    origin = _origin_for_canvas_item(item, resolved_url)
     resource = _base_resource(
         course_id=course_id,
         module=module,
@@ -785,7 +790,19 @@ def _is_sso_url(url: str | None) -> bool:
     if not isinstance(url, str) or not url.strip():
         return False
     host = urlparse(url).netloc.lower()
-    return any(marker in host for marker in SSO_HOST_MARKERS)
+    path = urlparse(url).path.lower()
+    query = urlparse(url).query.lower()
+    if any(marker in host for marker in SSO_HOST_MARKERS):
+        return True
+    return host.endswith(".uoc.edu") and any(marker in f"{path}?{query}" for marker in SSO_PATH_MARKERS)
+
+
+def _origin_for_canvas_item(item: CanvasModuleItem, url: str | None) -> str:
+    if item.type == "ExternalTool":
+        return ORIGIN_RALTI if _is_sso_url(url) else ORIGIN_LTI
+    if item.type == "ExternalUrl":
+        return ORIGIN_RALTI if _is_sso_url(url) else ORIGIN_EXTERNAL_URL
+    return ORIGIN_ONLINE_CANVAS
 
 
 def _build_course_path(module: str, subheader: str | None) -> str:

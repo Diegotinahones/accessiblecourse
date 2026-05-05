@@ -234,7 +234,13 @@ class ResourceContentRead(ResourceContentResult):
 
 class ResourceContentCheckRead(StrictModel):
     ok: bool
+    resourceId: str
+    title: str
+    type: str
+    origin: str | None = None
     contentKind: str
+    contentAvailable: bool = False
+    downloadable: bool = False
     mimeType: str | None = None
     filename: str | None = None
     errorCode: str | None = None

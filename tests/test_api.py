@@ -674,6 +674,20 @@ def test_offline_inventory_moves_lti_and_sso_noise_out_of_main_listing(client, m
     assert external_block[0]["url"] == "https://ralti.uoc.edu/launch?tool=abc"
     assert external_block[0]["accessStatus"] == "REQUIERE_SSO"
 
+    content_check_response = client.get(
+        f"/api/jobs/{job_id}/resources/{external_block[0]['id']}/content-check"
+    )
+    assert content_check_response.status_code == 200, content_check_response.text
+    content_check = content_check_response.json()
+    assert content_check["ok"] is False
+    assert content_check["resourceId"] == external_block[0]["id"]
+    assert content_check["title"] == "Learning Tools"
+    assert content_check["origin"] == "RALTI"
+    assert content_check["contentKind"] == "NOT_ANALYZABLE"
+    assert content_check["contentAvailable"] is False
+    assert content_check["downloadable"] is False
+    assert content_check["errorCode"] == "REQUIERE_SSO"
+
     access_summary_response = client.get(f"/api/jobs/{job_id}/access-summary")
     assert access_summary_response.status_code == 200, access_summary_response.text
     access_summary = access_summary_response.json()
@@ -938,7 +952,13 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     html_check = html_check_response.json()
     assert html_check == {
         "ok": True,
+        "resourceId": "res-html",
+        "title": html_resource["title"],
+        "type": "WEB",
+        "origin": "INTERNAL_PAGE",
         "contentKind": "HTML",
+        "contentAvailable": True,
+        "downloadable": False,
         "mimeType": "text/html",
         "filename": "activity.html",
         "errorCode": None,
@@ -949,7 +969,13 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     assert pdf_check_response.status_code == 200, pdf_check_response.text
     pdf_check = pdf_check_response.json()
     assert pdf_check["ok"] is True
+    assert pdf_check["resourceId"] == brief_resource["id"]
+    assert pdf_check["title"] == "Brief de la PEC"
+    assert pdf_check["type"] == "PDF"
+    assert pdf_check["origin"] == "INTERNAL_FILE"
     assert pdf_check["contentKind"] == "PDF"
+    assert pdf_check["contentAvailable"] is True
+    assert pdf_check["downloadable"] is True
     assert pdf_check["mimeType"] == "application/pdf"
     assert pdf_check["filename"] == "brief.pdf"
     assert pdf_check["errorCode"] is None

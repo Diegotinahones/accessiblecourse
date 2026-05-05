@@ -750,7 +750,19 @@ def check_resource_content(
     settings: Settings = Depends(get_settings),
 ) -> ResourceContentCheckRead:
     _ensure_review_inventory(session, settings, job_id)
-    _get_review_resource(session, job_id, resource_id)
+    inventory_item = _load_inventory_index_or_empty(settings, job_id).get(resource_id)
+    resource = session.get(Resource, resource_id)
+    if resource is not None and resource.job_id != job_id:
+        resource = None
+    if resource is None and inventory_item is None:
+        raise AppError(
+            code="resource_not_found",
+            message="No hemos encontrado ese recurso.",
+            status_code=status.HTTP_404_NOT_FOUND,
+            details={"reason": f"El recurso '{resource_id}' no existe."},
+            job_id=job_id,
+        )
+    core = normalize_resource(resource or inventory_item, inventory_item if resource is not None else None)
     content = _load_resource_content(
         request=request,
         settings=settings,
@@ -759,7 +771,13 @@ def check_resource_content(
     )
     return ResourceContentCheckRead(
         ok=content.ok,
+        resourceId=content.resourceId,
+        title=content.title,
+        type=content.type,
+        origin=content.origin,
         contentKind=content.contentKind,
+        contentAvailable=content.ok and content.contentKind in {"HTML", "TEXT", "PDF", "BINARY"},
+        downloadable=core.downloadable and content.contentKind in {"TEXT", "PDF", "BINARY"},
         mimeType=content.mimeType,
         filename=content.filename,
         errorCode=content.errorCode,

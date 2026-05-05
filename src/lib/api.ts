@@ -7,6 +7,11 @@ import type {
   CourseStructureOrganization,
   CourseStructureNode,
   GeneratedReport,
+  HtmlAccessibilityCheck,
+  HtmlAccessibilityCheckStatus,
+  HtmlAccessibilityResource,
+  HtmlAccessibilityResponse,
+  HtmlAccessibilitySummary,
   JobStatus,
   OnlineCourse,
   ResourceCore,
@@ -38,7 +43,13 @@ interface UploadRequestOptions {
 interface RawJobStatusResponse {
   jobId?: string;
   status: 'created' | 'pending' | 'running' | 'processing' | 'done' | 'error';
-  phase?: 'UPLOAD' | 'INVENTORY' | 'ACCESS_SCAN' | 'DONE' | 'ERROR';
+  phase?:
+    | 'UPLOAD'
+    | 'INVENTORY'
+    | 'ACCESS_SCAN'
+    | 'HTML_ACCESSIBILITY_SCAN'
+    | 'DONE'
+    | 'ERROR';
   progress: number;
   message?: string;
   currentStep?: number;
@@ -266,6 +277,10 @@ function readBoolean(value: unknown): boolean | null {
   return null;
 }
 
+function readArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function normalizeAccessStatus(
   accessStatus: unknown,
   healthStatus: unknown,
@@ -302,6 +317,38 @@ function normalizeAccessStatus(
   return 'OK';
 }
 
+function normalizeAccessibilityStatus(
+  value: unknown,
+): HtmlAccessibilityCheckStatus {
+  const normalizedValue = readString(value)
+    ?.toUpperCase()
+    .replace(/\s+/g, '_')
+    .replace(/-/g, '_');
+
+  if (normalizedValue === 'PASS' || normalizedValue === 'PASSED') {
+    return 'PASS';
+  }
+
+  if (normalizedValue === 'FAIL' || normalizedValue === 'FAILED') {
+    return 'FAIL';
+  }
+
+  if (normalizedValue === 'WARNING' || normalizedValue === 'WARN') {
+    return 'WARNING';
+  }
+
+  if (
+    normalizedValue === 'NO_APLICA' ||
+    normalizedValue === 'NOT_APPLICABLE' ||
+    normalizedValue === 'N_A' ||
+    normalizedValue === 'NA'
+  ) {
+    return 'NO_APLICA';
+  }
+
+  return 'ERROR';
+}
+
 function normalizeCoreAccessStatus(value: ResourceAccessStatus) {
   if (
     value === 'OK' ||
@@ -329,13 +376,19 @@ function normalizeReasonCode(value: unknown): ResourceCore['reasonCode'] {
     'INVALID_URL',
     'UNKNOWN',
   ];
-  if (normalizedValue && validReasonCodes.includes(normalizedValue as ResourceCore['reasonCode'])) {
+  if (
+    normalizedValue &&
+    validReasonCodes.includes(normalizedValue as ResourceCore['reasonCode'])
+  ) {
     return normalizedValue as ResourceCore['reasonCode'];
   }
   return 'UNKNOWN';
 }
 
-function normalizeDownloadStatus(value: unknown, downloadable: boolean): ResourceCore['downloadStatus'] {
+function normalizeDownloadStatus(
+  value: unknown,
+  downloadable: boolean,
+): ResourceCore['downloadStatus'] {
   const normalizedValue = readString(value)?.toUpperCase();
   if (
     normalizedValue === 'OK' ||
@@ -347,7 +400,10 @@ function normalizeDownloadStatus(value: unknown, downloadable: boolean): Resourc
   return downloadable ? 'OK' : 'N_A';
 }
 
-function normalizeCoreOrigin(value: unknown, fallbackOrigin: string | null): ResourceCore['origin'] {
+function normalizeCoreOrigin(
+  value: unknown,
+  fallbackOrigin: string | null,
+): ResourceCore['origin'] {
   const normalizedValue = readString(value)?.toUpperCase();
   const validOrigins: ResourceCore['origin'][] = [
     'ONLINE_CANVAS',
@@ -358,7 +414,10 @@ function normalizeCoreOrigin(value: unknown, fallbackOrigin: string | null): Res
     'RALTI',
     'LTI',
   ];
-  if (normalizedValue && validOrigins.includes(normalizedValue as ResourceCore['origin'])) {
+  if (
+    normalizedValue &&
+    validOrigins.includes(normalizedValue as ResourceCore['origin'])
+  ) {
     return normalizedValue as ResourceCore['origin'];
   }
   if (fallbackOrigin === 'externo') {
@@ -497,8 +556,8 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
   const htmlPath =
     readString(item.htmlPath) ??
     readString(item.html_path) ??
-    ((readString(item.origin)?.toUpperCase() === 'INTERNAL_PAGE' &&
-      Boolean(filePath))
+    (readString(item.origin)?.toUpperCase() === 'INTERNAL_PAGE' &&
+    Boolean(filePath)
       ? filePath
       : null);
   const sectionTitle =
@@ -544,9 +603,9 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     readString(item.reason_detail) ??
     readString(item.errorMessage) ??
     readString(item.error_message) ??
-      readString(item.accessNote) ??
-      readString(item.access_note) ??
-      null;
+    readString(item.accessNote) ??
+    readString(item.access_note) ??
+    null;
   const id =
     readString(item.id) ??
     readString(item.resourceId) ??
@@ -851,6 +910,214 @@ function normalizeResourcesResponse(
   };
 }
 
+function normalizeAccessibilityCheck(
+  value: unknown,
+  index: number,
+): HtmlAccessibilityCheck {
+  const item =
+    value && typeof value === 'object'
+      ? (value as Record<string, unknown>)
+      : {};
+  const id =
+    readString(item.id) ??
+    readString(item.checkId) ??
+    readString(item.check_id) ??
+    readString(item.key) ??
+    `check-${index + 1}`;
+
+  return {
+    id,
+    title:
+      readString(item.title) ??
+      readString(item.label) ??
+      readString(item.name) ??
+      `Check ${index + 1}`,
+    status: normalizeAccessibilityStatus(
+      item.status ?? item.result ?? item.outcome,
+    ),
+    evidence:
+      readString(item.evidence) ??
+      readString(item.detail) ??
+      readString(item.details) ??
+      null,
+    recommendation:
+      readString(item.recommendation) ??
+      readString(item.recommendationText) ??
+      readString(item.recommendation_text) ??
+      null,
+  };
+}
+
+function normalizeAccessibilityResource(
+  value: unknown,
+): HtmlAccessibilityResource | null {
+  const item =
+    value && typeof value === 'object'
+      ? (value as Record<string, unknown>)
+      : null;
+
+  if (!item) {
+    return null;
+  }
+
+  const resourceId =
+    readString(item.resourceId) ??
+    readString(item.resource_id) ??
+    readString(item.id);
+
+  if (!resourceId) {
+    return null;
+  }
+
+  const rawChecks =
+    readArray(item.checks).length > 0
+      ? readArray(item.checks)
+      : readArray(item.checklist).length > 0
+        ? readArray(item.checklist)
+        : readArray(item.items).length > 0
+          ? readArray(item.items)
+          : readArray(item.results);
+
+  return {
+    resourceId,
+    title: readString(item.title),
+    checks: rawChecks.map(normalizeAccessibilityCheck),
+    error:
+      readString(item.error) ??
+      readString(item.errorMessage) ??
+      readString(item.error_message),
+  };
+}
+
+function deriveAccessibilitySummary(
+  resources: HtmlAccessibilityResource[],
+): HtmlAccessibilitySummary {
+  const allChecks = resources.flatMap((resource) => resource.checks);
+
+  return {
+    resourcesAnalyzed: resources.filter(
+      (resource) => resource.checks.length > 0 || resource.error,
+    ).length,
+    pass: allChecks.filter((check) => check.status === 'PASS').length,
+    warning: allChecks.filter((check) => check.status === 'WARNING').length,
+    fail: allChecks.filter((check) => check.status === 'FAIL').length,
+    notApplicable: allChecks.filter((check) => check.status === 'NO_APLICA')
+      .length,
+    errors:
+      allChecks.filter((check) => check.status === 'ERROR').length +
+      resources.filter((resource) => resource.error).length,
+  };
+}
+
+function normalizeAccessibilitySummary(
+  value: unknown,
+  fallbackSummary: HtmlAccessibilitySummary,
+): HtmlAccessibilitySummary {
+  const summary =
+    value && typeof value === 'object'
+      ? (value as Record<string, unknown>)
+      : {};
+
+  return {
+    resourcesAnalyzed:
+      readNumber(summary.resourcesAnalyzed) ??
+      readNumber(summary.resources_analyzed) ??
+      readNumber(summary.htmlResourcesAnalyzed) ??
+      readNumber(summary.html_resources_analyzed) ??
+      fallbackSummary.resourcesAnalyzed,
+    pass:
+      readNumber(summary.pass) ??
+      readNumber(summary.passed) ??
+      readNumber(summary.checksCorrectos) ??
+      readNumber(summary.checks_correctos) ??
+      fallbackSummary.pass,
+    warning:
+      readNumber(summary.warning) ??
+      readNumber(summary.warnings) ??
+      readNumber(summary.avisos) ??
+      fallbackSummary.warning,
+    fail:
+      readNumber(summary.fail) ??
+      readNumber(summary.failed) ??
+      readNumber(summary.failures) ??
+      readNumber(summary.incumplimientos) ??
+      fallbackSummary.fail,
+    notApplicable:
+      readNumber(summary.notApplicable) ??
+      readNumber(summary.not_applicable) ??
+      readNumber(summary.noAplica) ??
+      readNumber(summary.no_aplica) ??
+      readNumber(summary.noAplicables) ??
+      readNumber(summary.no_aplicables) ??
+      fallbackSummary.notApplicable,
+    errors:
+      readNumber(summary.errors) ??
+      readNumber(summary.analysisErrors) ??
+      readNumber(summary.analysis_errors) ??
+      readNumber(summary.erroresAnalisis) ??
+      readNumber(summary.errores_analisis) ??
+      fallbackSummary.errors,
+  };
+}
+
+function emptyAccessibilityResponse(jobId: string): HtmlAccessibilityResponse {
+  return {
+    jobId,
+    summary: {
+      resourcesAnalyzed: 0,
+      pass: 0,
+      warning: 0,
+      fail: 0,
+      notApplicable: 0,
+      errors: 0,
+    },
+    resources: [],
+  };
+}
+
+function normalizeAccessibilityResponse(
+  jobId: string,
+  payload: unknown,
+): HtmlAccessibilityResponse {
+  if (!payload || typeof payload !== 'object') {
+    return emptyAccessibilityResponse(jobId);
+  }
+
+  const response = payload as Record<string, unknown>;
+  const root =
+    response.accessibility && typeof response.accessibility === 'object'
+      ? (response.accessibility as Record<string, unknown>)
+      : response;
+  const rawResources =
+    readArray(root.resources).length > 0
+      ? readArray(root.resources)
+      : readArray(root.results).length > 0
+        ? readArray(root.results)
+        : readArray(root.items).length > 0
+          ? readArray(root.items)
+          : readArray(root.htmlResources);
+  const resources = rawResources
+    .map(normalizeAccessibilityResource)
+    .filter((resource): resource is HtmlAccessibilityResource =>
+      Boolean(resource),
+    );
+  const fallbackSummary = deriveAccessibilitySummary(resources);
+
+  return {
+    jobId:
+      readString(response.jobId) ??
+      readString(response.job_id) ??
+      readString(root.jobId) ??
+      readString(root.job_id) ??
+      jobId,
+    summary: normalizeAccessibilitySummary(
+      root.summary ?? root,
+      fallbackSummary,
+    ),
+    resources,
+  };
+}
+
 export function resolveApiUrl(path: string): string {
   if (/^https?:\/\//.test(path)) {
     return path;
@@ -947,6 +1214,21 @@ export async function fetchResources(
     `/jobs/${jobId}/resources${query}`,
   );
   return normalizeResourcesResponse(jobId, payload);
+}
+
+export async function fetchAccessibility(
+  jobId: string,
+): Promise<HtmlAccessibilityResponse> {
+  try {
+    const payload = await request<unknown>(`/jobs/${jobId}/accessibility`);
+    return normalizeAccessibilityResponse(jobId, payload);
+  } catch (caughtError) {
+    if (caughtError instanceof ApiError && caughtError.status === 404) {
+      return emptyAccessibilityResponse(jobId);
+    }
+
+    throw caughtError;
+  }
 }
 
 export async function fetchResourceDetail(

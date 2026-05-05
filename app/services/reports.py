@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import json
-import shutil
-import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime
+import json
 from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
+from typing import Any
 from uuid import uuid4
 
 from docx import Document
@@ -25,28 +26,18 @@ from app.models import Job as ProcessingJob
 from app.models.entities import (
     ChecklistResponse,
     ChecklistValue,
+    Job as ReviewJob,
     ReportRecord,
     Resource,
     ResourceHealthStatus,
     ResourceType,
     utcnow,
 )
-from app.models.entities import (
-    Job as ReviewJob,
-)
-from app.schemas import (
-    GeneratedReportResponse,
-    ReportDownloads,
-    ReportFailure,
-    ReportGroup,
-    ResourceResponse,
-)
+from app.schemas import GeneratedReportResponse, ReportDownloads, ReportFailure, ReportGroup, ResourceResponse
 from app.services.catalog import SEVERITY_ORDER, get_item_severity
-from app.services.review_service import (
-    ensure_job_inventory,
-    ensure_review_rollups,
-    get_templates_by_type,
-)
+from app.services.html_accessibility import ensure_accessibility_report
+from app.services.resource_core import normalize_resource
+from app.services.review_service import ensure_job_inventory, ensure_review_rollups, get_templates_by_type, load_inventory_file
 from app.services.storage import get_reports_dir
 
 TYPE_LABELS = {
@@ -71,6 +62,12 @@ MEDIA_TYPES = {
     "json": "application/json",
 }
 
+HTML_STATUS_ORDER = {"FAIL": 0, "WARNING": 1}
+HTML_NOT_ANALYZABLE_EXPLANATION = (
+    "No se analizan automáticamente porque requieren una capa externa de autenticación, "
+    "interacción humana o un tipo de análisis todavía no implementado."
+)
+
 
 def _download_urls(job_id: str) -> dict[str, str]:
     return {
@@ -92,11 +89,11 @@ def _canonical_paths(settings: Settings, job_id: str) -> tuple[Path, Path, Path]
     return reports_dir / "report.json", reports_dir / "report.docx", reports_dir / "report.pdf"
 
 
-def _resource_sort_key(resource: dict) -> tuple[int, int, str]:
+def _resource_sort_key(resource: dict[str, Any]) -> tuple[int, int, str]:
     return (-resource["stats"]["fails"], -resource["stats"]["pending"], resource["title"].lower())
 
 
-def _issue_sort_key(issue: dict) -> tuple[int, str]:
+def _issue_sort_key(issue: dict[str, Any]) -> tuple[int, str]:
     return (SEVERITY_ORDER.get(issue["severity"], 9), issue["label"].lower())
 
 
@@ -108,6 +105,14 @@ def _format_report_date(value: str | datetime) -> str:
 def _stable_filename(job_id: str, created_at: str | datetime, extension: str) -> str:
     parsed = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(created_at)
     return f"AccessibleCourse_Report_{job_id}_{parsed.strftime('%Y%m%d')}.{extension}"
+
+
+def _enum_value(value: Any) -> str:
+    if hasattr(value, "value"):
+        return str(value.value)
+    if value is None:
+        return ""
+    return str(value)
 
 
 def _resolve_course_title(session: Session, job_id: str) -> str | None:
@@ -128,6 +133,18 @@ def _resolve_course_title(session: Session, job_id: str) -> str | None:
             return candidate
 
     return None
+
+
+def _resolve_mode(session: Session, job_id: str, inventory_items: list[Any]) -> dict[str, str]:
+    if any(normalize_resource(item).origin == "ONLINE_CANVAS" for item in inventory_items):
+        return {"key": "ONLINE_CANVAS", "label": "ONLINE Canvas"}
+
+    processing_job = session.get(ProcessingJob, job_id)
+    original_filename = getattr(processing_job, "original_filename", "") if processing_job is not None else ""
+    if Path(original_filename).suffix.lower() in {".imscc", ".zip"}:
+        return {"key": "OFFLINE_IMSCC", "label": "OFFLINE IMSCC"}
+
+    return {"key": "OFFLINE_IMSCC", "label": "OFFLINE IMSCC"}
 
 
 def _assert_job_ready(session: Session, job_id: str) -> None:
@@ -206,7 +223,7 @@ def _resource_response(resource: Resource) -> ResourceResponse:
     )
 
 
-def _recommendations(resources: list[dict]) -> list[str]:
+def _recommendations(resources: list[dict[str, Any]]) -> list[str]:
     issue_counter = Counter()
     severity_counter = Counter()
     for resource in resources:
@@ -236,29 +253,242 @@ def _recommendations(resources: list[dict]) -> list[str]:
     return recommendations[:6]
 
 
-def _build_report_payload(
-    session: Session,
+def _item_course_path(item: Any) -> str:
+    value = getattr(item, "item_path", None) or getattr(item, "course_path", None) or getattr(item, "module_title", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "Raiz del curso"
+
+
+def _item_module_title(item: Any) -> str | None:
+    for value in (
+        getattr(item, "module_title", None),
+        getattr(item, "section_title", None),
+        getattr(item, "course_path", None),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _item_type_label(item: Any) -> str:
+    item_type = getattr(item, "type", None)
+    if item_type in TYPE_LABELS:
+        return TYPE_LABELS[item_type]
+    return TYPE_LABELS.get(ResourceType(_enum_value(item_type)), "Otro") if _enum_value(item_type) else "Otro"
+
+
+def _is_main_item(item: Any) -> bool:
+    return getattr(item, "analysis_category", "MAIN_ANALYZABLE") == "MAIN_ANALYZABLE"
+
+
+def _is_auxiliary_item(item: Any) -> bool:
+    return getattr(item, "analysis_category", "MAIN_ANALYZABLE") == "NON_ANALYZABLE_EXTERNAL"
+
+
+def _is_html_candidate(item: Any) -> bool:
+    if not _is_main_item(item):
+        return False
+    core = normalize_resource(item)
+    if core.type != "WEB":
+        return False
+    if core.origin in {"EXTERNAL_URL", "RALTI", "LTI"}:
+        return False
+    if core.htmlPath:
+        return True
+    local_path = core.localPath or ""
+    if Path(local_path).suffix.lower() in {".html", ".htm", ".xhtml"}:
+        return True
+    return core.origin == "ONLINE_CANVAS"
+
+
+def _build_access_summary_data(inventory_items: list[Any]) -> dict[str, int]:
+    main_items = [item for item in inventory_items if _is_main_item(item)]
+    relevant_items = [item for item in inventory_items if getattr(item, "analysis_category", "") != "TECHNICAL_IGNORED"]
+    return {
+        "resourcesDetected": len(main_items),
+        "resourcesAccessed": sum(1 for item in main_items if bool(getattr(item, "can_access", False))),
+        "downloadable": sum(1 for item in main_items if bool(getattr(item, "can_download", False))),
+        "noAccessible": sum(1 for item in main_items if _enum_value(getattr(item, "access_status", None)) == "NO_ACCEDE"),
+        "requiresSSO": sum(1 for item in relevant_items if _enum_value(getattr(item, "access_status", None)) == "REQUIERE_SSO"),
+        "requiresInteraction": sum(
+            1 for item in relevant_items if _enum_value(getattr(item, "access_status", None)) == "REQUIERE_INTERACCION"
+        ),
+        "globalUnplaced": sum(1 for item in main_items if getattr(item, "section_type", None) == "global_unplaced"),
+        "noAnalyzableExternal": sum(1 for item in inventory_items if _is_auxiliary_item(item)),
+        "technicalIgnored": sum(
+            1 for item in inventory_items if getattr(item, "analysis_category", "") == "TECHNICAL_IGNORED"
+        ),
+    }
+
+
+def _ensure_accessibility_data(
     settings: Settings,
     job_id: str,
+    inventory_items: list[Any],
     *,
-    include_pending: bool = True,
-    only_fails: bool = False,
-) -> dict:
-    _ensure_report_ready(session, settings, job_id)
-    include_pending = include_pending and not only_fails
+    canvas_client: Any | None = None,
+    canvas_credentials: Any | None = None,
+    course_id: str | None = None,
+):
+    payload = [item.model_dump(mode="python") for item in inventory_items]
+    return ensure_accessibility_report(
+        settings=settings,
+        job_id=job_id,
+        resources=payload,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
 
+
+def _flatten_accessibility_resources(accessibility_report) -> list[tuple[str, Any]]:
+    flattened: list[tuple[str, Any]] = []
+    for module in accessibility_report.modules:
+        for resource in module.resources:
+            flattened.append((module.title, resource))
+    return flattened
+
+
+def _build_html_summary_data(inventory_items: list[Any], accessibility_report) -> dict[str, int]:
+    return {
+        "resourcesDetected": sum(1 for item in inventory_items if _is_html_candidate(item)),
+        "resourcesAnalyzed": accessibility_report.summary.htmlResourcesAnalyzed,
+        "passCount": accessibility_report.summary.passCount,
+        "failCount": accessibility_report.summary.failCount,
+        "warningCount": accessibility_report.summary.warningCount,
+        "notApplicableCount": accessibility_report.summary.notApplicableCount,
+        "errorCount": accessibility_report.summary.errorCount,
+    }
+
+
+def _build_key_issues(items_by_id: dict[str, Any], accessibility_report) -> list[dict[str, str | None]]:
+    issues: list[dict[str, str | None]] = []
+    for module_title, resource in _flatten_accessibility_resources(accessibility_report):
+        item = items_by_id.get(resource.resourceId)
+        course_path = _item_course_path(item) if item is not None else module_title
+        for check in resource.checks:
+            if check.status not in {"FAIL", "WARNING"}:
+                continue
+            issues.append(
+                {
+                    "coursePath": course_path,
+                    "moduleTitle": _item_module_title(item) if item is not None else module_title,
+                    "resourceId": resource.resourceId,
+                    "resourceTitle": resource.title,
+                    "checkId": check.checkId,
+                    "checkTitle": check.checkTitle,
+                    "status": check.status,
+                    "evidence": check.evidence,
+                    "recommendation": check.recommendation,
+                }
+            )
+    return sorted(
+        issues,
+        key=lambda item: (
+            HTML_STATUS_ORDER.get(str(item["status"]), 9),
+            str(item["coursePath"]).lower(),
+            str(item["resourceTitle"]).lower(),
+            str(item["checkTitle"]).lower(),
+        ),
+    )
+
+
+def _overall_html_status(checks: list[Any]) -> str:
+    statuses = {check.status for check in checks}
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "WARNING" in statuses:
+        return "WARNING"
+    if "ERROR" in statuses:
+        return "ERROR"
+    return "PASS"
+
+
+def _build_html_resource_details(items_by_id: dict[str, Any], accessibility_report) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for module_title, resource in _flatten_accessibility_resources(accessibility_report):
+        item = items_by_id.get(resource.resourceId)
+        overall_status = _overall_html_status(resource.checks)
+        checks = [
+            {
+                "checkId": check.checkId,
+                "checkTitle": check.checkTitle,
+                "status": check.status,
+                "evidence": check.evidence,
+                "recommendation": check.recommendation,
+            }
+            for check in resource.checks
+        ]
+        details.append(
+            {
+                "resourceId": resource.resourceId,
+                "title": resource.title,
+                "coursePath": _item_course_path(item) if item is not None else module_title,
+                "moduleTitle": _item_module_title(item) if item is not None else module_title,
+                "accessStatus": resource.accessStatus,
+                "overallStatus": overall_status,
+                "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
+                "checks": checks,
+            }
+        )
+    return sorted(details, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
+
+
+def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str]) -> list[dict[str, str | None]]:
+    skipped: list[dict[str, str | None]] = []
+    seen_ids: set[str] = set()
+    for item in inventory_items:
+        item_id = str(getattr(item, "id"))
+        if item_id in seen_ids:
+            continue
+
+        core = normalize_resource(item)
+        reason: str | None = None
+        if _is_auxiliary_item(item) or core.origin in {"RALTI", "LTI"} or core.accessStatus == "REQUIERE_SSO":
+            reason = "REQUIERE_SSO"
+        elif core.accessStatus == "REQUIERE_INTERACCION":
+            reason = "REQUIERE_INTERACCION"
+        elif _is_main_item(item) and core.type != "WEB":
+            reason = "TIPO_NO_HTML_CUBIERTO_PENDIENTE"
+        elif _is_html_candidate(item) and item_id not in analyzed_ids:
+            reason = "HTML_NO_ANALIZADO"
+
+        if reason is None:
+            continue
+
+        seen_ids.add(item_id)
+        skipped.append(
+            {
+                "resourceId": item_id,
+                "title": str(getattr(item, "title", "Recurso sin titulo")),
+                "coursePath": _item_course_path(item),
+                "moduleTitle": _item_module_title(item),
+                "type": _item_type_label(item),
+                "origin": core.origin,
+                "accessStatus": core.accessStatus,
+                "reason": reason,
+                "explanation": HTML_NOT_ANALYZABLE_EXPLANATION,
+            }
+        )
+    return sorted(skipped, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
+
+
+def _build_manual_review_sections(
+    session: Session,
+    job_id: str,
+    *,
+    include_pending: bool,
+    only_fails: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
     template_map = get_templates_by_type(session)
     resources = session.exec(select(Resource).where(Resource.job_id == job_id).order_by(Resource.title)).all()
     responses = session.exec(select(ChecklistResponse).where(ChecklistResponse.job_id == job_id)).all()
-
     responses_by_resource: dict[str, list[ChecklistResponse]] = defaultdict(list)
     for response in responses:
         responses_by_resource[response.resource_id].append(response)
 
-    created_at = utcnow()
-    course_title = _resolve_course_title(session, job_id)
-    report_id = f"report-{uuid4().hex[:12]}"
-    resource_sections: list[dict] = []
+    resource_sections: list[dict[str, Any]] = []
     total_fails = 0
     total_pending = 0
 
@@ -268,8 +498,8 @@ def _build_report_payload(
             continue
 
         responses_by_key = {response.item_key: response for response in responses_by_resource.get(resource.id, [])}
-        fails: list[dict] = []
-        pending: list[dict] = []
+        fails: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
 
         for template_item in template_bundle.items:
             response = responses_by_key.get(template_item.key)
@@ -285,7 +515,7 @@ def _build_report_payload(
 
             if value == ChecklistValue.FAIL:
                 fails.append({**issue, "status": "FAIL"})
-            elif value == ChecklistValue.PENDING and include_pending:
+            elif value == ChecklistValue.PENDING and include_pending and not only_fails:
                 pending.append({**issue, "status": "PENDING"})
 
         fails.sort(key=_issue_sort_key)
@@ -311,7 +541,7 @@ def _build_report_payload(
             }
         )
 
-    route_groups: dict[str, list[dict]] = defaultdict(list)
+    route_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for resource in resource_sections:
         route_groups[resource["coursePath"]].append(resource)
 
@@ -330,6 +560,51 @@ def _build_report_payload(
             }
         )
 
+    return routes, sorted(resource_sections, key=_resource_sort_key), total_fails, total_pending
+
+
+def _build_report_payload(
+    session: Session,
+    settings: Settings,
+    job_id: str,
+    *,
+    include_pending: bool = True,
+    only_fails: bool = False,
+    canvas_client: Any | None = None,
+    canvas_credentials: Any | None = None,
+    course_id: str | None = None,
+) -> dict[str, Any]:
+    _ensure_report_ready(session, settings, job_id)
+
+    inventory_items = load_inventory_file(settings, job_id)
+    accessibility_report = _ensure_accessibility_data(
+        settings,
+        job_id,
+        inventory_items,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    items_by_id = {str(item.id): item for item in inventory_items}
+
+    created_at = utcnow()
+    created_at_iso = created_at.isoformat()
+    report_id = f"report-{uuid4().hex[:12]}"
+    course_title = _resolve_course_title(session, job_id)
+    mode = _resolve_mode(session, job_id, inventory_items)
+    access_summary = _build_access_summary_data(inventory_items)
+    html_summary = _build_html_summary_data(inventory_items, accessibility_report)
+    key_issues = _build_key_issues(items_by_id, accessibility_report)
+    html_resources = _build_html_resource_details(items_by_id, accessibility_report)
+    analyzed_ids = {resource["resourceId"] for resource in html_resources}
+    skipped_resources = _build_skipped_resources(inventory_items, analyzed_ids)
+
+    routes, resource_sections, total_fails, total_pending = _build_manual_review_sections(
+        session,
+        job_id,
+        include_pending=include_pending,
+        only_fails=only_fails,
+    )
     top_resources = sorted(
         [
             {
@@ -344,30 +619,39 @@ def _build_report_payload(
         key=lambda item: (-item["failCount"], item["title"].lower()),
     )[:5]
 
-    created_at_iso = created_at.isoformat()
     return {
         "reportId": report_id,
         "createdAt": created_at_iso,
         "files": _download_urls(job_id),
-        "stats": {"resources": len(resources), "fails": total_fails, "pending": total_pending},
+        "stats": {
+            "resources": len(session.exec(select(Resource).where(Resource.job_id == job_id)).all()),
+            "fails": total_fails,
+            "pending": total_pending,
+        },
         "meta": {
             "reportId": report_id,
             "createdAt": created_at_iso,
             "courseTitle": course_title,
             "jobId": job_id,
-            "includePending": include_pending,
+            "includePending": include_pending and not only_fails,
             "onlyFails": only_fails,
             "systemVersion": settings.version,
         },
+        "mode": mode,
+        "accessSummary": access_summary,
+        "htmlAccessibilitySummary": html_summary,
+        "keyIssues": key_issues,
+        "htmlResources": html_resources,
+        "notAutomaticallyAnalyzable": skipped_resources,
         "summary": {
-            "resources": len(resources),
+            "resources": len(session.exec(select(Resource).where(Resource.job_id == job_id)).all()),
             "fails": total_fails,
             "pending": total_pending,
             "topResources": top_resources,
             "recommendations": _recommendations(resource_sections),
         },
         "routes": routes,
-        "resources": sorted(resource_sections, key=_resource_sort_key),
+        "resources": resource_sections,
         "appendix": {
             "statusDefinitions": {
                 "PENDING": "Pendiente de revisar o sin evidencia suficiente todavia.",
@@ -398,184 +682,313 @@ def _configure_docx_styles(document: Document) -> None:
     set_style_font("Heading 2", 13)
 
 
-def _write_docx(destination: Path, report: dict, brand_name: str) -> None:
+def _append_docx_summary_table(document: Document, rows: list[tuple[str, str]]) -> None:
+    table = document.add_table(rows=1, cols=2)
+    table.style = "Table Grid"
+    header = table.rows[0].cells
+    header[0].text = "Indicador"
+    header[1].text = "Valor"
+    for label, value in rows:
+        row = table.add_row().cells
+        row[0].text = label
+        row[1].text = value
+
+
+def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     document = Document()
     _configure_docx_styles(document)
 
     document.add_heading(f"{brand_name} - Informe de accesibilidad", level=1)
-    document.add_paragraph(f"Curso: {report['meta']['courseTitle'] or 'No disponible'}")
+    document.add_paragraph(f"Curso / job: {report['meta']['courseTitle'] or report['meta']['jobId']}")
     document.add_paragraph(f"Fecha: {_format_report_date(report['createdAt'])}")
+    document.add_paragraph(f"Modo: {report['mode']['label']}")
     document.add_paragraph(f"Job ID: {report['meta']['jobId']}")
+    document.add_paragraph(f"Versión AccessibleCourse: {report['meta']['systemVersion']}")
     document.add_page_break()
 
-    document.add_heading("Resumen ejecutivo", level=1)
-    summary_table = document.add_table(rows=1, cols=2)
-    summary_table.style = "Table Grid"
-    summary_header = summary_table.rows[0].cells
-    summary_header[0].text = "Indicador"
-    summary_header[1].text = "Valor"
-    for label, value in (
-        ("Recursos analizados", str(report["summary"]["resources"])),
-        ("Items FAIL", str(report["summary"]["fails"])),
-        ("Items PENDING", str(report["summary"]["pending"])),
-    ):
-        row = summary_table.add_row().cells
-        row[0].text = label
-        row[1].text = value
+    document.add_heading("Resumen de acceso", level=1)
+    _append_docx_summary_table(
+        document,
+        [
+            ("Recursos detectados", str(report["accessSummary"]["resourcesDetected"])),
+            ("Recursos accedidos", str(report["accessSummary"]["resourcesAccessed"])),
+            ("Descargables", str(report["accessSummary"]["downloadable"])),
+            ("No accesibles", str(report["accessSummary"]["noAccessible"])),
+            ("Requieren SSO", str(report["accessSummary"]["requiresSSO"])),
+            ("Requieren interacción", str(report["accessSummary"]["requiresInteraction"])),
+            ("Globales / no ubicados", str(report["accessSummary"]["globalUnplaced"])),
+        ],
+    )
 
-    document.add_heading("Top 5 recursos con mas FAIL", level=2)
-    if report["summary"]["topResources"]:
-        for resource in report["summary"]["topResources"]:
+    document.add_heading("Resumen de accesibilidad HTML", level=1)
+    _append_docx_summary_table(
+        document,
+        [
+            ("Recursos HTML detectados", str(report["htmlAccessibilitySummary"]["resourcesDetected"])),
+            ("Recursos HTML analizados", str(report["htmlAccessibilitySummary"]["resourcesAnalyzed"])),
+            ("Total PASS", str(report["htmlAccessibilitySummary"]["passCount"])),
+            ("Total FAIL", str(report["htmlAccessibilitySummary"]["failCount"])),
+            ("Total WARNING", str(report["htmlAccessibilitySummary"]["warningCount"])),
+            ("Total NOT_APPLICABLE", str(report["htmlAccessibilitySummary"]["notApplicableCount"])),
+            ("Total ERROR", str(report["htmlAccessibilitySummary"]["errorCount"])),
+        ],
+    )
+
+    document.add_heading("Principales incidencias", level=1)
+    if not report["keyIssues"]:
+        document.add_paragraph("No se han detectado incidencias FAIL o WARNING en los checks HTML automáticos.")
+    else:
+        current_group = None
+        for issue in report["keyIssues"]:
+            group_label = f"{issue['coursePath']} | {issue['resourceTitle']}"
+            if group_label != current_group:
+                document.add_heading(group_label, level=2)
+                current_group = group_label
             document.add_paragraph(
-                f"{resource['title']} ({resource['coursePath']}) - {resource['failCount']} FAIL",
+                f"{issue['checkTitle']} [{issue['status']}]",
                 style="List Bullet",
             )
-    else:
-        document.add_paragraph("No hay recursos con FAIL registrados.")
-
-    document.add_heading("Recomendaciones generales", level=2)
-    for recommendation in report["summary"]["recommendations"]:
-        document.add_paragraph(recommendation, style="List Bullet")
+            document.add_paragraph(f"Evidencia: {issue['evidence']}")
+            document.add_paragraph(f"Recomendación: {issue['recommendation']}")
 
     document.add_page_break()
-    document.add_heading("Detalle por recurso", level=1)
+    document.add_heading("Detalle por recurso HTML", level=1)
+    if not report["htmlResources"]:
+        document.add_paragraph("No hay recursos HTML analizados automáticamente para este job.")
+    else:
+        for resource in report["htmlResources"]:
+            document.add_heading(resource["title"], level=2)
+            document.add_paragraph(
+                f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
+                f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}"
+            )
+            if resource["summarized"]:
+                document.add_paragraph(
+                    "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE."
+                )
+                continue
+            table = document.add_table(rows=1, cols=4)
+            table.style = "Table Grid"
+            header = table.rows[0].cells
+            header[0].text = "Check"
+            header[1].text = "Estado"
+            header[2].text = "Evidencia"
+            header[3].text = "Recomendación"
+            for check in resource["checks"]:
+                row = table.add_row().cells
+                row[0].text = check["checkTitle"]
+                row[1].text = check["status"]
+                row[2].text = check["evidence"]
+                row[3].text = check["recommendation"]
+
+    document.add_heading("Recursos no analizables automáticamente", level=1)
+    if not report["notAutomaticallyAnalyzable"]:
+        document.add_paragraph("No hay recursos pendientes de análisis automático por autenticación, interacción o cobertura.")
+    else:
+        document.add_paragraph(HTML_NOT_ANALYZABLE_EXPLANATION)
+        for resource in report["notAutomaticallyAnalyzable"]:
+            document.add_paragraph(
+                f"{resource['title']} ({resource['type']}) - {resource['reason']} - "
+                f"{resource['moduleTitle'] or resource['coursePath']}",
+                style="List Bullet",
+            )
+
+    document.add_page_break()
+    document.add_heading("Revisión manual complementaria", level=1)
     if not report["routes"]:
-        document.add_paragraph("No hay hallazgos FAIL o PENDING para incluir en el informe.")
+        document.add_paragraph("No hay hallazgos FAIL o PENDING en la checklist manual.")
     else:
         for route in report["routes"]:
-            document.add_heading(f"Ruta: {route['coursePath']}", level=1)
+            document.add_heading(f"Ruta: {route['coursePath']}", level=2)
             for resource in route["resources"]:
-                document.add_heading(resource["title"], level=2)
                 document.add_paragraph(
-                    f"Tipo: {resource['type']} | Origen: {resource['origin']} | "
-                    f"Ruta: {resource['coursePath']} | Fuente: {resource['source'] or 'No disponible'}"
+                    f"{resource['title']} | Tipo: {resource['type']} | Origen: {resource['origin']}"
                 )
-                detail_table = document.add_table(rows=1, cols=5)
-                detail_table.style = "Table Grid"
-                headers = detail_table.rows[0].cells
-                headers[0].text = "Estado"
-                headers[1].text = "Severidad"
-                headers[2].text = "Descripcion breve"
-                headers[3].text = "Como arreglarlo"
-                headers[4].text = "Notas del revisor"
-
+                table = document.add_table(rows=1, cols=5)
+                table.style = "Table Grid"
+                header = table.rows[0].cells
+                header[0].text = "Estado"
+                header[1].text = "Severidad"
+                header[2].text = "Descripción"
+                header[3].text = "Cómo arreglarlo"
+                header[4].text = "Notas"
                 for issue in resource["fails"] + resource["pending"]:
-                    row = detail_table.add_row().cells
+                    row = table.add_row().cells
                     row[0].text = issue["status"]
                     row[1].text = issue["severity"]
                     row[2].text = issue["description"]
-                    row[3].text = issue["recommendation"] or "Sin recomendacion disponible."
+                    row[3].text = issue["recommendation"] or "Sin recomendación disponible."
                     row[4].text = issue.get("comment") or "-"
 
-    document.add_heading("Apendice", level=1)
+    document.add_heading("Apéndice", level=1)
     for key, value in report["appendix"]["statusDefinitions"].items():
         document.add_paragraph(f"{key}: {value}", style="List Bullet")
     document.add_paragraph(f"Fecha: {_format_report_date(report['appendix']['createdAt'])}")
-    document.add_paragraph(f"Version del sistema: {report['appendix']['systemVersion']}")
+    document.add_paragraph(f"Versión del sistema: {report['appendix']['systemVersion']}")
     document.save(destination)
 
 
-def _write_pdf(destination: Path, report: dict, brand_name: str) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="Section", parent=styles["Heading1"], fontSize=15))
-
-    story = [
-        Paragraph(f"{brand_name} - Informe de accesibilidad", styles["Title"]),
-        Spacer(1, 0.4 * cm),
-        Paragraph(f"Curso: {report['meta']['courseTitle'] or 'No disponible'}", styles["Normal"]),
-        Paragraph(f"Fecha: {_format_report_date(report['createdAt'])}", styles["Normal"]),
-        Paragraph(f"Job ID: {report['meta']['jobId']}", styles["Normal"]),
-        PageBreak(),
-        Paragraph("Resumen ejecutivo", styles["Section"]),
-    ]
-
-    summary_table = Table(
-        [
-            ["Indicador", "Valor"],
-            ["Recursos analizados", str(report["summary"]["resources"])],
-            ["Items FAIL", str(report["summary"]["fails"])],
-            ["Items PENDING", str(report["summary"]["pending"])],
-        ],
-        colWidths=[8 * cm, 5 * cm],
-    )
-    summary_table.setStyle(
+def _append_pdf_table(story: list[Any], rows: list[list[str]], *, widths: list[float]) -> None:
+    table = Table(rows, colWidths=widths)
+    table.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-                ("PADDING", (0, 0), (-1, -1), 6),
+                ("PADDING", (0, 0), (-1, -1), 5),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]
         )
     )
-    story.extend(
+    story.extend([table, Spacer(1, 0.25 * cm)])
+
+
+def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="Section", parent=styles["Heading1"], fontSize=15))
+
+    story: list[Any] = [
+        Paragraph(f"{brand_name} - Informe de accesibilidad", styles["Title"]),
+        Spacer(1, 0.4 * cm),
+        Paragraph(f"Curso / job: {report['meta']['courseTitle'] or report['meta']['jobId']}", styles["Normal"]),
+        Paragraph(f"Fecha: {_format_report_date(report['createdAt'])}", styles["Normal"]),
+        Paragraph(f"Modo: {report['mode']['label']}", styles["Normal"]),
+        Paragraph(f"Job ID: {report['meta']['jobId']}", styles["Normal"]),
+        Paragraph(f"Versión AccessibleCourse: {report['meta']['systemVersion']}", styles["Normal"]),
+        PageBreak(),
+        Paragraph("Resumen de acceso", styles["Section"]),
+    ]
+
+    _append_pdf_table(
+        story,
         [
-            summary_table,
-            Spacer(1, 0.25 * cm),
-            Paragraph("Top 5 recursos con mas FAIL", styles["Heading2"]),
-        ]
+            ["Indicador", "Valor"],
+            ["Recursos detectados", str(report["accessSummary"]["resourcesDetected"])],
+            ["Recursos accedidos", str(report["accessSummary"]["resourcesAccessed"])],
+            ["Descargables", str(report["accessSummary"]["downloadable"])],
+            ["No accesibles", str(report["accessSummary"]["noAccessible"])],
+            ["Requieren SSO", str(report["accessSummary"]["requiresSSO"])],
+            ["Requieren interacción", str(report["accessSummary"]["requiresInteraction"])],
+            ["Globales / no ubicados", str(report["accessSummary"]["globalUnplaced"])],
+        ],
+        widths=[9 * cm, 4.2 * cm],
     )
 
-    if report["summary"]["topResources"]:
-        for resource in report["summary"]["topResources"]:
+    story.append(Paragraph("Resumen de accesibilidad HTML", styles["Section"]))
+    _append_pdf_table(
+        story,
+        [
+            ["Indicador", "Valor"],
+            ["Recursos HTML detectados", str(report["htmlAccessibilitySummary"]["resourcesDetected"])],
+            ["Recursos HTML analizados", str(report["htmlAccessibilitySummary"]["resourcesAnalyzed"])],
+            ["Total PASS", str(report["htmlAccessibilitySummary"]["passCount"])],
+            ["Total FAIL", str(report["htmlAccessibilitySummary"]["failCount"])],
+            ["Total WARNING", str(report["htmlAccessibilitySummary"]["warningCount"])],
+            ["Total NOT_APPLICABLE", str(report["htmlAccessibilitySummary"]["notApplicableCount"])],
+            ["Total ERROR", str(report["htmlAccessibilitySummary"]["errorCount"])],
+        ],
+        widths=[9 * cm, 4.2 * cm],
+    )
+
+    story.append(Paragraph("Principales incidencias", styles["Section"]))
+    if not report["keyIssues"]:
+        story.append(Paragraph("No se han detectado incidencias FAIL o WARNING en los checks HTML automáticos.", styles["Normal"]))
+    else:
+        current_group = None
+        for issue in report["keyIssues"]:
+            group_label = f"{issue['coursePath']} | {issue['resourceTitle']}"
+            if group_label != current_group:
+                story.append(Paragraph(group_label, styles["Heading2"]))
+                current_group = group_label
+            story.append(Paragraph(f"- {issue['checkTitle']} [{issue['status']}]", styles["Normal"]))
+            story.append(Paragraph(f"Evidencia: {issue['evidence']}", styles["Normal"]))
+            story.append(Paragraph(f"Recomendación: {issue['recommendation']}", styles["Normal"]))
+
+    story.extend([PageBreak(), Paragraph("Detalle por recurso HTML", styles["Section"])])
+    if not report["htmlResources"]:
+        story.append(Paragraph("No hay recursos HTML analizados automáticamente para este job.", styles["Normal"]))
+    else:
+        for resource in report["htmlResources"]:
+            story.append(Paragraph(resource["title"], styles["Heading2"]))
             story.append(
                 Paragraph(
-                    f"- {resource['title']} ({resource['coursePath']}) - {resource['failCount']} FAIL",
+                    f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
+                    f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}",
                     styles["Normal"],
                 )
             )
+            if resource["summarized"]:
+                story.append(
+                    Paragraph(
+                        "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE.",
+                        styles["Normal"],
+                    )
+                )
+                continue
+            rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
+            for check in resource["checks"]:
+                rows.append(
+                    [
+                        check["checkTitle"],
+                        check["status"],
+                        check["evidence"],
+                        check["recommendation"],
+                    ]
+                )
+            _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
+
+    story.append(Paragraph("Recursos no analizables automáticamente", styles["Section"]))
+    if not report["notAutomaticallyAnalyzable"]:
+        story.append(
+            Paragraph(
+                "No hay recursos pendientes de análisis automático por autenticación, interacción o cobertura.",
+                styles["Normal"],
+            )
+        )
     else:
-        story.append(Paragraph("No hay recursos con FAIL registrados.", styles["Normal"]))
+        story.append(Paragraph(HTML_NOT_ANALYZABLE_EXPLANATION, styles["Normal"]))
+        for resource in report["notAutomaticallyAnalyzable"]:
+            story.append(
+                Paragraph(
+                    f"- {resource['title']} ({resource['type']}) - {resource['reason']} - "
+                    f"{resource['moduleTitle'] or resource['coursePath']}",
+                    styles["Normal"],
+                )
+            )
 
-    story.extend([Spacer(1, 0.25 * cm), Paragraph("Recomendaciones generales", styles["Heading2"])])
-    for recommendation in report["summary"]["recommendations"]:
-        story.append(Paragraph(f"- {recommendation}", styles["Normal"]))
-
-    story.extend([PageBreak(), Paragraph("Detalle por recurso", styles["Section"])])
+    story.extend([PageBreak(), Paragraph("Revisión manual complementaria", styles["Section"])])
     if not report["routes"]:
-        story.append(Paragraph("No hay hallazgos FAIL o PENDING para incluir en el informe.", styles["Normal"]))
+        story.append(Paragraph("No hay hallazgos FAIL o PENDING en la checklist manual.", styles["Normal"]))
     else:
         for route in report["routes"]:
             story.append(Paragraph(f"Ruta: {route['coursePath']}", styles["Heading2"]))
             for resource in route["resources"]:
-                story.append(Paragraph(resource["title"], styles["Heading3"]))
                 story.append(
                     Paragraph(
-                        f"Tipo: {resource['type']} | Origen: {resource['origin']} | "
-                        f"Ruta: {resource['coursePath']} | Fuente: {resource['source'] or 'No disponible'}",
+                        f"{resource['title']} | Tipo: {resource['type']} | Origen: {resource['origin']}",
                         styles["Normal"],
                     )
                 )
-                rows = [["Estado", "Severidad", "Descripcion", "Como arreglarlo", "Notas"]]
+                rows = [["Estado", "Severidad", "Descripción", "Cómo arreglarlo", "Notas"]]
                 for issue in resource["fails"] + resource["pending"]:
                     rows.append(
                         [
                             issue["status"],
                             issue["severity"],
                             issue["description"],
-                            issue["recommendation"] or "Sin recomendacion disponible.",
+                            issue["recommendation"] or "Sin recomendación disponible.",
                             issue.get("comment") or "-",
                         ]
                     )
-                detail_table = Table(rows, colWidths=[2 * cm, 2.2 * cm, 4 * cm, 6 * cm, 2.8 * cm])
-                detail_table.setStyle(
-                    TableStyle(
-                        [
-                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")),
-                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-                            ("PADDING", (0, 0), (-1, -1), 4),
-                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ]
-                    )
-                )
-                story.extend([Spacer(1, 0.15 * cm), detail_table, Spacer(1, 0.35 * cm)])
+                _append_pdf_table(story, rows, widths=[1.8 * cm, 2.2 * cm, 4 * cm, 4.8 * cm, 2.7 * cm])
 
-    story.extend([PageBreak(), Paragraph("Apendice", styles["Section"])])
+    story.append(Paragraph("Apéndice", styles["Section"]))
     for key, value in report["appendix"]["statusDefinitions"].items():
         story.append(Paragraph(f"- {key}: {value}", styles["Normal"]))
     story.append(Paragraph(f"Fecha: {_format_report_date(report['appendix']['createdAt'])}", styles["Normal"]))
-    story.append(Paragraph(f"Version del sistema: {report['appendix']['systemVersion']}", styles["Normal"]))
+    story.append(Paragraph(f"Versión del sistema: {report['appendix']['systemVersion']}", styles["Normal"]))
 
     document = SimpleDocTemplate(str(destination), pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm)
     document.build(story)
@@ -610,7 +1023,7 @@ def _convert_docx_to_pdf(docx_path: Path, pdf_path: Path) -> bool:
     return pdf_path.exists()
 
 
-def _persist_files(settings: Settings, job_id: str, report: dict) -> tuple[Path, Path, Path]:
+def _persist_files(settings: Settings, job_id: str, report: dict[str, Any]) -> tuple[Path, Path, Path]:
     json_path, docx_path, pdf_path = _canonical_paths(settings, job_id)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -639,13 +1052,19 @@ def generate_job_report(
     *,
     include_pending: bool = True,
     only_fails: bool = False,
-) -> dict:
+    canvas_client: Any | None = None,
+    canvas_credentials: Any | None = None,
+    course_id: str | None = None,
+) -> dict[str, Any]:
     payload = _build_report_payload(
         session,
         settings,
         job_id,
         include_pending=include_pending,
         only_fails=only_fails,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
     )
     _, docx_path, pdf_path = _persist_files(settings, job_id, payload)
     generated_at = datetime.fromisoformat(payload["createdAt"])
@@ -665,7 +1084,7 @@ def generate_job_report(
     return payload
 
 
-def load_job_report(session: Session, job_id: str) -> dict:
+def load_job_report(session: Session, job_id: str) -> dict[str, Any]:
     return get_report_or_404(session, job_id).payload
 
 
@@ -700,7 +1119,7 @@ def get_report_file_info(session: Session, settings: Settings, job_id: str, fmt:
     return file_path, MEDIA_TYPES[fmt], download_name
 
 
-def _legacy_groups_from_payload(session: Session, payload: dict) -> list[ReportGroup]:
+def _legacy_groups_from_payload(session: Session, payload: dict[str, Any]) -> list[ReportGroup]:
     groups: list[ReportGroup] = []
     for resource in payload["resources"]:
         if not resource["fails"]:

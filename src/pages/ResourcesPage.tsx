@@ -6,11 +6,19 @@ import {
   useSearchParams,
 } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
-import { fetchResources, getResourceDownloadUrl, api } from '../lib/api';
+import {
+  fetchAccessibility,
+  fetchResources,
+  getResourceDownloadUrl,
+  api,
+} from '../lib/api';
 import type {
   AppMode,
   CourseStructure,
   CourseStructureNode,
+  HtmlAccessibilityCheckStatus,
+  HtmlAccessibilityResource,
+  HtmlAccessibilityResponse,
   ResourceListItem,
 } from '../lib/types';
 import { getReviewResourceTypeLabel } from '../lib/types';
@@ -52,12 +60,18 @@ interface BackendResourceCounts {
 interface ResourceFilters {
   onlyNoAccess: boolean;
   onlyDownloadable: boolean;
+  onlyFailures: boolean;
+  onlyWarnings: boolean;
+  onlyHtml: boolean;
   hideGlobalUnplaced: boolean;
 }
 
 const EMPTY_FILTERS: ResourceFilters = {
   onlyNoAccess: false,
   onlyDownloadable: false,
+  onlyFailures: false,
+  onlyWarnings: false,
+  onlyHtml: false,
   hideGlobalUnplaced: false,
 };
 
@@ -173,6 +187,26 @@ function getStatusClasses(tone: BadgeTone) {
   return 'border-rose-200 bg-rose-50 text-danger';
 }
 
+function getAccessibilityStatusLabel(status: HtmlAccessibilityCheckStatus) {
+  if (status === 'NO_APLICA') {
+    return 'NO APLICA';
+  }
+
+  return status;
+}
+
+function getAccessibilityTone(status: HtmlAccessibilityCheckStatus): BadgeTone {
+  if (status === 'PASS') {
+    return 'ok';
+  }
+
+  if (status === 'WARNING' || status === 'NO_APLICA') {
+    return 'warning';
+  }
+
+  return 'danger';
+}
+
 function getSectionLabel(resource: ResourceListItem) {
   const sectionName =
     resource.sectionTitle ||
@@ -188,6 +222,24 @@ function getSectionLabel(resource: ResourceListItem) {
   }
 
   return normalizeSectionName(sectionName);
+}
+
+function isHtmlResource(
+  resource: ResourceListItem,
+  accessibilityResult: HtmlAccessibilityResource | undefined,
+) {
+  return (
+    Boolean(accessibilityResult) ||
+    Boolean(resource.htmlPath || resource.core.htmlPath) ||
+    (resource.type === 'WEB' && resource.contentAvailable)
+  );
+}
+
+function isExternalAccessBlocked(resource: ResourceListItem) {
+  return (
+    resource.accessStatus === 'REQUIERE_SSO' ||
+    resource.accessStatus === 'REQUIERE_INTERACCION'
+  );
 }
 
 function isNoAccessResource(resource: ResourceListItem) {
@@ -458,6 +510,7 @@ function buildResourceTree(resources: ResourceListItem[]): ResourceTreeNode[] {
 function resourceMatchesFilters(
   resource: ResourceListItem,
   filters: ResourceFilters,
+  accessibilityByResourceId: Map<string, HtmlAccessibilityResource>,
 ) {
   if (filters.onlyNoAccess && !isNoAccessResource(resource)) {
     return false;
@@ -467,22 +520,46 @@ function resourceMatchesFilters(
     return false;
   }
 
+  const accessibilityResult = accessibilityByResourceId.get(resource.id);
+
+  if (filters.onlyHtml && !isHtmlResource(resource, accessibilityResult)) {
+    return false;
+  }
+
+  if (
+    filters.onlyFailures &&
+    !accessibilityResult?.checks.some((check) => check.status === 'FAIL')
+  ) {
+    return false;
+  }
+
+  if (
+    filters.onlyWarnings &&
+    !accessibilityResult?.checks.some((check) => check.status === 'WARNING')
+  ) {
+    return false;
+  }
+
   return true;
 }
 
-function filterGroup(group: ResourceGroup, filters: ResourceFilters) {
+function filterGroup(
+  group: ResourceGroup,
+  filters: ResourceFilters,
+  accessibilityByResourceId: Map<string, HtmlAccessibilityResource>,
+) {
   if (filters.hideGlobalUnplaced && group.isGlobalUnplaced) {
     return null;
   }
 
   const directResources = group.directResources.filter((resource) =>
-    resourceMatchesFilters(resource, filters),
+    resourceMatchesFilters(resource, filters, accessibilityByResourceId),
   );
   const subsections = group.subsections
     .map((subsection) => ({
       ...subsection,
       resources: subsection.resources.filter((resource) =>
-        resourceMatchesFilters(resource, filters),
+        resourceMatchesFilters(resource, filters, accessibilityByResourceId),
       ),
     }))
     .filter((subsection) => subsection.resources.length > 0);
@@ -512,10 +589,85 @@ function Badge({ children, tone }: { children: string; tone: BadgeTone }) {
   return <span className={`badge ${getStatusClasses(tone)}`}>{children}</span>;
 }
 
+function HtmlAccessibilityChecklist({
+  accessibilityResult,
+  resource,
+}: {
+  accessibilityResult: HtmlAccessibilityResource | undefined;
+  resource: ResourceListItem;
+}) {
+  if (isExternalAccessBlocked(resource)) {
+    return (
+      <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-[#8a5a00]">
+        No analizable automáticamente porque requiere acceso externo, SSO o
+        interacción.
+      </p>
+    );
+  }
+
+  if (!isHtmlResource(resource, accessibilityResult)) {
+    return (
+      <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
+        Este tipo de recurso se analizará en una fase posterior.
+      </p>
+    );
+  }
+
+  if (!accessibilityResult || accessibilityResult.checks.length === 0) {
+    return (
+      <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
+        No hay resultados automáticos de accesibilidad HTML para este recurso.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <h5 className="text-sm font-semibold text-ink">
+        Checklist automático HTML
+      </h5>
+      {accessibilityResult.error ? (
+        <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-danger">
+          Error de análisis: {accessibilityResult.error}
+        </p>
+      ) : null}
+      <ul className="space-y-3">
+        {accessibilityResult.checks.map((check) => (
+          <li
+            className="space-y-2 rounded-xl border border-line bg-[#f8faf7] p-3"
+            key={check.id}
+          >
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <p className="text-sm font-semibold text-ink">{check.title}</p>
+              <Badge tone={getAccessibilityTone(check.status)}>
+                {getAccessibilityStatusLabel(check.status)}
+              </Badge>
+            </div>
+            {check.evidence ? (
+              <p className="text-sm leading-6 text-subtle">
+                <span className="font-semibold text-ink">Evidencia:</span>{' '}
+                {check.evidence}
+              </p>
+            ) : null}
+            {check.recommendation ? (
+              <p className="text-sm leading-6 text-subtle">
+                <span className="font-semibold text-ink">Recomendación:</span>{' '}
+                {check.recommendation}
+              </p>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ResourceItem({
+  accessibilityResult,
   jobId,
   resource,
 }: {
+  accessibilityResult: HtmlAccessibilityResource | undefined;
   jobId: string | undefined;
   resource: ResourceListItem;
 }) {
@@ -528,9 +680,9 @@ function ResourceItem({
     <div className="space-y-3 rounded-2xl border border-line bg-white p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-3">
-          <p className="break-words text-base font-semibold text-ink">
+          <h4 className="break-words text-base font-semibold text-ink">
             {resource.title}
-          </p>
+          </h4>
 
           <div className="flex flex-wrap gap-2">
             <Badge tone="neutral">
@@ -588,15 +740,22 @@ function ResourceItem({
           ) : null}
         </div>
       ) : null}
+
+      <HtmlAccessibilityChecklist
+        accessibilityResult={accessibilityResult}
+        resource={resource}
+      />
     </div>
   );
 }
 
 function ResourceTreeList({
+  accessibilityByResourceId,
   jobId,
   nodes,
   level = 0,
 }: {
+  accessibilityByResourceId: Map<string, HtmlAccessibilityResource>;
   jobId: string | undefined;
   nodes: ResourceTreeNode[];
   level?: number;
@@ -613,13 +772,20 @@ function ResourceTreeList({
     >
       {nodes.map((node) => (
         <li key={node.resource.id}>
-          <ResourceItem jobId={jobId} resource={node.resource} />
+          <ResourceItem
+            accessibilityResult={accessibilityByResourceId.get(
+              node.resource.id,
+            )}
+            jobId={jobId}
+            resource={node.resource}
+          />
           {node.children.length > 0 ? (
             <div className="mt-3">
               <p className="mb-2 text-sm font-semibold text-subtle">
                 Recursos detectados dentro
               </p>
               <ResourceTreeList
+                accessibilityByResourceId={accessibilityByResourceId}
                 jobId={jobId}
                 level={level + 1}
                 nodes={node.children}
@@ -638,6 +804,8 @@ export function ResourcesPage() {
   const [searchParams] = useSearchParams();
   const [resources, setResources] = useState<ResourceListItem[]>([]);
   const [structure, setStructure] = useState<CourseStructure | null>(null);
+  const [accessibility, setAccessibility] =
+    useState<HtmlAccessibilityResponse | null>(null);
   const [backendCounts, setBackendCounts] = useState<BackendResourceCounts>({
     globalUnplacedCount: null,
     noAccessCount: null,
@@ -649,6 +817,9 @@ export function ResourcesPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRetrying, setIsRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [accessibilityError, setAccessibilityError] = useState<string | null>(
+    null,
+  );
   const modeParam = searchParams.get('mode');
   const appMode: AppMode = isAppMode(modeParam)
     ? modeParam
@@ -672,6 +843,7 @@ export function ResourcesPage() {
       try {
         setIsLoading(true);
         setError(null);
+        setAccessibilityError(null);
         const payload = await fetchResources(resolvedJobId);
         if (cancelled) {
           return;
@@ -689,6 +861,22 @@ export function ResourcesPage() {
               ? payload.noAccessCount
               : null,
         });
+
+        try {
+          const accessibilityPayload = await fetchAccessibility(resolvedJobId);
+          if (!cancelled) {
+            setAccessibility(accessibilityPayload);
+          }
+        } catch (caughtAccessibilityError) {
+          if (!cancelled) {
+            setAccessibility(null);
+            setAccessibilityError(
+              caughtAccessibilityError instanceof Error
+                ? caughtAccessibilityError.message
+                : 'No hemos podido cargar el análisis automático HTML.',
+            );
+          }
+        }
       } catch (caughtError) {
         if (!cancelled) {
           setError(
@@ -718,13 +906,23 @@ export function ResourcesPage() {
 
     return sortGlobalGroupLast(buildGroupsByPath(resources));
   }, [resources, structure]);
+  const accessibilityByResourceId = useMemo(
+    () =>
+      new Map(
+        (accessibility?.resources ?? []).map((resource) => [
+          resource.resourceId,
+          resource,
+        ]),
+      ),
+    [accessibility],
+  );
 
   const filteredGroups = useMemo(
     () =>
       groups
-        .map((group) => filterGroup(group, filters))
+        .map((group) => filterGroup(group, filters, accessibilityByResourceId))
         .filter((group): group is ResourceGroup => Boolean(group)),
-    [filters, groups],
+    [accessibilityByResourceId, filters, groups],
   );
   const accessedCount = useMemo(
     () =>
@@ -802,6 +1000,46 @@ export function ResourcesPage() {
       label: 'Recursos globales/no ubicados',
       value: String(displayedGlobalUnplacedCount),
       show: displayedGlobalUnplacedCount > 0,
+    },
+  ].filter((item) => item.show);
+  const accessibilitySummary = accessibility?.summary ?? {
+    resourcesAnalyzed: 0,
+    pass: 0,
+    warning: 0,
+    fail: 0,
+    notApplicable: 0,
+    errors: 0,
+  };
+  const accessibilitySummaryItems = [
+    {
+      label: 'Recursos HTML analizados',
+      value: String(accessibilitySummary.resourcesAnalyzed),
+      show: true,
+    },
+    {
+      label: 'Checks correctos',
+      value: String(accessibilitySummary.pass),
+      show: true,
+    },
+    {
+      label: 'Avisos',
+      value: String(accessibilitySummary.warning),
+      show: true,
+    },
+    {
+      label: 'Incumplimientos',
+      value: String(accessibilitySummary.fail),
+      show: true,
+    },
+    {
+      label: 'No aplicables',
+      value: String(accessibilitySummary.notApplicable),
+      show: true,
+    },
+    {
+      label: 'Errores de análisis',
+      value: String(accessibilitySummary.errors),
+      show: accessibilitySummary.errors > 0,
     },
   ].filter((item) => item.show);
 
@@ -893,6 +1131,36 @@ export function ResourcesPage() {
             </dl>
           </section>
 
+          <section
+            aria-live="polite"
+            className="rounded-3xl border border-line bg-white p-5 shadow-card sm:p-6"
+          >
+            <h2 className="text-lg font-semibold text-ink">
+              Resumen de accesibilidad HTML
+            </h2>
+            {accessibilityError ? (
+              <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-[#8a5a00]">
+                No se pudo cargar el análisis automático HTML:{' '}
+                {accessibilityError}
+              </p>
+            ) : null}
+            <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {accessibilitySummaryItems.map((item) => (
+                <div
+                  className="rounded-2xl border border-line bg-[#f8faf7] p-4"
+                  key={item.label}
+                >
+                  <dt className="text-sm font-medium text-subtle">
+                    {item.label}
+                  </dt>
+                  <dd className="mt-1 text-2xl font-semibold tracking-[-0.03em] text-ink">
+                    {item.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+
           <section className="rounded-3xl border border-line bg-white p-5 shadow-card sm:p-6">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1">
@@ -937,6 +1205,39 @@ export function ResourcesPage() {
                     type="checkbox"
                   />
                   <span>Mostrar solo descargables</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.onlyFailures}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('onlyFailures', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Mostrar solo incumplimientos</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.onlyWarnings}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('onlyWarnings', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Mostrar solo avisos</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.onlyHtml}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('onlyHtml', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Mostrar solo recursos HTML</span>
                 </label>
                 <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
                   <input
@@ -1015,6 +1316,9 @@ export function ResourcesPage() {
                       >
                         {group.directResources.length > 0 ? (
                           <ResourceTreeList
+                            accessibilityByResourceId={
+                              accessibilityByResourceId
+                            }
                             jobId={jobId}
                             nodes={buildResourceTree(group.directResources)}
                           />
@@ -1058,6 +1362,9 @@ export function ResourcesPage() {
                                     id={subsectionPanelId}
                                   >
                                     <ResourceTreeList
+                                      accessibilityByResourceId={
+                                        accessibilityByResourceId
+                                      }
                                       jobId={jobId}
                                       nodes={buildResourceTree(
                                         subsection.resources,

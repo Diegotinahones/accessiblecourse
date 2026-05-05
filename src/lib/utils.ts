@@ -38,6 +38,10 @@ export function buildStepMessage(progress: number) {
     return 'Generando diagnóstico';
   }
 
+  if (progress >= 85) {
+    return 'Procesando accesibilidad de los recursos HTML';
+  }
+
   if (progress >= 75) {
     return 'Buscando descargables';
   }

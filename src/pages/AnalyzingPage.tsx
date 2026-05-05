@@ -14,8 +14,16 @@ import {
 function getAnalysisMessage(status: JobStatus | null) {
   const progress = status?.progress ?? 0;
 
+  if (status?.phase === 'HTML_ACCESSIBILITY_SCAN') {
+    return 'Procesando accesibilidad de los recursos HTML';
+  }
+
   if (progress >= 95) {
     return 'Generando diagnóstico';
+  }
+
+  if (progress >= 85) {
+    return 'Procesando accesibilidad de los recursos HTML';
   }
 
   if (progress >= 75) {

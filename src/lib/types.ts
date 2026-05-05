@@ -11,6 +11,7 @@ export type JobPhase =
   | 'UPLOAD'
   | 'INVENTORY'
   | 'ACCESS_SCAN'
+  | 'HTML_ACCESSIBILITY_SCAN'
   | 'DONE'
   | 'ERROR';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
@@ -239,6 +240,43 @@ export interface ResourceListResponse {
   noAccessByReason?: Record<string, number>;
   reviewSession: ReviewSession;
   structure: CourseStructure;
+}
+
+export type HtmlAccessibilityCheckStatus =
+  | 'PASS'
+  | 'FAIL'
+  | 'WARNING'
+  | 'NO_APLICA'
+  | 'ERROR';
+
+export interface HtmlAccessibilityCheck {
+  id: string;
+  title: string;
+  status: HtmlAccessibilityCheckStatus;
+  evidence: string | null;
+  recommendation: string | null;
+}
+
+export interface HtmlAccessibilityResource {
+  resourceId: string;
+  title: string | null;
+  checks: HtmlAccessibilityCheck[];
+  error: string | null;
+}
+
+export interface HtmlAccessibilitySummary {
+  resourcesAnalyzed: number;
+  pass: number;
+  warning: number;
+  fail: number;
+  notApplicable: number;
+  errors: number;
+}
+
+export interface HtmlAccessibilityResponse {
+  jobId: string;
+  summary: HtmlAccessibilitySummary;
+  resources: HtmlAccessibilityResource[];
 }
 
 export interface ChecklistTemplateItem {

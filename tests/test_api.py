@@ -3,13 +3,14 @@ from __future__ import annotations
 import io
 import json
 from datetime import datetime, timezone
+from docx import Document
 from pathlib import Path
 from zipfile import ZipFile
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from app.models import Job as ProcessingJob
+from app.models import Job as ProcessingJob, JobEvent
 from app.models.entities import ChecklistResponse
 from app.services.resource_core import get_resource_content
 from app.services.url_check import UrlCheckResult
@@ -979,6 +980,102 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     assert pdf_check["mimeType"] == "application/pdf"
     assert pdf_check["filename"] == "brief.pdf"
     assert pdf_check["errorCode"] is None
+
+    accessibility_response = client.get(f"/api/jobs/{job_id}/accessibility")
+    assert accessibility_response.status_code == 200, accessibility_response.text
+    accessibility = accessibility_response.json()
+    assert accessibility["jobId"] == job_id
+    assert accessibility["generatedAt"] is not None
+    assert accessibility["summary"]["htmlResourcesTotal"] == 1
+    assert accessibility["summary"]["htmlResourcesAnalyzed"] == 1
+    assert accessibility["summary"]["failCount"] >= 1
+    assert len(accessibility["resources"]) == 1
+    assert accessibility["resources"][0]["resourceId"] == "res-html"
+    assert accessibility["modules"][0]["resources"][0]["resourceId"] == "res-html"
+    check_statuses = {
+        check["checkId"]: check["status"] for check in accessibility["modules"][0]["resources"][0]["checks"]
+    }
+    assert check_statuses["html.lang"] == "FAIL"
+
+    with Session(client.app.state.engine) as session:
+        events = session.exec(select(JobEvent).where(JobEvent.job_id == job_id)).all()
+    assert any(event.message == "Procesando accesibilidad de los recursos HTML" for event in events)
+
+
+def test_report_generation_includes_access_and_html_accessibility_summaries(client, monkeypatch, test_settings) -> None:
+    class StubURLChecker:
+        def check_url(self, url: str):
+            checked_at = datetime(2026, 5, 3, 8, 0, tzinfo=timezone.utc)
+            return UrlCheckResult(
+                url=url,
+                checked=True,
+                broken_link=False,
+                status_code=200,
+                url_status="200",
+                final_url=url,
+                checked_at=checked_at,
+                content_type="text/html; charset=utf-8",
+            )
+
+    monkeypatch.setattr("app.services.jobs.build_url_checker", lambda settings: StubURLChecker())
+
+    create_response = client.post(
+        "/api/jobs",
+        files={"file": ("course.imscc", build_imscc_with_offline_deep_scan(), "application/octet-stream")},
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    report_response = client.post(f"/api/jobs/{job_id}/report")
+    assert report_response.status_code == 200, report_response.text
+    report = report_response.json()
+
+    assert report["meta"]["jobId"] == job_id
+    assert report["mode"] == {"key": "OFFLINE_IMSCC", "label": "OFFLINE IMSCC"}
+    assert report["accessSummary"]["resourcesDetected"] == 6
+    assert report["accessSummary"]["resourcesAccessed"] == 6
+    assert report["accessSummary"]["downloadable"] == 4
+    assert report["accessSummary"]["noAccessible"] == 0
+    assert report["accessSummary"]["requiresSSO"] == 0
+    assert report["accessSummary"]["requiresInteraction"] == 0
+    assert report["htmlAccessibilitySummary"]["resourcesDetected"] == 1
+    assert report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
+    assert report["htmlAccessibilitySummary"]["failCount"] >= 1
+    assert report["htmlAccessibilitySummary"]["warningCount"] >= 1
+    assert report["keyIssues"]
+    assert report["keyIssues"][0]["status"] == "FAIL"
+    assert any(issue["status"] == "WARNING" for issue in report["keyIssues"])
+    assert report["htmlResources"][0]["resourceId"] == "res-html"
+    assert report["htmlResources"][0]["overallStatus"] == "FAIL"
+    assert report["htmlResources"][0]["summarized"] is False
+    assert any(
+        resource["reason"] == "TIPO_NO_HTML_CUBIERTO_PENDIENTE" for resource in report["notAutomaticallyAnalyzable"]
+    )
+
+    report_dir = test_settings.storage_root / "jobs" / job_id / "report"
+    json_path = report_dir / "report.json"
+    docx_path = report_dir / "report.docx"
+    pdf_path = report_dir / "report.pdf"
+    assert json_path.exists()
+    assert docx_path.exists()
+    assert pdf_path.exists()
+    assert docx_path.stat().st_size > 0
+    assert pdf_path.stat().st_size > 0
+
+    stored_report = json.loads(json_path.read_text(encoding="utf-8"))
+    assert stored_report["accessSummary"]["resourcesDetected"] == 6
+    assert stored_report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
+    assert stored_report["keyIssues"][0]["status"] == "FAIL"
+
+    word_document = Document(str(docx_path))
+    paragraphs = [paragraph.text for paragraph in word_document.paragraphs if paragraph.text]
+    assert "Resumen de acceso" in paragraphs
+    assert "Resumen de accesibilidad HTML" in paragraphs
+    assert "Principales incidencias" in paragraphs
+    assert "Detalle por recurso HTML" in paragraphs
+    assert "Recursos no analizables automáticamente" in paragraphs
+    assert any("Página principal" in paragraph for paragraph in paragraphs)
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

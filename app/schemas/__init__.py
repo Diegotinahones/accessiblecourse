@@ -38,6 +38,7 @@ class JobPhase(str, Enum):
     UPLOAD = "UPLOAD"
     INVENTORY = "INVENTORY"
     ACCESS_SCAN = "ACCESS_SCAN"
+    HTML_ACCESSIBILITY_SCAN = "HTML_ACCESSIBILITY_SCAN"
     DONE = "DONE"
     ERROR = "ERROR"
 
@@ -336,6 +337,46 @@ class JobAccessRead(StrictModel):
     nonAnalyzableExternalResources: list["AuxiliaryResourceRead"] = Field(default_factory=list)
 
 
+class AccessibilityCheckRead(StrictModel):
+    checkId: str
+    checkTitle: str
+    status: Literal["PASS", "FAIL", "WARNING", "NOT_APPLICABLE", "ERROR"]
+    evidence: str
+    recommendation: str
+    wcagHint: str | None = None
+
+
+class AccessibilityResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    type: str
+    accessStatus: str
+    checks: list[AccessibilityCheckRead] = Field(default_factory=list)
+
+
+class AccessibilityModuleRead(StrictModel):
+    title: str
+    resources: list[AccessibilityResourceRead] = Field(default_factory=list)
+
+
+class AccessibilitySummaryRead(StrictModel):
+    htmlResourcesTotal: int = 0
+    htmlResourcesAnalyzed: int = 0
+    passCount: int = 0
+    failCount: int = 0
+    warningCount: int = 0
+    notApplicableCount: int = 0
+    errorCount: int = 0
+
+
+class AccessibilityReportRead(StrictModel):
+    jobId: str
+    generatedAt: datetime | None = None
+    summary: AccessibilitySummaryRead
+    modules: list[AccessibilityModuleRead] = Field(default_factory=list)
+    resources: list[AccessibilityResourceRead] = Field(default_factory=list)
+
+
 class AuxiliaryResourceRead(StrictModel):
     id: str
     title: str
@@ -521,6 +562,76 @@ class ReportMetaRead(StrictModel):
     systemVersion: str
 
 
+class ReportModeRead(StrictModel):
+    key: Literal["ONLINE_CANVAS", "OFFLINE_IMSCC"]
+    label: str
+
+
+class ReportAccessSummaryRead(StrictModel):
+    resourcesDetected: int
+    resourcesAccessed: int
+    downloadable: int
+    noAccessible: int
+    requiresSSO: int
+    requiresInteraction: int
+    globalUnplaced: int = 0
+    noAnalyzableExternal: int = 0
+    technicalIgnored: int = 0
+
+
+class ReportHtmlAccessibilitySummaryRead(StrictModel):
+    resourcesDetected: int
+    resourcesAnalyzed: int
+    passCount: int
+    failCount: int
+    warningCount: int
+    notApplicableCount: int
+    errorCount: int
+
+
+class ReportKeyIssueRead(StrictModel):
+    coursePath: str
+    moduleTitle: str | None = None
+    resourceId: str
+    resourceTitle: str
+    checkId: str
+    checkTitle: str
+    status: Literal["FAIL", "WARNING"]
+    evidence: str
+    recommendation: str
+
+
+class ReportHtmlCheckRead(StrictModel):
+    checkId: str
+    checkTitle: str
+    status: Literal["PASS", "FAIL", "WARNING", "NOT_APPLICABLE", "ERROR"]
+    evidence: str
+    recommendation: str
+
+
+class ReportHtmlResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    coursePath: str
+    moduleTitle: str | None = None
+    accessStatus: str
+    overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
+    summarized: bool = False
+    checks: list[ReportHtmlCheckRead]
+
+
+class ReportSkippedResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    coursePath: str
+    moduleTitle: str | None = None
+    type: str
+    origin: str | None = None
+    accessStatus: str
+    reason: str
+    explanation: str
+
+
 class ReportTopResourceRead(StrictModel):
     resourceId: str
     title: str
@@ -577,6 +688,12 @@ class JobReportRead(StrictModel):
     files: ReportFilesRead
     stats: ReportStatsRead
     meta: ReportMetaRead
+    mode: ReportModeRead
+    accessSummary: ReportAccessSummaryRead
+    htmlAccessibilitySummary: ReportHtmlAccessibilitySummaryRead
+    keyIssues: list[ReportKeyIssueRead]
+    htmlResources: list[ReportHtmlResourceRead]
+    notAutomaticallyAnalyzable: list[ReportSkippedResourceRead]
     summary: ReportSummaryRead
     routes: list[ReportRouteRead]
     resources: list[ReportResourceRead]

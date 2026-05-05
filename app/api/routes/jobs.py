@@ -13,6 +13,7 @@ from app.core.errors import AppError
 from app.core.rate_limit import MemoryRateLimiter, get_client_ip
 from app.models.entities import ChecklistValue, Resource, ReviewSession
 from app.schemas import (
+    AccessibilityReportRead,
     AccessSummaryRead,
     ChecklistDetailRead,
     ChecklistItemRead,
@@ -42,6 +43,7 @@ from app.services.course_structure import (
     filter_course_structure,
     load_course_structure,
 )
+from app.services.html_accessibility import ensure_accessibility_report
 from app.services.jobs import (
     create_job_record,
     load_inventory_breakdown,
@@ -102,11 +104,11 @@ def _load_resource_content(
     job_id: str,
     resource_id: str,
 ) -> ResourceContentResult:
-    context_store = getattr(request.app.state, "online_job_contexts", None)
-    context = context_store.get(job_id) if context_store is not None else None
-    canvas_client = _canvas_client_factory(context.credentials, settings) if context is not None else None
-    canvas_credentials = context.credentials if context is not None else None
-    course_id = context.course_id if context is not None else None
+    canvas_client, canvas_credentials, course_id = _load_online_context(
+        request=request,
+        settings=settings,
+        job_id=job_id,
+    )
     return get_resource_content(
         job_id,
         resource_id,
@@ -115,6 +117,31 @@ def _load_resource_content(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
+
+
+def _load_online_context(
+    *,
+    request: Request,
+    settings: Settings,
+    job_id: str,
+) -> tuple[CanvasClient | None, CanvasCredentials | None, str | None]:
+    context_store = getattr(request.app.state, "online_job_contexts", None)
+    context = context_store.get(job_id) if context_store is not None else None
+    canvas_client = _canvas_client_factory(context.credentials, settings) if context is not None else None
+    canvas_credentials = context.credentials if context is not None else None
+    course_id = context.course_id if context is not None else None
+    return canvas_client, canvas_credentials, course_id
+
+
+def _accessibility_report_read(report) -> AccessibilityReportRead:
+    flattened_resources = [
+        resource.model_dump(mode="python")
+        for module in report.modules
+        for resource in module.resources
+    ]
+    payload = report.model_dump(mode="python")
+    payload["resources"] = flattened_resources
+    return AccessibilityReportRead.model_validate(payload)
 
 
 def _raise_content_error(content: ResourceContentResult, *, job_id: str) -> None:
@@ -621,6 +648,32 @@ def get_job_access(
     return _build_access_response(session, settings, job_id)
 
 
+@router.get("/{job_id}/accessibility", response_model=AccessibilityReportRead)
+def get_job_accessibility(
+    job_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> AccessibilityReportRead:
+    get_processing_job_or_404(session, job_id)
+    _ensure_review_inventory(session, settings, job_id)
+    canvas_client, canvas_credentials, course_id = _load_online_context(
+        request=request,
+        settings=settings,
+        job_id=job_id,
+    )
+    inventory = [item.model_dump(mode="python") for item in load_inventory_file(settings, job_id)]
+    report = ensure_accessibility_report(
+        settings=settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    return _accessibility_report_read(report)
+
+
 @router.post("/{job_id}/access-analysis/retry", response_model=JobStatusResponse, status_code=status.HTTP_202_ACCEPTED)
 def retry_access_analysis(
     job_id: str,
@@ -859,12 +912,20 @@ def create_job_report(
         key=get_client_ip(request),
         limit=settings.reports_rate_limit_per_minute,
     )
+    canvas_client, canvas_credentials, course_id = _load_online_context(
+        request=request,
+        settings=settings,
+        job_id=job_id,
+    )
     report_payload = generate_job_report(
         session,
         settings,
         job_id,
         include_pending=payload.includePending if payload else True,
         only_fails=payload.onlyFails if payload else False,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
     )
     logger.info(
         "Informe generado",

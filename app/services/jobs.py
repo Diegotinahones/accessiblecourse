@@ -37,6 +37,7 @@ from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJo
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
 from app.services.course_structure import build_fallback_course_structure, build_section_key, section_key_from_path
+from app.services.html_accessibility import run_html_accessibility_scan
 from app.services.imscc import build_resources_from_extracted
 from app.services.imscc_parser import HTML_RESOURCE_EXTENSIONS, IMSCCParser, ParserError
 from app.services.resource_core import normalize_resource
@@ -1165,6 +1166,7 @@ def _reset_job_related_data(session: Session, settings: Settings, job_id: str) -
 
     (get_job_dir(settings, job_id) / "resources.json").unlink(missing_ok=True)
     (get_job_dir(settings, job_id) / "course_structure.json").unlink(missing_ok=True)
+    (get_job_dir(settings, job_id) / "accessibility.json").unlink(missing_ok=True)
     shutil.rmtree(get_extracted_dir(settings, job_id), ignore_errors=True)
     shutil.rmtree(get_reports_dir(settings, job_id), ignore_errors=True)
     session.commit()
@@ -1499,6 +1501,31 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 course_structure=course_structure,
             )
 
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=5,
+                progress=98,
+                message="Procesando accesibilidad de los recursos HTML",
+                phase=JobPhase.HTML_ACCESSIBILITY_SCAN,
+            )
+            accessibility_report = run_html_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="html_accessibility_scan_finished",
+                message="Accesibilidad HTML procesada.",
+                progress=98,
+                details=accessibility_report.summary.model_dump(mode="json"),
+            )
+            session.commit()
+
             _update_job(
                 session,
                 job,
@@ -1739,6 +1766,34 @@ def process_online_job(
                 course_structure=build_fallback_course_structure(inventory, title=course.name),
             )
 
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=6,
+                progress=98,
+                message="Procesando accesibilidad de los recursos HTML",
+                phase=JobPhase.HTML_ACCESSIBILITY_SCAN,
+            )
+            accessibility_report = run_html_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+                canvas_client=client,
+                canvas_credentials=context.credentials,
+                course_id=course.id,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="html_accessibility_scan_finished",
+                message="Accesibilidad HTML procesada.",
+                progress=98,
+                details=accessibility_report.summary.model_dump(mode="json"),
+            )
+            session.commit()
+
             _update_job(
                 session,
                 job,
@@ -1924,6 +1979,51 @@ def rerun_access_analysis(
                 inventory=inventory,
                 course_structure=course_structure,
             )
+            html_canvas_client = None
+            html_canvas_credentials = None
+            html_course_id = None
+            context = job_contexts.get(job_id)
+            if context is not None:
+                html_canvas_credentials = context.credentials
+                html_course_id = context.course_id
+                html_canvas_client = canvas_client_factory(context.credentials, settings)
+            else:
+                html_course_id = _course_id_from_resources(inventory)
+                if html_course_id and settings.canvas_base_url and settings.canvas_token:
+                    html_canvas_credentials = CanvasCredentials.create(
+                        base_url=settings.canvas_base_url,
+                        token=settings.canvas_token,
+                    )
+                    html_canvas_client = canvas_client_factory(html_canvas_credentials, settings)
+
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=job.total_steps,
+                progress=98,
+                message="Procesando accesibilidad de los recursos HTML",
+                phase=JobPhase.HTML_ACCESSIBILITY_SCAN,
+                event="html_accessibility_retry_started",
+            )
+            accessibility_report = run_html_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+                canvas_client=html_canvas_client,
+                canvas_credentials=html_canvas_credentials,
+                course_id=html_course_id,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="html_accessibility_scan_finished",
+                message="Accesibilidad HTML procesada.",
+                progress=98,
+                details=accessibility_report.summary.model_dump(mode="json"),
+            )
+            session.commit()
             _update_job(
                 session,
                 job,

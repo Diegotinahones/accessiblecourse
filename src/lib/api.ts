@@ -409,6 +409,7 @@ function normalizeResourceCore(
     finalUrl: string | null;
     canDownload: boolean;
     downloadStatus: string | null;
+    htmlPath: string | null;
     localPath: string | null;
     sourceUrl: string | null;
   },
@@ -455,12 +456,20 @@ function normalizeResourceCore(
       rawCore.downloadStatus ?? fallback.downloadStatus,
       downloadable,
     ),
+    htmlPath:
+      readString(rawCore.htmlPath) ??
+      fallback.htmlPath ??
+      (normalizeCoreOrigin(rawCore.origin, fallback.origin) === 'INTERNAL_PAGE'
+        ? fallback.localPath
+        : null),
     localPath: readString(rawCore.localPath) ?? fallback.localPath,
     sourceUrl: readString(rawCore.sourceUrl) ?? fallback.sourceUrl,
     contentAvailable:
       readBoolean(rawCore.contentAvailable) ??
       (coreAccessStatus === 'OK' &&
-        (Boolean(fallback.localPath) || Boolean(fallback.sourceUrl))),
+        (Boolean(fallback.localPath) ||
+          Boolean(fallback.htmlPath) ||
+          Boolean(fallback.sourceUrl))),
   };
 }
 
@@ -479,10 +488,19 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     readString(item.downloadUrl) ?? readString(item.download_url) ?? null;
   const filePath =
     readString(item.filePath) ??
+    readString(item.htmlPath) ??
+    readString(item.html_path) ??
     readString(item.localPath) ??
     readString(item.local_path) ??
     readString(item.path) ??
     null;
+  const htmlPath =
+    readString(item.htmlPath) ??
+    readString(item.html_path) ??
+    ((readString(item.origin)?.toUpperCase() === 'INTERNAL_PAGE' &&
+      Boolean(filePath))
+      ? filePath
+      : null);
   const sectionTitle =
     readString(item.sectionTitle) ??
     readString(item.section_title) ??
@@ -576,6 +594,7 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     sourceUrl,
     downloadUrl,
     path: filePath,
+    htmlPath,
     localPath: filePath,
     filePath,
     coursePath: modulePath,
@@ -635,6 +654,7 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
         readString(item.finalUrl) ?? readString(item.final_url) ?? sourceUrl,
       canDownload,
       downloadStatus,
+      htmlPath,
       localPath: filePath,
       sourceUrl,
     }),

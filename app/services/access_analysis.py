@@ -55,8 +55,40 @@ DOWNLOADABLE_EXTENSIONS = {
 
 HTML_EXTENSIONS = {".html", ".htm", ".xhtml"}
 IGNORED_DISCOVERY_EXTENSIONS = {".xml", ".xsd", ".dtd", ".qti", ".imsmanifest"}
-SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu")
+SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu", "login.uoc.edu", "sso.uoc.edu")
 SSO_PATH_MARKERS = ("sso", "saml", "oauth", "login", "id-provider", "ralti")
+PROTECTED_EXTERNAL_HOST_MARKERS = (
+    "biblioteca.uoc.edu",
+    "materials.campus.uoc.edu",
+    "recursos.uoc.edu",
+    "ebookcentral.proquest.com",
+    "proquest.com",
+    "elibro.net",
+    "sciencedirect.com",
+    "springer.com",
+    "oreilly.com",
+    "microsoft.com",
+)
+PROTECTED_EXTERNAL_REFERENCE_MARKERS = (
+    "biblioteca",
+    "library",
+    "ebook",
+    "e-book",
+    "elibro",
+    "libro",
+    "book",
+    "books",
+    "software",
+    "llicencia",
+    "licencia",
+    "license",
+    "materials",
+    "recursos",
+    "learning-resources",
+    "protected",
+)
+SSO_REASON_DETAIL = "Requiere autenticación externa o capa SSO no accesible mediante API Canvas."
+INTERACTION_REASON_DETAIL = "Recurso interactivo o entrega que no se analiza como contenido descargable."
 ORIGIN_ONLINE_CANVAS = "ONLINE_CANVAS"
 ORIGIN_EXTERNAL_URL = "EXTERNAL_URL"
 ORIGIN_RALTI = "RALTI"
@@ -221,6 +253,8 @@ def build_access_summary(
                 "downloadableAccessible": 0,
                 "ok_count": 0,
                 "no_accede_count": 0,
+                "requires_interaction_count": 0,
+                "requires_sso_count": 0,
                 "requiere_interaccion_count": 0,
                 "requiere_sso_count": 0,
                 "downloadables_total": 0,
@@ -240,6 +274,8 @@ def build_access_summary(
         group["downloadableAccessible"] += int(bool(resource.get("canAccess")) and bool(resource.get("canDownload")))
         group["ok_count"] += int(access_status == ACCESS_STATUS_OK)
         group["no_accede_count"] += int(access_status == ACCESS_STATUS_NO_ACCEDE)
+        group["requires_interaction_count"] += int(access_status == ACCESS_STATUS_REQUIRES_INTERACTION)
+        group["requires_sso_count"] += int(access_status == ACCESS_STATUS_REQUIRES_SSO)
         group["requiere_interaccion_count"] += int(access_status == ACCESS_STATUS_REQUIRES_INTERACTION)
         group["requiere_sso_count"] += int(access_status == ACCESS_STATUS_REQUIRES_SSO)
         group["downloadables_total"] += int(bool(resource.get("canDownload")))
@@ -284,6 +320,8 @@ def build_access_summary(
         "downloadableAccessible": downloadables_ok,
         "ok_count": ok_count,
         "no_accede_count": no_accede_count,
+        "requires_interaction_count": requiere_interaccion_count,
+        "requires_sso_count": requiere_sso_count,
         "requiere_interaccion_count": requiere_interaccion_count,
         "requiere_sso_count": requiere_sso_count,
         "downloadables_total": downloadables_total,
@@ -338,14 +376,9 @@ class OfflineAccessAdapter:
     def probe_download(self, resource: dict[str, Any], access: AccessProbeResult) -> DownloadProbeResult:
         source_url = _resource_source_url(resource)
         if source_url:
-            result = self._check_url(source_url)
             return DownloadProbeResult(
-                can_download=access.access_status == ACCESS_STATUS_OK
-                and _looks_downloadable_url(
-                    final_reference=result.final_url or source_url,
-                    content_type=result.content_type,
-                    content_disposition=result.content_disposition,
-                )
+                can_download=False,
+                http_status=access.http_status,
             )
 
         return DownloadProbeResult(
@@ -847,7 +880,7 @@ def _merge_analysis(
             can_access=False,
             access_status=resolved_access_status,
             http_status=access.http_status,
-            error_message="Requiere autenticacion SSO de UOC.",
+            error_message=SSO_REASON_DETAIL,
             url_status=access.url_status,
             final_url=access.final_url,
             checked_at=access.checked_at,
@@ -855,6 +888,8 @@ def _merge_analysis(
         )
     )
     reason_code = _normalize_no_access_reason_code(effective_access, http_status=http_status)
+    if effective_access.access_status == ACCESS_STATUS_REQUIRES_SSO:
+        reason_code = NO_ACCESS_REASON_AUTH_REQUIRED
     error_message = _normalized_reason_detail(effective_access, download, http_status=http_status, reason_code=reason_code)
     content_available = bool(effective_access.details.get("contentAvailable")) or bool(download.can_download)
 
@@ -926,7 +961,7 @@ def _merge_analysis(
 
 def _access_from_url_result(result: UrlCheckResult, *, allow_canvas_forbidden: bool) -> AccessProbeResult:
     access_status = ACCESS_STATUS_OK
-    if _is_sso_url(result.final_url) or _is_sso_url(result.redirect_location) or _is_sso_url(result.url):
+    if _url_result_requires_external_auth(result):
         access_status = ACCESS_STATUS_REQUIRES_SSO
     elif result.reason in {"timeout", "404_not_found", "forbidden", "canvas_auth_required"}:
         access_status = ACCESS_STATUS_NO_ACCEDE
@@ -961,7 +996,7 @@ def _url_result_message(result: UrlCheckResult, access_status: str) -> str | Non
     if access_status == ACCESS_STATUS_OK:
         return None
     if access_status == ACCESS_STATUS_REQUIRES_SSO:
-        return "Requiere autenticacion SSO de UOC."
+        return SSO_REASON_DETAIL
     if result.reason == "404_not_found" or result.status_code == 404:
         return "La URL devolvió 404."
     if result.reason in {"forbidden", "canvas_auth_required"} or result.status_code in {401, 403}:
@@ -979,15 +1014,8 @@ def _resolve_access_status(resource: dict[str, Any], access: AccessProbeResult, 
     reason = str(access.details.get("reason") or "").strip().lower() if isinstance(access.details, dict) else ""
     if reason not in {"auth_required", "canvas_auth_required"} and http_status not in {401, 403}:
         return access.access_status
-    for candidate in (
-        access.final_url,
-        access.details.get("url") if isinstance(access.details, dict) else None,
-        resource.get("finalUrl"),
-        resource.get("sourceUrl"),
-        resource.get("url"),
-    ):
-        if _is_sso_url(candidate if isinstance(candidate, str) else None):
-            return ACCESS_STATUS_REQUIRES_SSO
+    if any(_is_sso_or_protected_auth_url(candidate if isinstance(candidate, str) else None) for candidate in _resource_url_candidates(resource, access)):
+        return ACCESS_STATUS_REQUIRES_SSO
     return access.access_status
 
 
@@ -1002,9 +1030,7 @@ def _normalize_no_access_reason_code(access: AccessProbeResult, *, http_status: 
         return NO_ACCESS_REASON_NOT_FOUND
     if normalized_reason == "timeout":
         return NO_ACCESS_REASON_TIMEOUT
-    if normalized_reason in {"canvas_auth_required", "auth_required"} or http_status == 401:
-        return NO_ACCESS_REASON_AUTH_REQUIRED
-    if normalized_reason == "forbidden" or http_status == 403:
+    if normalized_reason in {"canvas_auth_required", "auth_required", "forbidden"} or http_status in {401, 403}:
         return NO_ACCESS_REASON_FORBIDDEN
     if normalized_reason in {"ssl_error", "tls_error", "certificate_error"}:
         return NO_ACCESS_REASON_SSL_ERROR
@@ -1036,16 +1062,16 @@ def _normalized_reason_detail(
     http_status: int | None,
     reason_code: str | None,
 ) -> str | None:
-    detail = access.error_message or download.error_message
-    if detail:
-        return detail
-
     if access.access_status == ACCESS_STATUS_OK:
         return None
     if access.access_status == ACCESS_STATUS_REQUIRES_SSO:
-        return "El recurso redirige a un acceso SSO y no puede validarse automáticamente."
+        return SSO_REASON_DETAIL
     if access.access_status == ACCESS_STATUS_REQUIRES_INTERACTION:
-        return "El recurso requiere interacción manual para acceder."
+        return INTERACTION_REASON_DETAIL
+
+    detail = access.error_message or download.error_message
+    if detail:
+        return detail
     if access.access_status != ACCESS_STATUS_NO_ACCEDE:
         return "No se pudo determinar el estado de acceso del recurso."
 
@@ -1455,7 +1481,7 @@ def _requires_interaction_result(
         can_access=False,
         access_status=ACCESS_STATUS_REQUIRES_INTERACTION,
         http_status=http_status,
-        error_message=message or "Este recurso existe en Canvas, pero requiere una interacción o sesión de navegador.",
+        error_message=message or INTERACTION_REASON_DETAIL,
         details={"requiresInteraction": True, "canvasType": canvas_type, **dict(details or {})},
     )
 
@@ -1495,6 +1521,49 @@ def _is_sso_url(url: str | None) -> bool:
     if any(marker in host for marker in SSO_HOST_MARKERS):
         return True
     return host.endswith(".uoc.edu") and any(marker in f"{parsed.path.lower()}?{parsed.query.lower()}" for marker in SSO_PATH_MARKERS)
+
+
+def _is_protected_external_auth_url(url: str | None) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    reference = f"{host}{parsed.path.lower()}?{parsed.query.lower()}"
+    if any(marker in host for marker in PROTECTED_EXTERNAL_HOST_MARKERS):
+        return True
+    if host.endswith(".uoc.edu") and any(marker in reference for marker in PROTECTED_EXTERNAL_REFERENCE_MARKERS):
+        return True
+    return any(marker in reference for marker in PROTECTED_EXTERNAL_REFERENCE_MARKERS)
+
+
+def _is_sso_or_protected_auth_url(url: str | None) -> bool:
+    return _is_sso_url(url) or _is_protected_external_auth_url(url)
+
+
+def _url_result_requires_external_auth(result: UrlCheckResult) -> bool:
+    if not (
+        result.reason in {"auth_required", "canvas_auth_required", "forbidden"}
+        or result.status_code in {401, 403}
+    ):
+        return _is_sso_url(result.final_url) or _is_sso_url(result.redirect_location) or _is_sso_url(result.url)
+    return any(
+        _is_sso_or_protected_auth_url(candidate)
+        for candidate in (result.final_url, result.redirect_location, result.url)
+    )
+
+
+def _resource_url_candidates(resource: dict[str, Any], access: AccessProbeResult) -> tuple[str | None, ...]:
+    details_url = access.details.get("url") if isinstance(access.details, dict) else None
+    download_details = resource.get("details") if isinstance(resource.get("details"), dict) else {}
+    detail_download = download_details.get("downloadUrl") if isinstance(download_details, dict) else None
+    return (
+        access.final_url,
+        details_url if isinstance(details_url, str) else None,
+        resource.get("finalUrl") if isinstance(resource.get("finalUrl"), str) else None,
+        resource.get("sourceUrl") if isinstance(resource.get("sourceUrl"), str) else None,
+        resource.get("url") if isinstance(resource.get("url"), str) else None,
+        detail_download if isinstance(detail_download, str) else None,
+    )
 
 
 def _origin_for_link(url: str | None, *, is_internal: bool) -> str:

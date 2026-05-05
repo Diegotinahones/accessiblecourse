@@ -4,7 +4,7 @@ import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Request, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from sqlmodel import Session, select
 
 from app.api.deps import get_engine, get_rate_limiter, get_session, get_settings
@@ -25,6 +25,7 @@ from app.schemas import (
     JobReportRead,
     JobStatusResponse,
     ReportGenerateRequest,
+    ResourceContentCheckRead,
     ResourceDetailPayload,
     ResourceListItemRead,
     ResourceListPayload,
@@ -107,9 +108,9 @@ def _load_resource_content(
     canvas_credentials = context.credentials if context is not None else None
     course_id = context.course_id if context is not None else None
     return get_resource_content(
+        job_id,
         resource_id,
         settings=settings,
-        job_id=job_id,
         canvas_client=canvas_client,
         canvas_credentials=canvas_credentials,
         course_id=course_id,
@@ -130,7 +131,7 @@ def _raise_content_error(content: ResourceContentResult, *, job_id: str) -> None
         code=code,
         message=message,
         status_code=status_code,
-        details={"resourceId": content.resource_id, "reason": error_code, "url": content.url},
+        details={"resourceId": content.resource_id, "reason": error_code},
         job_id=job_id,
     )
 
@@ -173,7 +174,8 @@ def _resource_read(
         sourceUrl=source_url,
         downloadUrl=download_url,
         path=file_path,
-        localPath=file_path,
+        htmlPath=file_path if core.origin == "INTERNAL_PAGE" else None,
+        localPath=file_path if core.origin != "EXTERNAL_URL" else None,
         filePath=file_path,
         coursePath=module_path,
         modulePath=module_path,
@@ -319,6 +321,8 @@ def _build_access_response(session: Session, settings: Settings, job_id: str) ->
             downloadableAccessible=group.downloadableAccessible,
             ok_count=group.ok_count,
             no_accede_count=group.no_accede_count,
+            requires_interaction_count=group.requires_interaction_count,
+            requires_sso_count=group.requires_sso_count,
             requiere_interaccion_count=group.requiere_interaccion_count,
             requiere_sso_count=group.requiere_sso_count,
             downloadables_total=group.downloadables_total,
@@ -679,11 +683,11 @@ def download_resource_file(
         job_id=job_id,
         resource_id=resource_id,
     )
-    if content.ok and content.binary_path:
+    if content.ok and content.binaryPath:
         return FileResponse(
-            path=content.binary_path,
+            path=content.binaryPath,
             filename=content.filename,
-            media_type=content.content_type or "application/octet-stream",
+            media_type=content.mimeType or "application/octet-stream",
             headers=_no_store_headers(),
         )
 
@@ -709,17 +713,23 @@ def get_resource_content_endpoint(
     if not content.ok:
         _raise_content_error(content, job_id=job_id)
 
-    if content.text_content is not None:
+    if content.htmlContent is not None:
         return HTMLResponse(
-            content=content.text_content,
-            media_type=content.content_type or "text/html",
+            content=content.htmlContent,
+            media_type=content.mimeType or "text/html",
             headers=_no_store_headers(),
         )
-    if content.binary_path:
+    if content.textContent is not None:
+        return Response(
+            content=content.textContent,
+            media_type=content.mimeType or "text/plain",
+            headers=_no_store_headers(),
+        )
+    if content.binaryPath:
         return FileResponse(
-            path=content.binary_path,
+            path=content.binaryPath,
             filename=content.filename,
-            media_type=content.content_type or "application/octet-stream",
+            media_type=content.mimeType or "application/octet-stream",
             headers=_no_store_headers(),
         )
 
@@ -728,6 +738,32 @@ def get_resource_content_endpoint(
         message="No hay contenido reutilizable para este recurso.",
         status_code=status.HTTP_409_CONFLICT,
         job_id=job_id,
+    )
+
+
+@router.get("/{job_id}/resources/{resource_id}/content-check", response_model=ResourceContentCheckRead)
+def check_resource_content(
+    job_id: str,
+    resource_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> ResourceContentCheckRead:
+    _ensure_review_inventory(session, settings, job_id)
+    _get_review_resource(session, job_id, resource_id)
+    content = _load_resource_content(
+        request=request,
+        settings=settings,
+        job_id=job_id,
+        resource_id=resource_id,
+    )
+    return ResourceContentCheckRead(
+        ok=content.ok,
+        contentKind=content.contentKind,
+        mimeType=content.mimeType,
+        filename=content.filename,
+        errorCode=content.errorCode,
+        errorDetail=content.errorDetail,
     )
 
 

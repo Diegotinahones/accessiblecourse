@@ -168,6 +168,7 @@ class IMSCCParserTests(unittest.TestCase):
             by_identifier = {resource["identifier"]: resource for resource in resources}
             self.assertEqual(by_identifier["res-html"]["type"], "WEB")
             self.assertEqual(by_identifier["res-html"]["path"], "course/module1/page.html")
+            self.assertEqual(by_identifier["res-html"]["htmlPath"], "course/module1/page.html")
             self.assertEqual(by_identifier["res-html"]["origin"], "INTERNAL_PAGE")
             self.assertTrue(by_identifier["res-html"]["contentAvailable"])
             self.assertEqual(by_identifier["res-html"]["coursePath"], "Módulo 1")
@@ -175,6 +176,7 @@ class IMSCCParserTests(unittest.TestCase):
             self.assertEqual(by_identifier["res-html"]["itemPath"], "Módulo 1 > Página HTML")
             self.assertEqual(by_identifier["res-video"]["origin"], "EXTERNAL_URL")
             self.assertFalse(by_identifier["res-video"]["contentAvailable"])
+            self.assertIsNone(by_identifier["res-video"]["localPath"])
             self.assertEqual(by_identifier["res-video"]["url"], "https://www.youtube.com/watch?v=demo123")
             self.assertEqual(by_identifier["res-video"]["modulePath"], "Módulo 1")
             self.assertEqual(by_identifier["res-video"]["type"], "VIDEO")
@@ -204,6 +206,7 @@ class IMSCCParserTests(unittest.TestCase):
             self.assertEqual(resource["status"], "WARN")
             self.assertEqual(resource["origin"], "INTERNAL_FILE")
             self.assertFalse(resource["contentAvailable"])
+            self.assertEqual(resource["localPath"], "docs/missing.pdf")
             self.assertEqual(resource["path"], "docs/missing.pdf")
             self.assertIn("no existe dentro del paquete", resource["notes"][0])
 

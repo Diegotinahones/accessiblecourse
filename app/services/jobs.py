@@ -792,14 +792,6 @@ def _normalize_offline_inventory(
             section_key = build_section_key(section_title)
         section_type = STRUCTURED_SECTION_TYPE if module_path else GLOBAL_UNPLACED_SECTION_TYPE
 
-        downloadable = resource.get("downloadable")
-        if not isinstance(downloadable, bool):
-            downloadable = bool(
-                not source_url
-                and file_path
-                and Path(file_path).suffix.lower() not in {*HTML_RESOURCE_EXTENSIONS, ".xhtml"}
-            )
-
         normalized = dict(resource)
         normalized["origin"] = _normalize_origin(
             resource.get("origin") if isinstance(resource.get("origin"), str) else None,
@@ -810,7 +802,14 @@ def _normalize_offline_inventory(
         normalized["sourceUrl"] = source_url
         normalized["path"] = file_path
         normalized["filePath"] = file_path
-        normalized["localPath"] = file_path
+        normalized["htmlPath"] = (
+            file_path
+            if normalized["origin"] == "internal_page"
+            or (file_path and Path(file_path).suffix.lower() in {*HTML_RESOURCE_EXTENSIONS, ".xhtml"})
+            else None
+        )
+        normalized["html_path"] = normalized["htmlPath"]
+        normalized["localPath"] = file_path if normalized["origin"] != "external_url" else None
         normalized["course_path"] = module_path
         normalized["coursePath"] = module_path
         normalized["module_path"] = module_path
@@ -825,8 +824,22 @@ def _normalize_offline_inventory(
         normalized["sectionKey"] = section_key
         normalized["section_type"] = section_type
         normalized["sectionType"] = section_type
+        downloadable = resource.get("downloadable")
+        if not isinstance(downloadable, bool):
+            downloadable = bool(
+                normalized["origin"] != "external_url"
+                and file_path
+                and Path(file_path).suffix.lower() not in {*HTML_RESOURCE_EXTENSIONS, ".xhtml"}
+            )
+        if normalized["origin"] == "external_url":
+            downloadable = False
         normalized["downloadable"] = downloadable
         normalized["canDownload"] = bool(resource.get("canDownload")) or downloadable
+        if normalized["origin"] == "external_url":
+            normalized["canDownload"] = False
+        if normalized["canDownload"] and not normalized["localPath"]:
+            normalized["canDownload"] = False
+            normalized["downloadable"] = False
         normalized["can_download"] = normalized["canDownload"]
         normalized["source"] = _inventory_source(normalized)
         parent_id = (

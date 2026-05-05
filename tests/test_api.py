@@ -558,6 +558,8 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert pdf_resource["errorMessage"] is None
     assert pdf_resource["origin"] == "INTERNAL_FILE"
     assert pdf_resource["contentAvailable"] is True
+    assert pdf_resource["localPath"] == "course/topic-1/guide.pdf"
+    assert pdf_resource["htmlPath"] is None
     assert pdf_resource["core"]["origin"] == "INTERNAL_FILE"
     assert pdf_resource["core"]["contentAvailable"] is True
 
@@ -576,6 +578,8 @@ def test_offline_inventory_groups_by_module_and_filters_broken_links(client, mon
     assert link_resource["errorMessage"] == "La URL devolvió 404."
     assert link_resource["origin"] == "EXTERNAL_URL"
     assert link_resource["contentAvailable"] is False
+    assert link_resource["localPath"] is None
+    assert link_resource["htmlPath"] is None
     assert link_resource["core"]["origin"] == "EXTERNAL_URL"
     assert "broken_link" in link_resource["notes"]
     assert resources_payload["noAccessCount"] == 1
@@ -780,6 +784,8 @@ def test_offline_deep_scan_discovers_nested_local_and_external_resources(client,
     assert worksheet["sectionTitle"] == "Unidad 1"
     assert worksheet["origin"] == "INTERNAL_FILE"
     assert worksheet["contentAvailable"] is True
+    assert worksheet["localPath"] == "course/downloads/worksheet.docx"
+    assert worksheet["htmlPath"] is None
     assert worksheet["core"]["origin"] == "INTERNAL_FILE"
 
     assert slides["canAccess"] is True
@@ -797,13 +803,18 @@ def test_offline_deep_scan_discovers_nested_local_and_external_resources(client,
     assert web["canDownload"] is False
     assert web["origin"] == "EXTERNAL_URL"
     assert web["contentAvailable"] is False
+    assert web["localPath"] is None
+    assert web["htmlPath"] is None
     assert video["type"] == "VIDEO"
     assert video["canAccess"] is True
     assert video["canDownload"] is False
     assert video["origin"] == "EXTERNAL_URL"
     assert video["contentAvailable"] is False
+    assert video["localPath"] is None
+    assert video["htmlPath"] is None
     assert html_page["origin"] == "INTERNAL_PAGE"
     assert html_page["contentAvailable"] is True
+    assert html_page["htmlPath"] == "course/module/page.html"
     assert html_page["discoveredChildrenCount"] == 4
 
     summary_response = client.get(f"/api/jobs/{job_id}/summary")
@@ -865,10 +876,12 @@ def test_offline_deep_scan_keeps_discovered_links_inside_existing_pec_section(cl
     assert by_title["Brief de la PEC"]["parentResourceId"] == "res-html"
     assert by_title["Brief de la PEC"]["parentId"] == "res-html"
     assert by_title["Brief de la PEC"]["origin"] == "INTERNAL_FILE"
+    assert by_title["Brief de la PEC"]["localPath"] == "course/downloads/brief.pdf"
     assert by_title["¿Cómo citar la IA…"]["discovered"] is True
     assert by_title["¿Cómo citar la IA…"]["parentResourceId"] == "res-html"
     assert by_title["¿Cómo citar la IA…"]["parentId"] == "res-html"
     assert by_title["¿Cómo citar la IA…"]["origin"] == "EXTERNAL_URL"
+    assert by_title["¿Cómo citar la IA…"]["localPath"] is None
     assert by_title["¿Cómo citar la IA…"]["reasonCode"] == "NOT_FOUND"
     assert by_title["¿Cómo citar la IA…"]["reasonDetail"] == "La URL devolvió 404."
     assert payload["noAccessCount"] == 1
@@ -895,21 +908,51 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
     resources = resources_response.json()["resources"]
+    html_resource = next(resource for resource in resources if resource["id"] == "res-html")
     brief_resource = next(resource for resource in resources if resource["title"] == "Brief de la PEC")
 
-    html_content = get_resource_content("res-html", settings=test_settings, job_id=job_id)
-    assert html_content.ok is True
-    assert html_content.content_type == "text/html"
-    assert html_content.text_content is not None
-    assert "Brief de la PEC" in html_content.text_content
-    assert html_content.binary_path.endswith("course/pec1/activity.html")
+    assert html_resource["origin"] == "INTERNAL_PAGE"
+    assert html_resource["htmlPath"] == "course/pec1/activity.html"
+    assert html_resource["contentAvailable"] is True
 
-    pdf_content = get_resource_content(brief_resource["id"], settings=test_settings, job_id=job_id)
+    html_content = get_resource_content(job_id, "res-html", settings=test_settings)
+    assert html_content.ok is True
+    assert html_content.contentKind == "HTML"
+    assert html_content.mimeType == "text/html"
+    assert html_content.htmlContent is not None
+    assert "Brief de la PEC" in html_content.htmlContent
+    assert html_content.binaryPath is not None
+    assert html_content.binaryPath.endswith("course/pec1/activity.html")
+
+    pdf_content = get_resource_content(job_id, brief_resource["id"], settings=test_settings)
     assert pdf_content.ok is True
-    assert pdf_content.content_type == "application/pdf"
-    assert pdf_content.text_content is None
-    assert pdf_content.binary_path is not None
-    assert pdf_content.binary_path.endswith("course/downloads/brief.pdf")
+    assert pdf_content.contentKind == "PDF"
+    assert pdf_content.mimeType == "application/pdf"
+    assert pdf_content.htmlContent is None
+    assert pdf_content.textContent is None
+    assert pdf_content.binaryPath is not None
+    assert pdf_content.binaryPath.endswith("course/downloads/brief.pdf")
+
+    html_check_response = client.get(f"/api/jobs/{job_id}/resources/res-html/content-check")
+    assert html_check_response.status_code == 200, html_check_response.text
+    html_check = html_check_response.json()
+    assert html_check == {
+        "ok": True,
+        "contentKind": "HTML",
+        "mimeType": "text/html",
+        "filename": "activity.html",
+        "errorCode": None,
+        "errorDetail": None,
+    }
+
+    pdf_check_response = client.get(f"/api/jobs/{job_id}/resources/{brief_resource['id']}/content-check")
+    assert pdf_check_response.status_code == 200, pdf_check_response.text
+    pdf_check = pdf_check_response.json()
+    assert pdf_check["ok"] is True
+    assert pdf_check["contentKind"] == "PDF"
+    assert pdf_check["mimeType"] == "application/pdf"
+    assert pdf_check["filename"] == "brief.pdf"
+    assert pdf_check["errorCode"] is None
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

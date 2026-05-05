@@ -191,6 +191,7 @@ class ResourceListItemRead(StrictModel):
     sourceUrl: str | None = None
     downloadUrl: str | None = None
     path: str | None = None
+    htmlPath: str | None = None
     localPath: str | None = None
     filePath: str | None = None
     coursePath: str | None = None
@@ -231,6 +232,15 @@ class ResourceContentRead(ResourceContentResult):
     pass
 
 
+class ResourceContentCheckRead(StrictModel):
+    ok: bool
+    contentKind: str
+    mimeType: str | None = None
+    filename: str | None = None
+    errorCode: str | None = None
+    errorDetail: str | None = None
+
+
 class AccessSummaryResourceRead(StrictModel):
     id: str
     title: str
@@ -254,6 +264,8 @@ class AccessSummaryGroupRead(StrictModel):
     downloadableAccessible: int = 0
     ok_count: int = 0
     no_accede_count: int = 0
+    requires_interaction_count: int = 0
+    requires_sso_count: int = 0
     requiere_interaccion_count: int = 0
     requiere_sso_count: int = 0
     downloadables_total: int = 0
@@ -273,6 +285,8 @@ class AccessSummaryRead(StrictModel):
     downloadableAccessible: int = 0
     ok_count: int = 0
     no_accede_count: int = 0
+    requires_interaction_count: int = 0
+    requires_sso_count: int = 0
     requiere_interaccion_count: int = 0
     requiere_sso_count: int = 0
     downloadables_total: int = 0
@@ -296,6 +310,8 @@ class AccessModuleRead(StrictModel):
     downloadableAccessible: int = 0
     ok_count: int = 0
     no_accede_count: int = 0
+    requires_interaction_count: int = 0
+    requires_sso_count: int = 0
     requiere_interaccion_count: int = 0
     requiere_sso_count: int = 0
     downloadables_total: int = 0
@@ -323,6 +339,7 @@ class AuxiliaryResourceRead(StrictModel):
     source: str | None = None
     url: str | None = None
     path: str | None = None
+    htmlPath: str | None = None
     coursePath: str | None = None
     modulePath: str | None = None
     moduleTitle: str | None = None

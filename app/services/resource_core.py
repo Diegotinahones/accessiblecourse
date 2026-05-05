@@ -39,6 +39,7 @@ CoreReasonCode = Literal[
     "UNKNOWN",
 ]
 CoreDownloadStatus = Literal["OK", "FAIL", "N_A"]
+ContentKind = Literal["HTML", "TEXT", "PDF", "BINARY", "URL", "NOT_ANALYZABLE"]
 
 RESOURCE_CORE_FIELDS = {
     "id",
@@ -56,6 +57,7 @@ RESOURCE_CORE_FIELDS = {
     "finalUrl",
     "downloadable",
     "downloadStatus",
+    "htmlPath",
     "localPath",
     "sourceUrl",
     "contentAvailable",
@@ -81,6 +83,38 @@ PAGE_CANVAS_TYPES = {"Page", "WikiPage"}
 HTML_CANVAS_TYPES = PAGE_CANVAS_TYPES | {"Assignment", "Discussion"}
 SSO_HOST_MARKERS = ("id-provider.uoc.edu", "ralti.uoc.edu", "login.uoc.edu", "sso.uoc.edu")
 SSO_PATH_MARKERS = ("sso", "saml", "oauth", "login", "id-provider", "ralti")
+PROTECTED_EXTERNAL_HOST_MARKERS = (
+    "biblioteca.uoc.edu",
+    "materials.campus.uoc.edu",
+    "recursos.uoc.edu",
+    "ebookcentral.proquest.com",
+    "proquest.com",
+    "elibro.net",
+    "sciencedirect.com",
+    "springer.com",
+    "oreilly.com",
+    "microsoft.com",
+)
+PROTECTED_EXTERNAL_REFERENCE_MARKERS = (
+    "biblioteca",
+    "library",
+    "ebook",
+    "e-book",
+    "elibro",
+    "libro",
+    "book",
+    "books",
+    "software",
+    "llicencia",
+    "licencia",
+    "license",
+    "materials",
+    "recursos",
+    "learning-resources",
+    "protected",
+)
+SSO_REASON_DETAIL = "Requiere autenticación externa o capa SSO no accesible mediante API Canvas."
+INTERACTION_REASON_DETAIL = "Recurso interactivo o entrega que no se analiza como contenido descargable."
 PATH_SEPARATOR_RE = re.compile(r"\s*(?:>|/)\s*")
 
 
@@ -102,6 +136,7 @@ class ResourceCore(BaseModel):
     finalUrl: str | None = None
     downloadable: bool = False
     downloadStatus: CoreDownloadStatus = "N_A"
+    htmlPath: str | None = None
     localPath: str | None = None
     sourceUrl: str | None = None
     contentAvailable: bool = False
@@ -111,14 +146,47 @@ class ResourceContentResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ok: bool
-    resource_id: str
-    content_type: str | None = None
+    resourceId: str
+    title: str
+    type: str
+    origin: str | None = None
+    contentKind: ContentKind
+    textContent: str | None = None
+    htmlContent: str | None = None
+    binaryPath: str | None = None
+    sourceUrl: str | None = None
     filename: str | None = None
-    text_content: str | None = None
-    binary_path: str | None = None
-    url: str | None = None
-    error_code: str | None = None
-    error_detail: str | None = None
+    mimeType: str | None = None
+    errorCode: str | None = None
+    errorDetail: str | None = None
+
+    @property
+    def resource_id(self) -> str:
+        return self.resourceId
+
+    @property
+    def content_type(self) -> str | None:
+        return self.mimeType
+
+    @property
+    def text_content(self) -> str | None:
+        return self.htmlContent if self.htmlContent is not None else self.textContent
+
+    @property
+    def binary_path(self) -> str | None:
+        return self.binaryPath
+
+    @property
+    def url(self) -> str | None:
+        return self.sourceUrl
+
+    @property
+    def error_code(self) -> str | None:
+        return self.errorCode
+
+    @property
+    def error_detail(self) -> str | None:
+        return self.errorDetail
 
 
 def normalize_resource(resource: Any, inventory_item: Any | None = None) -> ResourceCore:
@@ -128,6 +196,7 @@ def normalize_resource(resource: Any, inventory_item: Any | None = None) -> Reso
     canvas_type = _string(source, "canvasType") or _string(details, "canvasType")
     source_url = _string(source, "sourceUrl", "source_url", "url") or _string(fallback, "sourceUrl", "source_url", "url")
     final_url = _string(source, "finalUrl", "final_url") or _string(fallback, "finalUrl", "final_url")
+    html_path = _string(source, "htmlPath", "html_path") or _string(fallback, "htmlPath", "html_path")
     local_path = _string(source, "localPath", "filePath", "file_path", "path") or _string(
         fallback,
         "localPath",
@@ -136,18 +205,32 @@ def normalize_resource(resource: Any, inventory_item: Any | None = None) -> Reso
         "path",
     )
     access_status = _normalize_access_status(source, fallback, source_url=source_url, final_url=final_url, canvas_type=canvas_type)
+    origin = _normalize_origin(
+        source,
+        fallback,
+        source_url=source_url,
+        final_url=final_url,
+        local_path=local_path,
+        html_path=html_path,
+        canvas_type=canvas_type,
+    )
+    if html_path is None and origin == "INTERNAL_PAGE":
+        html_path = local_path
     downloadable = _bool(source, "downloadable", "canDownload", "can_download")
     if downloadable is None:
         downloadable = bool(_bool(fallback, "downloadable", "canDownload", "can_download"))
+    if origin == "EXTERNAL_URL":
+        downloadable = False
     explicit_content_available = _bool(source, "contentAvailable", "content_available")
     if explicit_content_available is None:
         explicit_content_available = _bool(fallback, "contentAvailable", "content_available")
+    reason_detail = _normalize_reason_detail(source, fallback, access_status=access_status)
 
     return ResourceCore(
         id=_string(source, "id") or _string(fallback, "id") or "",
         title=_string(source, "title") or _string(fallback, "title") or "Recurso sin titulo",
         type=_normalize_resource_type(source, fallback, local_path=local_path, source_url=source_url, canvas_type=canvas_type),
-        origin=_normalize_origin(source, fallback, source_url=source_url, final_url=final_url, local_path=local_path, canvas_type=canvas_type),
+        origin=origin,
         modulePath=_normalize_module_path(source, fallback),
         sectionTitle=_string(source, "sectionTitle", "section_title", "moduleTitle", "module_title")
         or _string(fallback, "sectionTitle", "section_title", "moduleTitle", "module_title"),
@@ -156,13 +239,13 @@ def normalize_resource(resource: Any, inventory_item: Any | None = None) -> Reso
         discovered=bool(_bool(source, "discovered") or _bool(fallback, "discovered")),
         accessStatus=access_status,
         reasonCode=_normalize_reason_code(source, fallback, access_status=access_status),
-        reasonDetail=_string(source, "reasonDetail", "reason_detail", "accessNote", "access_note", "errorMessage", "error_message")
-        or _string(fallback, "reasonDetail", "reason_detail", "accessNote", "access_note", "errorMessage", "error_message"),
+        reasonDetail=reason_detail,
         httpStatus=_int(source, "httpStatus", "http_status", "accessStatusCode", "access_status_code")
         or _int(fallback, "httpStatus", "http_status", "accessStatusCode", "access_status_code"),
         finalUrl=final_url,
         downloadable=downloadable,
         downloadStatus=_normalize_download_status(source, fallback, downloadable=downloadable),
+        htmlPath=html_path,
         localPath=local_path,
         sourceUrl=source_url,
         contentAvailable=explicit_content_available
@@ -171,6 +254,7 @@ def normalize_resource(resource: Any, inventory_item: Any | None = None) -> Reso
             access_status=access_status,
             downloadable=downloadable,
             local_path=local_path,
+            html_path=html_path,
             source_url=source_url,
             canvas_type=canvas_type,
             resource_type=_normalize_resource_type(source, fallback, local_path=local_path, source_url=source_url, canvas_type=canvas_type),
@@ -183,15 +267,16 @@ def normalize_resources(resources: list[Any]) -> list[ResourceCore]:
 
 
 def get_resource_content(
+    job_id: str,
     resource_id: str,
     *,
-    settings: Settings,
-    job_id: str | None = None,
+    settings: Settings | None = None,
     resources: list[Any] | None = None,
     canvas_client: CanvasClient | Any | None = None,
     canvas_credentials: CanvasCredentials | None = None,
     course_id: str | None = None,
 ) -> ResourceContentResult:
+    settings = settings or Settings()
     items = resources if resources is not None else _load_raw_inventory(settings, job_id)
     raw_resource = next((_as_mapping(item) for item in items if _string(item, "id") == resource_id), None)
     if raw_resource is None:
@@ -207,22 +292,61 @@ def get_resource_content(
         or _course_id_from_url(core.sourceUrl or core.finalUrl)
     )
 
-    if core.origin in {"EXTERNAL_URL", "RALTI", "LTI"}:
+    if core.origin in {"RALTI", "LTI"} or core.accessStatus == "REQUIERE_SSO":
         return ResourceContentResult(
             ok=False,
-            resource_id=resource_id,
-            url=core.sourceUrl or core.finalUrl,
-            error_code="REQUIERE_SSO" if core.origin == "RALTI" or core.accessStatus == "REQUIERE_SSO" else "NO_ANALIZABLE",
-            error_detail=core.reasonDetail or "El recurso externo no se analiza desde el backend en este paso.",
+            resourceId=resource_id,
+            title=core.title,
+            type=core.type,
+            origin=core.origin,
+            contentKind="NOT_ANALYZABLE",
+            errorCode="REQUIERE_SSO",
+            errorDetail=core.reasonDetail or "Este recurso requiere SSO o una sesion externa.",
         )
 
-    if core.origin in {"INTERNAL_FILE", "INTERNAL_PAGE", "OFFLINE_IMSCC"} and core.localPath and job_id:
+    if core.accessStatus == "REQUIERE_INTERACCION":
+        return ResourceContentResult(
+            ok=False,
+            resourceId=resource_id,
+            title=core.title,
+            type=core.type,
+            origin=core.origin,
+            contentKind="NOT_ANALYZABLE",
+            errorCode="REQUIERE_INTERACCION",
+            errorDetail=core.reasonDetail or "Este recurso requiere interaccion manual antes de analizarse.",
+        )
+
+    if core.origin == "EXTERNAL_URL":
+        if core.accessStatus != "OK":
+            return _content_error(
+                resource_id,
+                core.reasonCode if core.reasonCode != "OK" else "NO_ANALIZABLE",
+                core.reasonDetail or "La URL externa no esta accesible para analisis.",
+                core=core,
+            )
+        return ResourceContentResult(
+            ok=True,
+            resourceId=resource_id,
+            title=core.title,
+            type=core.type,
+            origin=core.origin,
+            contentKind="URL",
+            sourceUrl=core.sourceUrl or core.finalUrl,
+            mimeType=None,
+        )
+
+    if core.origin in {"INTERNAL_FILE", "INTERNAL_PAGE", "OFFLINE_IMSCC"} and (core.htmlPath or core.localPath):
         return _read_local_resource(settings, job_id, core)
 
     if core.origin == "ONLINE_CANVAS":
         client = canvas_client or _build_canvas_client(settings, canvas_credentials)
         if client is None:
-            return _content_error(resource_id, "AUTH_REQUIRED", "Falta configuracion de Canvas para obtener el contenido.")
+            return _content_error(
+                resource_id,
+                "AUTH_REQUIRED",
+                "Falta configuracion de Canvas para obtener el contenido.",
+                core=core,
+            )
         if canvas_type == "File" or _string(raw_resource, "fileId", "file_id") or _string(details, "fileId", "file_id"):
             return _download_canvas_file(settings, job_id, raw_resource, core, client, resolved_course_id)
         if canvas_type in PAGE_CANVAS_TYPES:
@@ -231,23 +355,27 @@ def get_resource_content(
                 or _string(details, "pageUrl", "page_url", "pageId")
                 or _page_id_from_url(core.sourceUrl or core.finalUrl, resolved_course_id)
             )
-            return _read_canvas_html(resource_id, client.get_page, resolved_course_id, page_url, ("body",))
+            return _read_canvas_html(core, client.get_page, resolved_course_id, page_url, ("body",))
         if canvas_type == "Assignment":
             assignment_id = _string(raw_resource, "contentId", "content_id") or _string(details, "contentId", "content_id")
-            return _read_canvas_html(resource_id, client.get_assignment, resolved_course_id, assignment_id, ("description", "body"))
+            return _read_canvas_html(core, client.get_assignment, resolved_course_id, assignment_id, ("description", "body"))
         if canvas_type == "Discussion":
             topic_id = _string(raw_resource, "contentId", "content_id") or _string(details, "contentId", "content_id")
-            return _read_canvas_html(resource_id, client.get_discussion_topic, resolved_course_id, topic_id, ("message", "description", "body"))
+            return _read_canvas_html(core, client.get_discussion_topic, resolved_course_id, topic_id, ("message", "description", "body"))
         if canvas_type == "Quiz":
             quiz_id = _string(raw_resource, "contentId", "content_id") or _string(details, "contentId", "content_id")
-            return _read_canvas_html(resource_id, client.get_quiz, resolved_course_id, quiz_id, ("description", "body"))
+            return _read_canvas_html(core, client.get_quiz, resolved_course_id, quiz_id, ("description", "body"))
 
     return ResourceContentResult(
         ok=False,
-        resource_id=resource_id,
-        url=core.sourceUrl or core.finalUrl,
-        error_code="NO_ANALIZABLE",
-        error_detail=core.reasonDetail or "Este tipo de recurso todavia no tiene extractor de contenido.",
+        resourceId=resource_id,
+        title=core.title,
+        type=core.type,
+        origin=core.origin,
+        contentKind="NOT_ANALYZABLE",
+        sourceUrl=(core.sourceUrl or core.finalUrl) if core.origin == "EXTERNAL_URL" else None,
+        errorCode="NO_ANALIZABLE",
+        errorDetail=core.reasonDetail or "Este tipo de recurso todavia no tiene extractor de contenido.",
     )
 
 
@@ -264,35 +392,47 @@ def _load_raw_inventory(settings: Settings, job_id: str | None) -> list[dict[str
 
 
 def _read_local_resource(settings: Settings, job_id: str, core: ResourceCore) -> ResourceContentResult:
-    if not core.localPath:
-        return _content_error(core.id, "NOT_FOUND", "El recurso no tiene ruta local.")
+    relative_path = core.htmlPath if core.origin == "INTERNAL_PAGE" else core.localPath or core.htmlPath
+    if not relative_path:
+        return _content_error(core.id, "NOT_FOUND", "El recurso no tiene ruta local.", core=core)
     try:
-        resolved_path = resolve_job_resource_path(settings, job_id, core.localPath)
+        resolved_path = resolve_job_resource_path(settings, job_id, relative_path)
     except AppError as exc:
-        return _content_error(core.id, "INVALID_URL", exc.message)
+        return _content_error(core.id, "INVALID_URL", exc.message, core=core)
     if not resolved_path.exists() or not resolved_path.is_file():
-        return _content_error(core.id, "NOT_FOUND", "No existe el fichero local asociado al recurso.")
+        return _content_error(core.id, "NOT_FOUND", "No existe el fichero local asociado al recurso.", core=core)
 
     content_type = _guess_content_type(resolved_path)
-    if _is_textual_file(resolved_path, content_type):
+    content_kind = _content_kind_for_file(resolved_path, content_type, core.type)
+    if content_kind in {"HTML", "TEXT"}:
         try:
+            content = resolved_path.read_text(encoding="utf-8", errors="replace")
             return ResourceContentResult(
                 ok=True,
-                resource_id=core.id,
-                content_type=content_type,
+                resourceId=core.id,
+                title=core.title,
+                type=core.type,
+                origin=core.origin,
+                contentKind=content_kind,
+                textContent=content if content_kind == "TEXT" else None,
+                htmlContent=content if content_kind == "HTML" else None,
+                binaryPath=str(resolved_path),
                 filename=resolved_path.name,
-                text_content=resolved_path.read_text(encoding="utf-8", errors="replace"),
-                binary_path=str(resolved_path),
+                mimeType=content_type,
             )
         except OSError as exc:
-            return _content_error(core.id, "NETWORK_ERROR", str(exc))
+            return _content_error(core.id, "NETWORK_ERROR", str(exc), core=core)
 
     return ResourceContentResult(
         ok=True,
-        resource_id=core.id,
-        content_type=content_type,
+        resourceId=core.id,
+        title=core.title,
+        type=core.type,
+        origin=core.origin,
+        contentKind=content_kind,
+        binaryPath=str(resolved_path),
         filename=resolved_path.name,
-        binary_path=str(resolved_path),
+        mimeType=content_type,
     )
 
 
@@ -328,18 +468,17 @@ def _download_canvas_file(
             filename = canvas_file.filename or canvas_file.display_name or filename
             content_type = canvas_file.content_type or content_type
     except AppError as exc:
-        return _content_error(core.id, _error_code_from_status(exc.status_code), exc.message)
+        return _content_error(core.id, _error_code_from_status(exc.status_code), exc.message, core=core)
 
     if not download_url:
-        return _content_error(core.id, "NOT_FOUND", "Canvas no ha devuelto URL descargable para este fichero.")
+        return _content_error(core.id, "NOT_FOUND", "Canvas no ha devuelto URL descargable para este fichero.", core=core)
 
     if not job_id:
-        return ResourceContentResult(
-            ok=True,
-            resource_id=core.id,
-            content_type=content_type or _guess_content_type(Path(filename)),
-            filename=filename,
-            url=download_url,
+        return _content_error(
+            core.id,
+            "NO_ANALIZABLE",
+            "Hace falta un job_id para cachear la descarga de Canvas antes de analizarla.",
+            core=core,
         )
 
     target_dir = get_job_dir(settings, job_id) / "online_downloads" / core.id
@@ -353,47 +492,54 @@ def _download_canvas_file(
             for chunk in handle.iter_bytes():
                 output.write(chunk)
     except AppError as exc:
-        return _content_error(core.id, _error_code_from_status(exc.status_code), exc.message)
+        return _content_error(core.id, _error_code_from_status(exc.status_code), exc.message, core=core)
     except OSError as exc:
-        return _content_error(core.id, "NETWORK_ERROR", str(exc))
+        return _content_error(core.id, "NETWORK_ERROR", str(exc), core=core)
 
     return ResourceContentResult(
         ok=True,
-        resource_id=core.id,
-        content_type=content_type,
+        resourceId=core.id,
+        title=core.title,
+        type=core.type,
+        origin=core.origin,
+        contentKind=_content_kind_for_file(target_path, content_type, core.type),
+        binaryPath=str(target_path),
         filename=target_path.name,
-        binary_path=str(target_path),
-        url=download_url,
+        mimeType=content_type,
     )
 
 
 def _read_canvas_html(
-    resource_id: str,
+    core: ResourceCore,
     getter: Any,
     course_id: str | None,
     content_id: str | None,
     body_keys: tuple[str, ...],
 ) -> ResourceContentResult:
     if not course_id or not content_id:
-        return _content_error(resource_id, "NOT_FOUND", "Faltan identificadores de Canvas para obtener el HTML.")
+        return _content_error(core.id, "NOT_FOUND", "Faltan identificadores de Canvas para obtener el HTML.", core=core)
     try:
         payload = getter(course_id, content_id)
     except AppError as exc:
-        return _content_error(resource_id, _error_code_from_status(exc.status_code), exc.message)
+        return _content_error(core.id, _error_code_from_status(exc.status_code), exc.message, core=core)
 
     if not isinstance(payload, dict):
-        return _content_error(resource_id, "UNKNOWN", "Canvas ha devuelto una respuesta inesperada.")
+        return _content_error(core.id, "UNKNOWN", "Canvas ha devuelto una respuesta inesperada.", core=core)
     for key in body_keys:
         value = payload.get(key)
         if isinstance(value, str):
             return ResourceContentResult(
                 ok=True,
-                resource_id=resource_id,
-                content_type="text/html",
+                resourceId=core.id,
+                title=core.title,
+                type=core.type,
+                origin=core.origin,
+                contentKind="HTML",
+                htmlContent=value,
                 filename=f"{content_id}.html",
-                text_content=value,
+                mimeType="text/html",
             )
-    return _content_error(resource_id, "NOT_FOUND", "La respuesta de Canvas no contiene HTML reutilizable.")
+    return _content_error(core.id, "NOT_FOUND", "La respuesta de Canvas no contiene HTML reutilizable.", core=core)
 
 
 def _course_id_from_url(url: str | None) -> str | None:
@@ -440,6 +586,7 @@ def _as_mapping(value: Any) -> dict[str, Any]:
             "sourceUrl": value.url,
             "downloadUrl": value.download_url,
             "finalUrl": value.final_url,
+            "htmlPath": value.path if value.origin == "INTERNAL_PAGE" else None,
             "localPath": value.path,
             "coursePath": value.course_path,
             "status": value.status,
@@ -558,6 +705,7 @@ def _normalize_origin(
     source_url: str | None,
     final_url: str | None,
     local_path: str | None,
+    html_path: str | None,
     canvas_type: str | None,
 ) -> CoreResourceOrigin:
     raw_origin = (_string(source, "origin") or _string(fallback, "origin") or "").lower()
@@ -579,6 +727,8 @@ def _normalize_origin(
         return "ONLINE_CANVAS"
     if source_url and source_url.startswith(("http://", "https://")):
         return "EXTERNAL_URL"
+    if html_path:
+        return "INTERNAL_PAGE"
     if local_path:
         suffix = Path(local_path).suffix.lower()
         return "INTERNAL_PAGE" if suffix in {".html", ".htm", ".xhtml"} else "INTERNAL_FILE"
@@ -615,8 +765,35 @@ def _normalize_access_status(
     canvas_type: str | None,
 ) -> CoreAccessStatus:
     raw_status = (_string(source, "accessStatus", "access_status") or _string(fallback, "accessStatus", "access_status") or "").upper()
+    raw_reason = (_string(source, "reasonCode", "reason_code") or _string(fallback, "reasonCode", "reason_code") or "").upper()
     analysis_category = (_string(source, "analysisCategory", "analysis_category") or "").upper()
-    if _is_sso_url(final_url or source_url or ""):
+    http_status = _int(source, "httpStatus", "http_status", "accessStatusCode", "access_status_code") or _int(
+        fallback,
+        "httpStatus",
+        "http_status",
+        "accessStatusCode",
+        "access_status_code",
+    )
+    reference_url = final_url or source_url or ""
+    real_failure_reason = raw_reason in {
+        "NOT_FOUND",
+        "TIMEOUT",
+        "DNS_ERROR",
+        "SSL_ERROR",
+        "NETWORK_ERROR",
+        "INVALID_URL",
+    }
+    if (
+        not real_failure_reason
+        and http_status != 404
+        and (
+            _is_sso_url(reference_url)
+            or (
+                _is_protected_external_auth_url(reference_url)
+                and (raw_reason in {"AUTH_REQUIRED", "FORBIDDEN"} or http_status in {401, 403})
+            )
+        )
+    ):
         return "REQUIERE_SSO"
     if canvas_type in {"ExternalTool", "Quiz"} and raw_status != "REQUIERE_SSO":
         return "REQUIERE_INTERACCION"
@@ -631,8 +808,6 @@ def _normalize_access_status(
 
 def _normalize_reason_code(source: Any, fallback: Any, *, access_status: str) -> CoreReasonCode:
     raw_reason = (_string(source, "reasonCode", "reason_code") or _string(fallback, "reasonCode", "reason_code") or "").upper()
-    if raw_reason in VALID_REASON_CODES:
-        return raw_reason  # type: ignore[return-value]
     http_status = _int(source, "httpStatus", "http_status", "accessStatusCode", "access_status_code") or _int(
         fallback,
         "httpStatus",
@@ -640,14 +815,22 @@ def _normalize_reason_code(source: Any, fallback: Any, *, access_status: str) ->
         "accessStatusCode",
         "access_status_code",
     )
-    if access_status in {"OK", "REQUIERE_INTERACCION", "REQUIERE_SSO", "NO_ANALIZABLE"}:
-        return "OK" if access_status == "OK" else "AUTH_REQUIRED" if access_status == "REQUIERE_SSO" else "UNKNOWN"
-    if http_status == 404:
-        return "NOT_FOUND"
-    if http_status == 401:
+    if access_status == "OK":
+        return "OK"
+    if access_status == "REQUIERE_SSO":
         return "AUTH_REQUIRED"
-    if http_status == 403:
+    if access_status in {"REQUIERE_INTERACCION", "NO_ANALIZABLE"}:
+        return "UNKNOWN"
+    if raw_reason in {"404_NOT_FOUND", "NOT_FOUND"} or http_status == 404:
+        return "NOT_FOUND"
+    if raw_reason == "TIMEOUT":
+        return "TIMEOUT"
+    if raw_reason in {"DNS_ERROR", "SSL_ERROR", "NETWORK_ERROR", "INVALID_URL"}:
+        return raw_reason  # type: ignore[return-value]
+    if raw_reason in {"AUTH_REQUIRED", "FORBIDDEN"} or http_status in {401, 403}:
         return "FORBIDDEN"
+    if raw_reason in VALID_REASON_CODES:
+        return raw_reason  # type: ignore[return-value]
     if _contains_text(source, fallback, "timeout"):
         return "TIMEOUT"
     if _contains_text(source, fallback, "dns"):
@@ -657,6 +840,22 @@ def _normalize_reason_code(source: Any, fallback: Any, *, access_status: str) ->
     if _contains_text(source, fallback, "invalid"):
         return "INVALID_URL"
     return "UNKNOWN"
+
+
+def _normalize_reason_detail(source: Any, fallback: Any, *, access_status: str) -> str | None:
+    if access_status == "REQUIERE_SSO":
+        return SSO_REASON_DETAIL
+    if access_status == "REQUIERE_INTERACCION":
+        return INTERACTION_REASON_DETAIL
+    return _string(source, "reasonDetail", "reason_detail", "accessNote", "access_note", "errorMessage", "error_message") or _string(
+        fallback,
+        "reasonDetail",
+        "reason_detail",
+        "accessNote",
+        "access_note",
+        "errorMessage",
+        "error_message",
+    )
 
 
 def _normalize_download_status(source: Any, fallback: Any, *, downloadable: bool) -> CoreDownloadStatus:
@@ -676,13 +875,14 @@ def _content_available(
     access_status: str,
     downloadable: bool,
     local_path: str | None,
+    html_path: str | None,
     source_url: str | None,
     canvas_type: str | None,
     resource_type: str,
 ) -> bool:
     if access_status != "OK":
         return False
-    if local_path:
+    if local_path or html_path:
         return True
     if canvas_type in HTML_CANVAS_TYPES:
         return True
@@ -714,6 +914,23 @@ def _is_sso_url(url: str | None) -> bool:
     return host.endswith(".uoc.edu") and any(marker in f"{parsed.path.lower()}?{parsed.query.lower()}" for marker in SSO_PATH_MARKERS)
 
 
+def _is_protected_external_auth_url(url: str | None) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    reference = f"{host}{parsed.path.lower()}?{parsed.query.lower()}"
+    if any(marker in host for marker in PROTECTED_EXTERNAL_HOST_MARKERS):
+        return True
+    if host.endswith(".uoc.edu") and any(marker in reference for marker in PROTECTED_EXTERNAL_REFERENCE_MARKERS):
+        return True
+    return any(marker in reference for marker in PROTECTED_EXTERNAL_REFERENCE_MARKERS)
+
+
+def _is_sso_or_protected_auth_url(url: str | None) -> bool:
+    return _is_sso_url(url) or _is_protected_external_auth_url(url)
+
+
 def _guess_content_type(path: Path) -> str:
     return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
@@ -724,6 +941,19 @@ def _is_textual_file(path: Path, content_type: str | None) -> bool:
         (content_type and (content_type.startswith("text/") or content_type in {"application/xhtml+xml", "application/json"}))
         or suffix in {".html", ".htm", ".xhtml", ".txt", ".md", ".json", ".csv"}
     )
+
+
+def _content_kind_for_file(path: Path, content_type: str | None, resource_type: str | None) -> ContentKind:
+    suffix = path.suffix.lower()
+    normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    normalized_resource_type = (resource_type or "").upper()
+    if suffix in {".html", ".htm", ".xhtml"} or normalized_content_type in {"text/html", "application/xhtml+xml"}:
+        return "HTML"
+    if suffix == ".pdf" or normalized_content_type == "application/pdf" or normalized_resource_type == "PDF":
+        return "PDF"
+    if _is_textual_file(path, content_type):
+        return "TEXT"
+    return "BINARY"
 
 
 def _filename_from_url(url: str | None) -> str | None:
@@ -750,5 +980,20 @@ def _error_code_from_status(status_code: int | None) -> str:
     return "NETWORK_ERROR" if status_code and status_code >= 500 else "UNKNOWN"
 
 
-def _content_error(resource_id: str, code: str, detail: str) -> ResourceContentResult:
-    return ResourceContentResult(ok=False, resource_id=resource_id, error_code=code, error_detail=detail)
+def _content_error(
+    resource_id: str,
+    code: str,
+    detail: str,
+    *,
+    core: ResourceCore | None = None,
+) -> ResourceContentResult:
+    return ResourceContentResult(
+        ok=False,
+        resourceId=resource_id,
+        title=core.title if core is not None else "Recurso no encontrado",
+        type=core.type if core is not None else "OTHER",
+        origin=core.origin if core is not None else None,
+        contentKind="NOT_ANALYZABLE",
+        errorCode=code,
+        errorDetail=detail,
+    )

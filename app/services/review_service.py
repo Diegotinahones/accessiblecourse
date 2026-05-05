@@ -43,6 +43,7 @@ class InventoryResourceSeed(BaseModel):
     source: str | None = None
     source_url: str | None = Field(default=None, validation_alias=AliasChoices("source_url", "sourceUrl", "url"))
     file_path: str | None = Field(default=None, validation_alias=AliasChoices("file_path", "filePath", "localPath", "path"))
+    html_path: str | None = Field(default=None, validation_alias=AliasChoices("html_path", "htmlPath"))
     course_path: str | None = Field(
         default=None,
         validation_alias=AliasChoices("course_path", "coursePath", "module_path", "modulePath"),

@@ -135,6 +135,7 @@ export interface ResourceCore {
   finalUrl: string | null;
   downloadable: boolean;
   downloadStatus: ResourceCoreDownloadStatus;
+  htmlPath: string | null;
   localPath: string | null;
   sourceUrl: string | null;
   contentAvailable: boolean;
@@ -160,6 +161,7 @@ export interface ResourceListItem {
   sourceUrl: string | null;
   downloadUrl: string | null;
   path: string | null;
+  htmlPath: string | null;
   localPath: string | null;
   filePath: string | null;
   coursePath: string | null;

@@ -444,6 +444,18 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
     assert discovered_file["parentId"] == page_resource["id"]
     assert discovered_file["modulePath"] == "Modulo 2 > Bienvenida"
 
+    accessibility_response = client.get(f"/api/jobs/{job_id}/accessibility")
+    assert accessibility_response.status_code == 200, accessibility_response.text
+    accessibility_payload = accessibility_response.json()
+    assert accessibility_payload["summary"]["docxResourcesTotal"] == 1
+    assert accessibility_payload["summary"]["docxResourcesAnalyzed"] == 1
+    assert accessibility_payload["summary"]["byType"]["DOCX"]["resourcesAnalyzed"] == 1
+    docx_accessibility = next(
+        resource for resource in accessibility_payload["resources"] if resource["analysisType"] == "DOCX"
+    )
+    assert docx_accessibility["resourceId"] == discovered_file["id"]
+    assert any(check["status"] in {"FAIL", "ERROR"} for check in docx_accessibility["checks"])
+
     assignment_file = next(resource for resource in resources_payload["resources"] if resource["title"] == "PEC1.pdf")
     assert assignment_file["canAccess"] is True
     assert assignment_file["canDownload"] is True

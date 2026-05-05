@@ -105,28 +105,18 @@ def run_docx_accessibility_scan(
                 course_id=course_id,
             )
         except Exception as exc:
-            checks = [
-                _result(
-                    "docx.content.available",
-                    "Contenido DOCX disponible",
-                    "ERROR",
-                    f"No se pudo recuperar el DOCX: {exc.__class__.__name__}.",
-                    "Comprueba que el documento Word sea accesible para el backend.",
-                )
-            ]
+            checks = _docx_scan_error_checks(
+                f"No se pudo recuperar el DOCX: {exc.__class__.__name__}.",
+                "Comprueba que el documento Word sea accesible para el backend.",
+            )
             append_accessibility_resource_result(report, resource, checks, analysis_type="DOCX")
             continue
 
         if not content.ok:
-            checks = [
-                _result(
-                    "docx.content.available",
-                    "Contenido DOCX disponible",
-                    "ERROR",
-                    content.errorDetail or "No se pudo recuperar el DOCX del recurso.",
-                    "Comprueba que el documento Word sea accesible para el backend.",
-                )
-            ]
+            checks = _docx_scan_error_checks(
+                content.errorDetail or "No se pudo recuperar el DOCX del recurso.",
+                "Comprueba que el documento Word sea accesible para el backend.",
+            )
             append_accessibility_resource_result(report, resource, checks, analysis_type="DOCX")
             continue
 
@@ -134,19 +124,20 @@ def run_docx_accessibility_scan(
             continue
 
         if not content.binaryPath:
-            checks = [
-                _result(
-                    "docx.content.available",
-                    "Contenido DOCX disponible",
-                    "ERROR",
-                    "El recurso DOCX no tiene ruta binaria segura para analizar.",
-                    "Asegura que el DOCX se pueda resolver o cachear desde el backend.",
-                )
-            ]
+            checks = _docx_scan_error_checks(
+                "El recurso DOCX no tiene ruta binaria segura para analizar.",
+                "Asegura que el DOCX se pueda resolver o cachear desde el backend.",
+            )
             append_accessibility_resource_result(report, resource, checks, analysis_type="DOCX")
             continue
 
-        checks = analyze_docx_accessibility(resource, Path(content.binaryPath))
+        try:
+            checks = analyze_docx_accessibility(resource, Path(content.binaryPath))
+        except Exception as exc:
+            checks = _docx_scan_error_checks(
+                f"No se pudo analizar el DOCX: {exc.__class__.__name__}.",
+                "Revisa el documento Word manualmente y vuelve a intentar el análisis.",
+            )
         append_accessibility_resource_result(report, resource, checks, analysis_type="DOCX")
 
     recompute_accessibility_summary(report)
@@ -550,6 +541,18 @@ def _content_is_docx(content: ResourceContentResult) -> bool:
     mime_type = (content.mimeType or "").split(";", 1)[0].strip().lower()
     filename = (content.filename or content.binaryPath or content.title or "").lower()
     return mime_type == DOCX_MIME_TYPE or filename.endswith(".docx")
+
+
+def _docx_scan_error_checks(evidence: str, recommendation: str) -> list[AccessibilityCheckResult]:
+    return [
+        _result(
+            "docx.analysis",
+            "Análisis DOCX",
+            "ERROR",
+            evidence,
+            recommendation,
+        )
+    ]
 
 
 def _resource_has_docx_reference(resource: Any) -> bool:

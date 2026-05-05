@@ -114,6 +114,44 @@ def test_docx_accessibility_job_scan_treats_other_docx_as_docx(test_settings) ->
     assert report.modules[0].resources[0].analysisType == "DOCX"
 
 
+def test_docx_accessibility_job_scan_records_unexpected_resource_error(test_settings, monkeypatch) -> None:
+    job_id = "66666666-6666-6666-6666-666666666666"
+    docx_path = get_extracted_dir(test_settings, job_id) / "docs" / "broken-analysis.docx"
+    _write_docx(docx_path)
+
+    def raise_unexpected_error(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "app.services.docx_accessibility.analyze_docx_accessibility",
+        raise_unexpected_error,
+    )
+
+    report = run_docx_accessibility_scan(
+        settings=test_settings,
+        job_id=job_id,
+        resources=[
+            {
+                "id": "word-guide",
+                "title": "Guia Word",
+                "type": "DOCX",
+                "origin": "INTERNAL_FILE",
+                "localPath": "docs/broken-analysis.docx",
+                "accessStatus": "OK",
+                "canAccess": True,
+                "canDownload": True,
+                "contentAvailable": True,
+            }
+        ],
+    )
+
+    checks = report.modules[0].resources[0].checks
+    assert report.summary.docxResourcesTotal == 1
+    assert checks[0].checkId == "docx.analysis"
+    assert checks[0].status == "ERROR"
+    assert "RuntimeError" in checks[0].evidence
+
+
 def test_docx_accessibility_job_scan_skips_non_docx_resources(test_settings) -> None:
     report = run_docx_accessibility_scan(
         settings=test_settings,

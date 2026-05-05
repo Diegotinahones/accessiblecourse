@@ -12,6 +12,7 @@ export type JobPhase =
   | 'INVENTORY'
   | 'ACCESS_SCAN'
   | 'HTML_ACCESSIBILITY_SCAN'
+  | 'PDF_ACCESSIBILITY_SCAN'
   | 'DONE'
   | 'ERROR';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
@@ -242,30 +243,34 @@ export interface ResourceListResponse {
   structure: CourseStructure;
 }
 
-export type HtmlAccessibilityCheckStatus =
+export type AccessibilityResourceKind = 'HTML' | 'PDF';
+
+export type AccessibilityCheckStatus =
   | 'PASS'
   | 'FAIL'
   | 'WARNING'
   | 'NO_APLICA'
   | 'ERROR';
 
-export interface HtmlAccessibilityCheck {
+export interface AccessibilityCheck {
   id: string;
   title: string;
-  status: HtmlAccessibilityCheckStatus;
+  status: AccessibilityCheckStatus;
   evidence: string | null;
   recommendation: string | null;
 }
 
-export interface HtmlAccessibilityResource {
+export interface AccessibilityResource {
   resourceId: string;
   title: string | null;
-  checks: HtmlAccessibilityCheck[];
+  kind: AccessibilityResourceKind;
+  checks: AccessibilityCheck[];
   error: string | null;
 }
 
-export interface HtmlAccessibilitySummary {
-  resourcesAnalyzed: number;
+export interface AccessibilitySummary {
+  htmlResourcesAnalyzed: number;
+  pdfResourcesAnalyzed: number;
   pass: number;
   warning: number;
   fail: number;
@@ -273,10 +278,10 @@ export interface HtmlAccessibilitySummary {
   errors: number;
 }
 
-export interface HtmlAccessibilityResponse {
+export interface AccessibilityResponse {
   jobId: string;
-  summary: HtmlAccessibilitySummary;
-  resources: HtmlAccessibilityResource[];
+  summary: AccessibilitySummary;
+  resources: AccessibilityResource[];
 }
 
 export interface ChecklistTemplateItem {

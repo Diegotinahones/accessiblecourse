@@ -34,8 +34,12 @@ export function getDecisionLabel(decision: ChecklistDecision) {
 }
 
 export function buildStepMessage(progress: number) {
-  if (progress >= 100) {
+  if (progress >= 98) {
     return 'Generando diagnóstico';
+  }
+
+  if (progress >= 90) {
+    return 'Procesando accesibilidad de los recursos PDF';
   }
 
   if (progress >= 85) {

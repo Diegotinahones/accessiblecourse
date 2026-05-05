@@ -12,9 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import Settings
 from app.services.resource_core import ResourceContentResult, get_resource_content, normalize_resource
-from app.services.storage import get_job_dir
 
 AccessibilityStatus = Literal["PASS", "FAIL", "WARNING", "NOT_APPLICABLE", "ERROR"]
+AccessibilityAnalysisType = Literal["HTML", "PDF"]
 
 GENERIC_PAGE_TITLES = {
     "home",
@@ -71,6 +71,7 @@ class AccessibilityResourceResult(BaseModel):
     resourceId: str
     title: str
     type: str
+    analysisType: AccessibilityAnalysisType | None = None
     accessStatus: str
     checks: list[AccessibilityCheckResult] = Field(default_factory=list)
 
@@ -82,16 +83,31 @@ class AccessibilityModuleResult(BaseModel):
     resources: list[AccessibilityResourceResult] = Field(default_factory=list)
 
 
-class AccessibilitySummary(BaseModel):
+class AccessibilityTypeSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    htmlResourcesTotal: int = 0
-    htmlResourcesAnalyzed: int = 0
+    resourcesTotal: int = 0
+    resourcesAnalyzed: int = 0
     passCount: int = 0
     failCount: int = 0
     warningCount: int = 0
     notApplicableCount: int = 0
     errorCount: int = 0
+
+
+class AccessibilitySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    htmlResourcesTotal: int = 0
+    htmlResourcesAnalyzed: int = 0
+    pdfResourcesTotal: int = 0
+    pdfResourcesAnalyzed: int = 0
+    passCount: int = 0
+    failCount: int = 0
+    warningCount: int = 0
+    notApplicableCount: int = 0
+    errorCount: int = 0
+    byType: dict[str, AccessibilityTypeSummary] = Field(default_factory=dict)
 
 
 class AccessibilityReport(BaseModel):
@@ -258,14 +274,11 @@ def run_html_accessibility_scan(
     course_id: str | None = None,
 ) -> AccessibilityReport:
     modules_by_title: dict[str, AccessibilityModuleResult] = {}
-    summary = AccessibilitySummary()
 
     for resource in resources:
         core = normalize_resource(resource)
         if not _should_attempt_html_scan(core):
             continue
-
-        summary.htmlResourcesTotal += 1
 
         try:
             content = get_resource_content(
@@ -278,7 +291,6 @@ def run_html_accessibility_scan(
                 course_id=course_id,
             )
         except Exception as exc:  # Keep the scan resilient per resource.
-            summary.htmlResourcesAnalyzed += 1
             checks = [
                 AccessibilityCheckResult(
                     checkId="html.content.available",
@@ -288,31 +300,27 @@ def run_html_accessibility_scan(
                     recommendation="Comprueba que el recurso HTML sea accesible para el backend.",
                 )
             ]
-            _increment_summary(summary, checks)
-            _append_resource_result(modules_by_title, resource, checks)
+            _append_resource_result(modules_by_title, resource, checks, analysis_type="HTML")
             continue
 
         if not content.ok:
-            summary.htmlResourcesAnalyzed += 1
             checks = _checks_for_content(resource, content)
-            _increment_summary(summary, checks)
-            _append_resource_result(modules_by_title, resource, checks)
+            _append_resource_result(modules_by_title, resource, checks, analysis_type="HTML")
             continue
 
         if content.contentKind != "HTML":
             continue
 
         checks = _checks_for_content(resource, content)
-        summary.htmlResourcesAnalyzed += 1
-        _increment_summary(summary, checks)
-        _append_resource_result(modules_by_title, resource, checks)
+        _append_resource_result(modules_by_title, resource, checks, analysis_type="HTML")
 
     report = AccessibilityReport(
         jobId=job_id,
         generatedAt=datetime.now(UTC),
-        summary=summary,
+        summary=AccessibilitySummary(),
         modules=list(modules_by_title.values()),
     )
+    recompute_accessibility_summary(report)
     save_accessibility_report(settings, job_id, report)
     return report
 
@@ -358,6 +366,56 @@ def accessibility_report_path(settings: Settings, job_id: str) -> Path:
     return settings.storage_root / "jobs" / job_id / "accessibility.json"
 
 
+def remove_accessibility_results(report: AccessibilityReport, analysis_type: AccessibilityAnalysisType) -> None:
+    modules: list[AccessibilityModuleResult] = []
+    for module in report.modules:
+        module.resources = [
+            resource
+            for resource in module.resources
+            if _resource_analysis_type(resource) != analysis_type
+        ]
+        if module.resources:
+            modules.append(module)
+    report.modules = modules
+    recompute_accessibility_summary(report)
+
+
+def append_accessibility_resource_result(
+    report: AccessibilityReport,
+    resource: dict[str, Any],
+    checks: list[AccessibilityCheckResult],
+    *,
+    analysis_type: AccessibilityAnalysisType,
+) -> None:
+    core = normalize_resource(resource)
+    module_title = _module_title(resource)
+    module = next((item for item in report.modules if item.title == module_title), None)
+    if module is None:
+        module = AccessibilityModuleResult(title=module_title)
+        report.modules.append(module)
+    module.resources.append(
+        AccessibilityResourceResult(
+            resourceId=core.id,
+            title=core.title,
+            type=core.type,
+            analysisType=analysis_type,
+            accessStatus=core.accessStatus,
+            checks=checks,
+        )
+    )
+
+
+def recompute_accessibility_summary(report: AccessibilityReport) -> AccessibilitySummary:
+    summary = AccessibilitySummary()
+    for module in report.modules:
+        for resource in module.resources:
+            analysis_type = _resource_analysis_type(resource)
+            _increment_resource_counts(summary, analysis_type)
+            _increment_summary(summary, resource.checks, analysis_type=analysis_type)
+    report.summary = summary
+    return summary
+
+
 def _checks_for_content(resource: dict[str, Any], content: ResourceContentResult) -> list[AccessibilityCheckResult]:
     if not content.ok or content.htmlContent is None:
         return [
@@ -376,6 +434,8 @@ def _append_resource_result(
     modules_by_title: dict[str, AccessibilityModuleResult],
     resource: dict[str, Any],
     checks: list[AccessibilityCheckResult],
+    *,
+    analysis_type: AccessibilityAnalysisType,
 ) -> None:
     core = normalize_resource(resource)
     module_title = _module_title(resource)
@@ -385,6 +445,7 @@ def _append_resource_result(
             resourceId=core.id,
             title=core.title,
             type=core.type,
+            analysisType=analysis_type,
             accessStatus=core.accessStatus,
             checks=checks,
         )
@@ -401,18 +462,54 @@ def _should_attempt_html_scan(core: Any) -> bool:
     return bool(core.contentAvailable)
 
 
-def _increment_summary(summary: AccessibilitySummary, checks: list[AccessibilityCheckResult]) -> None:
+def _resource_analysis_type(resource: AccessibilityResourceResult) -> AccessibilityAnalysisType:
+    if resource.analysisType in {"HTML", "PDF"}:
+        return resource.analysisType
+    if resource.type == "PDF":
+        return "PDF"
+    return "HTML"
+
+
+def _increment_resource_counts(summary: AccessibilitySummary, analysis_type: AccessibilityAnalysisType) -> None:
+    type_summary = summary.byType.setdefault(analysis_type, AccessibilityTypeSummary())
+    type_summary.resourcesTotal += 1
+    type_summary.resourcesAnalyzed += 1
+    if analysis_type == "HTML":
+        summary.htmlResourcesTotal += 1
+        summary.htmlResourcesAnalyzed += 1
+    elif analysis_type == "PDF":
+        summary.pdfResourcesTotal += 1
+        summary.pdfResourcesAnalyzed += 1
+
+
+def _increment_summary(
+    summary: AccessibilitySummary,
+    checks: list[AccessibilityCheckResult],
+    *,
+    analysis_type: AccessibilityAnalysisType | None = None,
+) -> None:
+    type_summary = summary.byType.setdefault(analysis_type, AccessibilityTypeSummary()) if analysis_type else None
     for check in checks:
         if check.status == "PASS":
             summary.passCount += 1
+            if type_summary:
+                type_summary.passCount += 1
         elif check.status == "FAIL":
             summary.failCount += 1
+            if type_summary:
+                type_summary.failCount += 1
         elif check.status == "WARNING":
             summary.warningCount += 1
+            if type_summary:
+                type_summary.warningCount += 1
         elif check.status == "NOT_APPLICABLE":
             summary.notApplicableCount += 1
+            if type_summary:
+                type_summary.notApplicableCount += 1
         elif check.status == "ERROR":
             summary.errorCount += 1
+            if type_summary:
+                type_summary.errorCount += 1
 
 
 def _check_language(parser: _HTMLAccessibilityParser) -> AccessibilityCheckResult:

@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from docx import Document
 from pathlib import Path
+from reportlab.pdfgen import canvas as pdf_canvas
 from zipfile import ZipFile
 
 from sqlalchemy.exc import IntegrityError
@@ -39,6 +40,15 @@ def build_large_imscc(payload_size: int) -> bytes:
 """,
         )
         archive.writestr("module_1/large.bin", b"A" * payload_size)
+    return buffer.getvalue()
+
+
+def build_text_pdf(title: str = "Brief de la PEC") -> bytes:
+    buffer = io.BytesIO()
+    document = pdf_canvas.Canvas(buffer)
+    document.drawString(72, 760, title)
+    document.drawString(72, 735, "Documento de prueba con texto seleccionable.")
+    document.save()
     return buffer.getvalue()
 
 
@@ -309,7 +319,7 @@ def build_imscc_with_pec_section_deep_scan() -> bytes:
             </body></html>
             """,
         )
-        archive.writestr("course/downloads/brief.pdf", b"%PDF-1.4\n%brief\n")
+        archive.writestr("course/downloads/brief.pdf", build_text_pdf())
     return buffer.getvalue()
 
 
@@ -988,9 +998,14 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     assert accessibility["generatedAt"] is not None
     assert accessibility["summary"]["htmlResourcesTotal"] == 1
     assert accessibility["summary"]["htmlResourcesAnalyzed"] == 1
+    assert accessibility["summary"]["pdfResourcesTotal"] == 1
+    assert accessibility["summary"]["pdfResourcesAnalyzed"] == 1
+    assert accessibility["summary"]["byType"]["HTML"]["resourcesAnalyzed"] == 1
+    assert accessibility["summary"]["byType"]["PDF"]["resourcesAnalyzed"] == 1
     assert accessibility["summary"]["failCount"] >= 1
-    assert len(accessibility["resources"]) == 1
-    assert accessibility["resources"][0]["resourceId"] == "res-html"
+    assert len(accessibility["resources"]) == 2
+    assert {resource["analysisType"] for resource in accessibility["resources"]} == {"HTML", "PDF"}
+    assert any(resource["resourceId"] == "res-html" for resource in accessibility["resources"])
     assert accessibility["modules"][0]["resources"][0]["resourceId"] == "res-html"
     check_statuses = {
         check["checkId"]: check["status"] for check in accessibility["modules"][0]["resources"][0]["checks"]
@@ -1000,9 +1015,14 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     with Session(client.app.state.engine) as session:
         events = session.exec(select(JobEvent).where(JobEvent.job_id == job_id)).all()
     assert any(event.message == "Procesando accesibilidad de los recursos HTML" for event in events)
+    assert any(event.message == "Procesando accesibilidad de los recursos PDF" for event in events)
 
 
-def test_report_generation_includes_access_and_html_accessibility_summaries(client, monkeypatch, test_settings) -> None:
+def test_report_generation_includes_access_html_and_pdf_accessibility_summaries(
+    client,
+    monkeypatch,
+    test_settings,
+) -> None:
     class StubURLChecker:
         def check_url(self, url: str):
             checked_at = datetime(2026, 5, 3, 8, 0, tzinfo=timezone.utc)
@@ -1021,7 +1041,7 @@ def test_report_generation_includes_access_and_html_accessibility_summaries(clie
 
     create_response = client.post(
         "/api/jobs",
-        files={"file": ("course.imscc", build_imscc_with_offline_deep_scan(), "application/octet-stream")},
+        files={"file": ("course.imscc", build_imscc_with_pec_section_deep_scan(), "application/octet-stream")},
     )
 
     assert create_response.status_code == 201, create_response.text
@@ -1033,24 +1053,39 @@ def test_report_generation_includes_access_and_html_accessibility_summaries(clie
 
     assert report["meta"]["jobId"] == job_id
     assert report["mode"] == {"key": "OFFLINE_IMSCC", "label": "OFFLINE IMSCC"}
-    assert report["accessSummary"]["resourcesDetected"] == 6
-    assert report["accessSummary"]["resourcesAccessed"] == 6
-    assert report["accessSummary"]["downloadable"] == 4
+    assert report["accessSummary"]["resourcesDetected"] == 3
+    assert report["accessSummary"]["resourcesAccessed"] == 3
+    assert report["accessSummary"]["downloadable"] == 2
     assert report["accessSummary"]["noAccessible"] == 0
     assert report["accessSummary"]["requiresSSO"] == 0
     assert report["accessSummary"]["requiresInteraction"] == 0
+    assert report["automaticAccessibilitySummary"]["htmlResourcesDetected"] == 1
+    assert report["automaticAccessibilitySummary"]["htmlResourcesAnalyzed"] == 1
+    assert report["automaticAccessibilitySummary"]["pdfResourcesDetected"] == 1
+    assert report["automaticAccessibilitySummary"]["pdfResourcesAnalyzed"] == 1
+    assert report["automaticAccessibilitySummary"]["failCount"] >= 1
+    assert report["automaticAccessibilitySummary"]["warningCount"] >= 1
     assert report["htmlAccessibilitySummary"]["resourcesDetected"] == 1
     assert report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert report["htmlAccessibilitySummary"]["failCount"] >= 1
     assert report["htmlAccessibilitySummary"]["warningCount"] >= 1
+    assert report["pdfAccessibilitySummary"]["resourcesDetected"] == 1
+    assert report["pdfAccessibilitySummary"]["resourcesAnalyzed"] == 1
+    assert report["pdfAccessibilitySummary"]["failCount"] >= 1
+    assert report["pdfAccessibilitySummary"]["warningCount"] >= 1
+    assert report["issueSummary"]
     assert report["keyIssues"]
     assert report["keyIssues"][0]["status"] == "FAIL"
     assert any(issue["status"] == "WARNING" for issue in report["keyIssues"])
+    assert any(issue["resourceType"] == "PDF" for issue in report["keyIssues"])
     assert report["htmlResources"][0]["resourceId"] == "res-html"
     assert report["htmlResources"][0]["overallStatus"] == "FAIL"
     assert report["htmlResources"][0]["summarized"] is False
+    assert report["pdfResources"][0]["title"] == "Brief de la PEC"
+    assert report["pdfResources"][0]["overallStatus"] == "FAIL"
+    assert report["pdfResources"][0]["summarized"] is False
     assert any(
-        resource["reason"] == "TIPO_NO_HTML_CUBIERTO_PENDIENTE" for resource in report["notAutomaticallyAnalyzable"]
+        resource["reason"] == "EXTERNO_NO_ANALIZADO" for resource in report["notAutomaticallyAnalyzable"]
     )
 
     report_dir = test_settings.storage_root / "jobs" / job_id / "report"
@@ -1064,18 +1099,22 @@ def test_report_generation_includes_access_and_html_accessibility_summaries(clie
     assert pdf_path.stat().st_size > 0
 
     stored_report = json.loads(json_path.read_text(encoding="utf-8"))
-    assert stored_report["accessSummary"]["resourcesDetected"] == 6
+    assert stored_report["accessSummary"]["resourcesDetected"] == 3
+    assert stored_report["automaticAccessibilitySummary"]["pdfResourcesAnalyzed"] == 1
     assert stored_report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
+    assert stored_report["pdfAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert stored_report["keyIssues"][0]["status"] == "FAIL"
 
     word_document = Document(str(docx_path))
     paragraphs = [paragraph.text for paragraph in word_document.paragraphs if paragraph.text]
     assert "Resumen de acceso" in paragraphs
-    assert "Resumen de accesibilidad HTML" in paragraphs
+    assert "Resumen de accesibilidad automática" in paragraphs
     assert "Principales incidencias" in paragraphs
     assert "Detalle por recurso HTML" in paragraphs
+    assert "Detalle por recurso PDF" in paragraphs
     assert "Recursos no analizables automáticamente" in paragraphs
-    assert any("Página principal" in paragraph for paragraph in paragraphs)
+    assert any("Página de actividad" in paragraph for paragraph in paragraphs)
+    assert any("Brief de la PEC" in paragraph for paragraph in paragraphs)
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

@@ -7,11 +7,12 @@ import type {
   CourseStructureOrganization,
   CourseStructureNode,
   GeneratedReport,
-  HtmlAccessibilityCheck,
-  HtmlAccessibilityCheckStatus,
-  HtmlAccessibilityResource,
-  HtmlAccessibilityResponse,
-  HtmlAccessibilitySummary,
+  AccessibilityCheck,
+  AccessibilityCheckStatus,
+  AccessibilityResource,
+  AccessibilityResourceKind,
+  AccessibilityResponse,
+  AccessibilitySummary,
   JobStatus,
   OnlineCourse,
   ResourceCore,
@@ -48,6 +49,7 @@ interface RawJobStatusResponse {
     | 'INVENTORY'
     | 'ACCESS_SCAN'
     | 'HTML_ACCESSIBILITY_SCAN'
+    | 'PDF_ACCESSIBILITY_SCAN'
     | 'DONE'
     | 'ERROR';
   progress: number;
@@ -281,6 +283,12 @@ function readArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function normalizeAccessStatus(
   accessStatus: unknown,
   healthStatus: unknown,
@@ -319,7 +327,7 @@ function normalizeAccessStatus(
 
 function normalizeAccessibilityStatus(
   value: unknown,
-): HtmlAccessibilityCheckStatus {
+): AccessibilityCheckStatus {
   const normalizedValue = readString(value)
     ?.toUpperCase()
     .replace(/\s+/g, '_')
@@ -347,6 +355,37 @@ function normalizeAccessibilityStatus(
   }
 
   return 'ERROR';
+}
+
+function normalizeAccessibilityKind(
+  value: unknown,
+  fallbackKind: AccessibilityResourceKind,
+): AccessibilityResourceKind {
+  const normalizedValue = readString(value)
+    ?.toUpperCase()
+    .replace(/\s+/g, '_')
+    .replace(/-/g, '_');
+
+  if (!normalizedValue) {
+    return fallbackKind;
+  }
+
+  if (
+    normalizedValue.includes('PDF') ||
+    normalizedValue.includes('PORTABLE_DOCUMENT')
+  ) {
+    return 'PDF';
+  }
+
+  if (
+    normalizedValue.includes('HTML') ||
+    normalizedValue.includes('WEB') ||
+    normalizedValue.includes('PAGE')
+  ) {
+    return 'HTML';
+  }
+
+  return fallbackKind;
 }
 
 function normalizeCoreAccessStatus(value: ResourceAccessStatus) {
@@ -913,11 +952,8 @@ function normalizeResourcesResponse(
 function normalizeAccessibilityCheck(
   value: unknown,
   index: number,
-): HtmlAccessibilityCheck {
-  const item =
-    value && typeof value === 'object'
-      ? (value as Record<string, unknown>)
-      : {};
+): AccessibilityCheck {
+  const item = readRecord(value);
   const id =
     readString(item.id) ??
     readString(item.checkId) ??
@@ -950,13 +986,11 @@ function normalizeAccessibilityCheck(
 
 function normalizeAccessibilityResource(
   value: unknown,
-): HtmlAccessibilityResource | null {
-  const item =
-    value && typeof value === 'object'
-      ? (value as Record<string, unknown>)
-      : null;
+  fallbackKind: AccessibilityResourceKind = 'HTML',
+): AccessibilityResource | null {
+  const item = readRecord(value);
 
-  if (!item) {
+  if (Object.keys(item).length === 0) {
     return null;
   }
 
@@ -981,6 +1015,19 @@ function normalizeAccessibilityResource(
   return {
     resourceId,
     title: readString(item.title),
+    kind: normalizeAccessibilityKind(
+      item.kind ??
+        item.resourceKind ??
+        item.resource_kind ??
+        item.scanType ??
+        item.scan_type ??
+        item.resourceType ??
+        item.resource_type ??
+        item.mimeType ??
+        item.mime_type ??
+        item.type,
+      fallbackKind,
+    ),
     checks: rawChecks.map(normalizeAccessibilityCheck),
     error:
       readString(item.error) ??
@@ -989,14 +1036,53 @@ function normalizeAccessibilityResource(
   };
 }
 
+function mergeAccessibilityResources(
+  resources: AccessibilityResource[],
+): AccessibilityResource[] {
+  const mergedResources = new Map<string, AccessibilityResource>();
+
+  resources.forEach((resource) => {
+    const resourceKey = `${resource.kind}:${resource.resourceId}`;
+    const existingResource = mergedResources.get(resourceKey);
+
+    if (!existingResource) {
+      mergedResources.set(resourceKey, resource);
+      return;
+    }
+
+    const existingCheckIds = new Set(
+      existingResource.checks.map((check) => check.id),
+    );
+    const nextChecks = [
+      ...existingResource.checks,
+      ...resource.checks.filter((check) => !existingCheckIds.has(check.id)),
+    ];
+
+    mergedResources.set(resourceKey, {
+      ...existingResource,
+      title: existingResource.title ?? resource.title,
+      checks: nextChecks,
+      error: existingResource.error ?? resource.error,
+    });
+  });
+
+  return Array.from(mergedResources.values());
+}
+
 function deriveAccessibilitySummary(
-  resources: HtmlAccessibilityResource[],
-): HtmlAccessibilitySummary {
+  resources: AccessibilityResource[],
+): AccessibilitySummary {
   const allChecks = resources.flatMap((resource) => resource.checks);
+  const analyzedResources = resources.filter(
+    (resource) => resource.checks.length > 0 || resource.error,
+  );
 
   return {
-    resourcesAnalyzed: resources.filter(
-      (resource) => resource.checks.length > 0 || resource.error,
+    htmlResourcesAnalyzed: analyzedResources.filter(
+      (resource) => resource.kind === 'HTML',
+    ).length,
+    pdfResourcesAnalyzed: analyzedResources.filter(
+      (resource) => resource.kind === 'PDF',
     ).length,
     pass: allChecks.filter((check) => check.status === 'PASS').length,
     warning: allChecks.filter((check) => check.status === 'WARNING').length,
@@ -1011,20 +1097,25 @@ function deriveAccessibilitySummary(
 
 function normalizeAccessibilitySummary(
   value: unknown,
-  fallbackSummary: HtmlAccessibilitySummary,
-): HtmlAccessibilitySummary {
-  const summary =
-    value && typeof value === 'object'
-      ? (value as Record<string, unknown>)
-      : {};
+  fallbackSummary: AccessibilitySummary,
+): AccessibilitySummary {
+  const summary = readRecord(value);
 
   return {
-    resourcesAnalyzed:
-      readNumber(summary.resourcesAnalyzed) ??
-      readNumber(summary.resources_analyzed) ??
+    htmlResourcesAnalyzed:
       readNumber(summary.htmlResourcesAnalyzed) ??
       readNumber(summary.html_resources_analyzed) ??
-      fallbackSummary.resourcesAnalyzed,
+      readNumber(summary.resourcesHtmlAnalyzed) ??
+      readNumber(summary.resources_html_analyzed) ??
+      readNumber(summary.resourcesAnalyzed) ??
+      readNumber(summary.resources_analyzed) ??
+      fallbackSummary.htmlResourcesAnalyzed,
+    pdfResourcesAnalyzed:
+      readNumber(summary.pdfResourcesAnalyzed) ??
+      readNumber(summary.pdf_resources_analyzed) ??
+      readNumber(summary.resourcesPdfAnalyzed) ??
+      readNumber(summary.resources_pdf_analyzed) ??
+      fallbackSummary.pdfResourcesAnalyzed,
     pass:
       readNumber(summary.pass) ??
       readNumber(summary.passed) ??
@@ -1060,11 +1151,12 @@ function normalizeAccessibilitySummary(
   };
 }
 
-function emptyAccessibilityResponse(jobId: string): HtmlAccessibilityResponse {
+function emptyAccessibilityResponse(jobId: string): AccessibilityResponse {
   return {
     jobId,
     summary: {
-      resourcesAnalyzed: 0,
+      htmlResourcesAnalyzed: 0,
+      pdfResourcesAnalyzed: 0,
       pass: 0,
       warning: 0,
       fail: 0,
@@ -1078,7 +1170,7 @@ function emptyAccessibilityResponse(jobId: string): HtmlAccessibilityResponse {
 function normalizeAccessibilityResponse(
   jobId: string,
   payload: unknown,
-): HtmlAccessibilityResponse {
+): AccessibilityResponse {
   if (!payload || typeof payload !== 'object') {
     return emptyAccessibilityResponse(jobId);
   }
@@ -1088,19 +1180,64 @@ function normalizeAccessibilityResponse(
     response.accessibility && typeof response.accessibility === 'object'
       ? (response.accessibility as Record<string, unknown>)
       : response;
-  const rawResources =
-    readArray(root.resources).length > 0
-      ? readArray(root.resources)
-      : readArray(root.results).length > 0
-        ? readArray(root.results)
-        : readArray(root.items).length > 0
-          ? readArray(root.items)
-          : readArray(root.htmlResources);
-  const resources = rawResources
-    .map(normalizeAccessibilityResource)
-    .filter((resource): resource is HtmlAccessibilityResource =>
-      Boolean(resource),
-    );
+  const resourceGroups: Array<{
+    fallbackKind: AccessibilityResourceKind;
+    resources: unknown[];
+  }> = [
+    { fallbackKind: 'HTML', resources: readArray(root.resources) },
+    { fallbackKind: 'HTML', resources: readArray(root.results) },
+    { fallbackKind: 'HTML', resources: readArray(root.items) },
+    { fallbackKind: 'HTML', resources: readArray(root.html) },
+    { fallbackKind: 'HTML', resources: readArray(root.htmlResources) },
+    { fallbackKind: 'HTML', resources: readArray(root.html_resources) },
+    { fallbackKind: 'HTML', resources: readArray(root.htmlAccessibility) },
+    { fallbackKind: 'HTML', resources: readArray(root.html_accessibility) },
+    {
+      fallbackKind: 'HTML',
+      resources: readArray(readRecord(root.html).resources),
+    },
+    {
+      fallbackKind: 'HTML',
+      resources: readArray(readRecord(root.html).results),
+    },
+    {
+      fallbackKind: 'HTML',
+      resources: readArray(readRecord(root.htmlAccessibility).resources),
+    },
+    {
+      fallbackKind: 'HTML',
+      resources: readArray(readRecord(root.html_accessibility).resources),
+    },
+    { fallbackKind: 'PDF', resources: readArray(root.pdf) },
+    { fallbackKind: 'PDF', resources: readArray(root.pdfResources) },
+    { fallbackKind: 'PDF', resources: readArray(root.pdf_resources) },
+    { fallbackKind: 'PDF', resources: readArray(root.pdfAccessibility) },
+    { fallbackKind: 'PDF', resources: readArray(root.pdf_accessibility) },
+    {
+      fallbackKind: 'PDF',
+      resources: readArray(readRecord(root.pdf).resources),
+    },
+    { fallbackKind: 'PDF', resources: readArray(readRecord(root.pdf).results) },
+    {
+      fallbackKind: 'PDF',
+      resources: readArray(readRecord(root.pdfAccessibility).resources),
+    },
+    {
+      fallbackKind: 'PDF',
+      resources: readArray(readRecord(root.pdf_accessibility).resources),
+    },
+  ];
+  const resources = mergeAccessibilityResources(
+    resourceGroups
+      .flatMap(({ fallbackKind, resources: rawResources }) =>
+        rawResources.map((resource) =>
+          normalizeAccessibilityResource(resource, fallbackKind),
+        ),
+      )
+      .filter((resource): resource is AccessibilityResource =>
+        Boolean(resource),
+      ),
+  );
   const fallbackSummary = deriveAccessibilitySummary(resources);
 
   return {
@@ -1218,7 +1355,7 @@ export async function fetchResources(
 
 export async function fetchAccessibility(
   jobId: string,
-): Promise<HtmlAccessibilityResponse> {
+): Promise<AccessibilityResponse> {
   try {
     const payload = await request<unknown>(`/jobs/${jobId}/accessibility`);
     return normalizeAccessibilityResponse(jobId, payload);

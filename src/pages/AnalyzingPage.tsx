@@ -18,8 +18,16 @@ function getAnalysisMessage(status: JobStatus | null) {
     return 'Procesando accesibilidad de los recursos HTML';
   }
 
-  if (progress >= 95) {
+  if (status?.phase === 'PDF_ACCESSIBILITY_SCAN') {
+    return 'Procesando accesibilidad de los recursos PDF';
+  }
+
+  if (progress >= 98) {
     return 'Generando diagnóstico';
+  }
+
+  if (progress >= 90) {
+    return 'Procesando accesibilidad de los recursos PDF';
   }
 
   if (progress >= 85) {

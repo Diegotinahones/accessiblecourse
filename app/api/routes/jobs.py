@@ -53,6 +53,7 @@ from app.services.jobs import (
     rerun_access_analysis,
     serialize_job,
 )
+from app.services.pdf_accessibility import ensure_pdf_accessibility_report
 from app.services.jobs import (
     get_job_or_404 as get_processing_job_or_404,
 )
@@ -133,14 +134,61 @@ def _load_online_context(
     return canvas_client, canvas_credentials, course_id
 
 
+def _accessibility_resource_payload(resource, analysis_type: str) -> dict:
+    payload = resource.model_dump(mode="python")
+    payload["analysisType"] = analysis_type
+    return payload
+
+
+def _resource_analysis_type(resource) -> str:
+    analysis_type = getattr(resource, "analysisType", None)
+    if analysis_type in {"HTML", "PDF"}:
+        return analysis_type
+    return "PDF" if getattr(resource, "type", None) == "PDF" else "HTML"
+
+
+def _accessibility_modules_payload(report, analysis_type: str) -> list[dict]:
+    modules = []
+    for module in report.modules:
+        resources = [
+            resource
+            for resource in module.resources
+            if _resource_analysis_type(resource) == analysis_type
+        ]
+        if not resources:
+            continue
+        payload = module.model_dump(mode="python")
+        payload["resources"] = [
+            _accessibility_resource_payload(resource, analysis_type)
+            for resource in resources
+        ]
+        modules.append(payload)
+    return modules
+
+
+def _accessibility_type_summary(summary, *, prefix: str) -> dict[str, int]:
+    analysis_type = prefix.upper()
+    type_summary = summary.byType.get(analysis_type)
+    total_key = f"{prefix}ResourcesTotal"
+    analyzed_key = f"{prefix}ResourcesAnalyzed"
+    return {
+        "resourcesTotal": int(getattr(summary, total_key)),
+        "resourcesAnalyzed": int(getattr(summary, analyzed_key)),
+        "passCount": type_summary.passCount if type_summary else summary.passCount,
+        "failCount": type_summary.failCount if type_summary else summary.failCount,
+        "warningCount": type_summary.warningCount if type_summary else summary.warningCount,
+        "notApplicableCount": type_summary.notApplicableCount if type_summary else summary.notApplicableCount,
+        "errorCount": type_summary.errorCount if type_summary else summary.errorCount,
+    }
+
+
 def _accessibility_report_read(report) -> AccessibilityReportRead:
-    flattened_resources = [
+    payload = report.model_dump(mode="python")
+    payload["resources"] = [
         resource.model_dump(mode="python")
         for module in report.modules
         for resource in module.resources
     ]
-    payload = report.model_dump(mode="python")
-    payload["resources"] = flattened_resources
     return AccessibilityReportRead.model_validate(payload)
 
 
@@ -663,7 +711,15 @@ def get_job_accessibility(
         job_id=job_id,
     )
     inventory = [item.model_dump(mode="python") for item in load_inventory_file(settings, job_id)]
-    report = ensure_accessibility_report(
+    ensure_accessibility_report(
+        settings=settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    report = ensure_pdf_accessibility_report(
         settings=settings,
         job_id=job_id,
         resources=inventory,

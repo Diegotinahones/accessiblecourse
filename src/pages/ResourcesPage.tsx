@@ -13,12 +13,12 @@ import {
   api,
 } from '../lib/api';
 import type {
+  AccessibilityCheckStatus,
+  AccessibilityResource,
+  AccessibilityResponse,
   AppMode,
   CourseStructure,
   CourseStructureNode,
-  HtmlAccessibilityCheckStatus,
-  HtmlAccessibilityResource,
-  HtmlAccessibilityResponse,
   ResourceListItem,
 } from '../lib/types';
 import { getReviewResourceTypeLabel } from '../lib/types';
@@ -63,6 +63,7 @@ interface ResourceFilters {
   onlyFailures: boolean;
   onlyWarnings: boolean;
   onlyHtml: boolean;
+  onlyPdf: boolean;
   hideGlobalUnplaced: boolean;
 }
 
@@ -72,6 +73,7 @@ const EMPTY_FILTERS: ResourceFilters = {
   onlyFailures: false,
   onlyWarnings: false,
   onlyHtml: false,
+  onlyPdf: false,
   hideGlobalUnplaced: false,
 };
 
@@ -187,7 +189,7 @@ function getStatusClasses(tone: BadgeTone) {
   return 'border-rose-200 bg-rose-50 text-danger';
 }
 
-function getAccessibilityStatusLabel(status: HtmlAccessibilityCheckStatus) {
+function getAccessibilityStatusLabel(status: AccessibilityCheckStatus) {
   if (status === 'NO_APLICA') {
     return 'NO APLICA';
   }
@@ -195,7 +197,7 @@ function getAccessibilityStatusLabel(status: HtmlAccessibilityCheckStatus) {
   return status;
 }
 
-function getAccessibilityTone(status: HtmlAccessibilityCheckStatus): BadgeTone {
+function getAccessibilityTone(status: AccessibilityCheckStatus): BadgeTone {
   if (status === 'PASS') {
     return 'ok';
   }
@@ -226,13 +228,27 @@ function getSectionLabel(resource: ResourceListItem) {
 
 function isHtmlResource(
   resource: ResourceListItem,
-  accessibilityResult: HtmlAccessibilityResource | undefined,
+  accessibilityResult: AccessibilityResource | undefined,
 ) {
+  if (accessibilityResult) {
+    return accessibilityResult.kind === 'HTML';
+  }
+
   return (
-    Boolean(accessibilityResult) ||
     Boolean(resource.htmlPath || resource.core.htmlPath) ||
     (resource.type === 'WEB' && resource.contentAvailable)
   );
+}
+
+function isPdfResource(
+  resource: ResourceListItem,
+  accessibilityResult: AccessibilityResource | undefined,
+) {
+  if (accessibilityResult) {
+    return accessibilityResult.kind === 'PDF';
+  }
+
+  return resource.type === 'PDF' || resource.core.type === 'PDF';
 }
 
 function isExternalAccessBlocked(resource: ResourceListItem) {
@@ -510,7 +526,7 @@ function buildResourceTree(resources: ResourceListItem[]): ResourceTreeNode[] {
 function resourceMatchesFilters(
   resource: ResourceListItem,
   filters: ResourceFilters,
-  accessibilityByResourceId: Map<string, HtmlAccessibilityResource>,
+  accessibilityByResourceId: Map<string, AccessibilityResource>,
 ) {
   if (filters.onlyNoAccess && !isNoAccessResource(resource)) {
     return false;
@@ -522,8 +538,14 @@ function resourceMatchesFilters(
 
   const accessibilityResult = accessibilityByResourceId.get(resource.id);
 
-  if (filters.onlyHtml && !isHtmlResource(resource, accessibilityResult)) {
-    return false;
+  if (filters.onlyHtml || filters.onlyPdf) {
+    const matchesRequestedType =
+      (filters.onlyHtml && isHtmlResource(resource, accessibilityResult)) ||
+      (filters.onlyPdf && isPdfResource(resource, accessibilityResult));
+
+    if (!matchesRequestedType) {
+      return false;
+    }
   }
 
   if (
@@ -546,7 +568,7 @@ function resourceMatchesFilters(
 function filterGroup(
   group: ResourceGroup,
   filters: ResourceFilters,
-  accessibilityByResourceId: Map<string, HtmlAccessibilityResource>,
+  accessibilityByResourceId: Map<string, AccessibilityResource>,
 ) {
   if (filters.hideGlobalUnplaced && group.isGlobalUnplaced) {
     return null;
@@ -589,13 +611,17 @@ function Badge({ children, tone }: { children: string; tone: BadgeTone }) {
   return <span className={`badge ${getStatusClasses(tone)}`}>{children}</span>;
 }
 
-function HtmlAccessibilityChecklist({
+function AutomaticAccessibilityChecklist({
   accessibilityResult,
   resource,
 }: {
-  accessibilityResult: HtmlAccessibilityResource | undefined;
+  accessibilityResult: AccessibilityResource | undefined;
   resource: ResourceListItem;
 }) {
+  const isHtml = isHtmlResource(resource, accessibilityResult);
+  const isPdf = isPdfResource(resource, accessibilityResult);
+  const resourceKind = accessibilityResult?.kind ?? (isPdf ? 'PDF' : 'HTML');
+
   if (isExternalAccessBlocked(resource)) {
     return (
       <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-[#8a5a00]">
@@ -605,7 +631,7 @@ function HtmlAccessibilityChecklist({
     );
   }
 
-  if (!isHtmlResource(resource, accessibilityResult)) {
+  if (!isHtml && !isPdf) {
     return (
       <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
         Este tipo de recurso se analizará en una fase posterior.
@@ -616,7 +642,8 @@ function HtmlAccessibilityChecklist({
   if (!accessibilityResult || accessibilityResult.checks.length === 0) {
     return (
       <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
-        No hay resultados automáticos de accesibilidad HTML para este recurso.
+        No hay resultados automáticos de accesibilidad {resourceKind} para este
+        recurso.
       </p>
     );
   }
@@ -624,7 +651,7 @@ function HtmlAccessibilityChecklist({
   return (
     <div className="space-y-3">
       <h5 className="text-sm font-semibold text-ink">
-        Checklist automático HTML
+        Checklist automático {accessibilityResult.kind}
       </h5>
       {accessibilityResult.error ? (
         <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-danger">
@@ -667,7 +694,7 @@ function ResourceItem({
   jobId,
   resource,
 }: {
-  accessibilityResult: HtmlAccessibilityResource | undefined;
+  accessibilityResult: AccessibilityResource | undefined;
   jobId: string | undefined;
   resource: ResourceListItem;
 }) {
@@ -741,7 +768,7 @@ function ResourceItem({
         </div>
       ) : null}
 
-      <HtmlAccessibilityChecklist
+      <AutomaticAccessibilityChecklist
         accessibilityResult={accessibilityResult}
         resource={resource}
       />
@@ -755,7 +782,7 @@ function ResourceTreeList({
   nodes,
   level = 0,
 }: {
-  accessibilityByResourceId: Map<string, HtmlAccessibilityResource>;
+  accessibilityByResourceId: Map<string, AccessibilityResource>;
   jobId: string | undefined;
   nodes: ResourceTreeNode[];
   level?: number;
@@ -805,7 +832,7 @@ export function ResourcesPage() {
   const [resources, setResources] = useState<ResourceListItem[]>([]);
   const [structure, setStructure] = useState<CourseStructure | null>(null);
   const [accessibility, setAccessibility] =
-    useState<HtmlAccessibilityResponse | null>(null);
+    useState<AccessibilityResponse | null>(null);
   const [backendCounts, setBackendCounts] = useState<BackendResourceCounts>({
     globalUnplacedCount: null,
     noAccessCount: null,
@@ -873,7 +900,7 @@ export function ResourcesPage() {
             setAccessibilityError(
               caughtAccessibilityError instanceof Error
                 ? caughtAccessibilityError.message
-                : 'No hemos podido cargar el análisis automático HTML.',
+                : 'No hemos podido cargar el análisis automático de accesibilidad.',
             );
           }
         }
@@ -1003,7 +1030,8 @@ export function ResourcesPage() {
     },
   ].filter((item) => item.show);
   const accessibilitySummary = accessibility?.summary ?? {
-    resourcesAnalyzed: 0,
+    htmlResourcesAnalyzed: 0,
+    pdfResourcesAnalyzed: 0,
     pass: 0,
     warning: 0,
     fail: 0,
@@ -1013,7 +1041,12 @@ export function ResourcesPage() {
   const accessibilitySummaryItems = [
     {
       label: 'Recursos HTML analizados',
-      value: String(accessibilitySummary.resourcesAnalyzed),
+      value: String(accessibilitySummary.htmlResourcesAnalyzed),
+      show: true,
+    },
+    {
+      label: 'Recursos PDF analizados',
+      value: String(accessibilitySummary.pdfResourcesAnalyzed),
       show: true,
     },
     {
@@ -1136,11 +1169,11 @@ export function ResourcesPage() {
             className="rounded-3xl border border-line bg-white p-5 shadow-card sm:p-6"
           >
             <h2 className="text-lg font-semibold text-ink">
-              Resumen de accesibilidad HTML
+              Resumen de accesibilidad automática
             </h2>
             {accessibilityError ? (
               <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-[#8a5a00]">
-                No se pudo cargar el análisis automático HTML:{' '}
+                No se pudo cargar el análisis automático de accesibilidad:{' '}
                 {accessibilityError}
               </p>
             ) : null}
@@ -1238,6 +1271,17 @@ export function ResourcesPage() {
                     type="checkbox"
                   />
                   <span>Mostrar solo recursos HTML</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.onlyPdf}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('onlyPdf', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Mostrar solo recursos PDF</span>
                 </label>
                 <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
                   <input

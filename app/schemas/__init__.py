@@ -39,6 +39,7 @@ class JobPhase(str, Enum):
     INVENTORY = "INVENTORY"
     ACCESS_SCAN = "ACCESS_SCAN"
     HTML_ACCESSIBILITY_SCAN = "HTML_ACCESSIBILITY_SCAN"
+    PDF_ACCESSIBILITY_SCAN = "PDF_ACCESSIBILITY_SCAN"
     DONE = "DONE"
     ERROR = "ERROR"
 
@@ -350,6 +351,7 @@ class AccessibilityResourceRead(StrictModel):
     resourceId: str
     title: str
     type: str
+    analysisType: Literal["HTML", "PDF"] | None = None
     accessStatus: str
     checks: list[AccessibilityCheckRead] = Field(default_factory=list)
 
@@ -359,14 +361,27 @@ class AccessibilityModuleRead(StrictModel):
     resources: list[AccessibilityResourceRead] = Field(default_factory=list)
 
 
-class AccessibilitySummaryRead(StrictModel):
-    htmlResourcesTotal: int = 0
-    htmlResourcesAnalyzed: int = 0
+class AccessibilityTypeSummaryRead(StrictModel):
+    resourcesTotal: int = 0
+    resourcesAnalyzed: int = 0
     passCount: int = 0
     failCount: int = 0
     warningCount: int = 0
     notApplicableCount: int = 0
     errorCount: int = 0
+
+
+class AccessibilitySummaryRead(StrictModel):
+    htmlResourcesTotal: int = 0
+    htmlResourcesAnalyzed: int = 0
+    pdfResourcesTotal: int = 0
+    pdfResourcesAnalyzed: int = 0
+    passCount: int = 0
+    failCount: int = 0
+    warningCount: int = 0
+    notApplicableCount: int = 0
+    errorCount: int = 0
+    byType: dict[str, AccessibilityTypeSummaryRead] = Field(default_factory=dict)
 
 
 class AccessibilityReportRead(StrictModel):
@@ -589,11 +604,38 @@ class ReportHtmlAccessibilitySummaryRead(StrictModel):
     errorCount: int
 
 
+class ReportPdfAccessibilitySummaryRead(ReportHtmlAccessibilitySummaryRead):
+    pass
+
+
+class ReportAutomaticAccessibilitySummaryRead(StrictModel):
+    htmlResourcesDetected: int
+    htmlResourcesAnalyzed: int
+    pdfResourcesDetected: int
+    pdfResourcesAnalyzed: int
+    passCount: int
+    failCount: int
+    warningCount: int
+    notApplicableCount: int
+    errorCount: int
+
+
+class ReportIssueSummaryRead(StrictModel):
+    resourceType: Literal["HTML", "PDF"]
+    checkId: str
+    checkTitle: str
+    status: Literal["FAIL", "WARNING"]
+    resourceCount: int
+    resources: list[str]
+    recommendation: str
+
+
 class ReportKeyIssueRead(StrictModel):
     coursePath: str
     moduleTitle: str | None = None
     resourceId: str
     resourceTitle: str
+    resourceType: Literal["HTML", "PDF"]
     checkId: str
     checkTitle: str
     status: Literal["FAIL", "WARNING"]
@@ -618,6 +660,21 @@ class ReportHtmlResourceRead(StrictModel):
     overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
     summarized: bool = False
     checks: list[ReportHtmlCheckRead]
+
+
+class ReportPdfCheckRead(ReportHtmlCheckRead):
+    pass
+
+
+class ReportPdfResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    coursePath: str
+    moduleTitle: str | None = None
+    accessStatus: str
+    overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
+    summarized: bool = False
+    checks: list[ReportPdfCheckRead]
 
 
 class ReportSkippedResourceRead(StrictModel):
@@ -690,9 +747,13 @@ class JobReportRead(StrictModel):
     meta: ReportMetaRead
     mode: ReportModeRead
     accessSummary: ReportAccessSummaryRead
+    automaticAccessibilitySummary: ReportAutomaticAccessibilitySummaryRead
     htmlAccessibilitySummary: ReportHtmlAccessibilitySummaryRead
+    pdfAccessibilitySummary: ReportPdfAccessibilitySummaryRead
+    issueSummary: list[ReportIssueSummaryRead]
     keyIssues: list[ReportKeyIssueRead]
     htmlResources: list[ReportHtmlResourceRead]
+    pdfResources: list[ReportPdfResourceRead]
     notAutomaticallyAnalyzable: list[ReportSkippedResourceRead]
     summary: ReportSummaryRead
     routes: list[ReportRouteRead]

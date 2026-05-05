@@ -278,6 +278,8 @@ def _infer_resource_type(url: str, *, is_downloadable_candidate: bool) -> Resour
     host = parsed.netloc.lower()
     if suffix == ".pdf":
         return ResourceType.PDF
+    if suffix == ".docx":
+        return ResourceType.DOCX
     if suffix in {".mp4", ".mov", ".webm", ".m4v"} or any(domain in host for domain in ("youtube.com", "youtu.be", "vimeo.com")):
         return ResourceType.VIDEO
     if suffix == ".ipynb":

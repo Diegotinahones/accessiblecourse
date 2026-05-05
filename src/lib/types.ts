@@ -13,6 +13,7 @@ export type JobPhase =
   | 'ACCESS_SCAN'
   | 'HTML_ACCESSIBILITY_SCAN'
   | 'PDF_ACCESSIBILITY_SCAN'
+  | 'DOCX_ACCESSIBILITY_SCAN'
   | 'DONE'
   | 'ERROR';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
@@ -89,6 +90,7 @@ export interface GeneratedReport {
 export type ReviewResourceType =
   | 'WEB'
   | 'PDF'
+  | 'WORD'
   | 'VIDEO'
   | 'NOTEBOOK'
   | 'IMAGE'
@@ -159,6 +161,10 @@ export interface ResourceListItem {
   type: ReviewResourceType;
   origin: string | null;
   analysisCategory?: string;
+  resourceType?: string | null;
+  mimeType?: string | null;
+  filename?: string | null;
+  contentKind?: string | null;
   url: string | null;
   sourceUrl: string | null;
   downloadUrl: string | null;
@@ -243,7 +249,7 @@ export interface ResourceListResponse {
   structure: CourseStructure;
 }
 
-export type AccessibilityResourceKind = 'HTML' | 'PDF';
+export type AccessibilityResourceKind = 'HTML' | 'PDF' | 'WORD' | 'OTHER';
 
 export type AccessibilityCheckStatus =
   | 'PASS'
@@ -271,6 +277,7 @@ export interface AccessibilityResource {
 export interface AccessibilitySummary {
   htmlResourcesAnalyzed: number;
   pdfResourcesAnalyzed: number;
+  wordResourcesAnalyzed: number;
   pass: number;
   warning: number;
   fail: number;
@@ -397,6 +404,8 @@ export function getReviewResourceTypeLabel(type: ReviewResourceType): string {
       return 'Web';
     case 'PDF':
       return 'PDF';
+    case 'WORD':
+      return 'Word';
     case 'VIDEO':
       return 'Vídeo';
     case 'NOTEBOOK':

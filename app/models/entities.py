@@ -19,6 +19,7 @@ def generate_id() -> str:
 class ResourceType(str, Enum):
     WEB = "WEB"
     PDF = "PDF"
+    DOCX = "DOCX"
     VIDEO = "VIDEO"
     NOTEBOOK = "NOTEBOOK"
     IMAGE = "IMAGE"

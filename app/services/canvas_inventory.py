@@ -845,6 +845,8 @@ def _infer_resource_type(
         return ResourceType.VIDEO
     if normalized_content_type == "application/pdf":
         return ResourceType.PDF
+    if normalized_content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return ResourceType.DOCX
     if normalized_content_type.startswith("image/"):
         return ResourceType.IMAGE
 
@@ -860,6 +862,8 @@ def _infer_resource_type(
         return ResourceType.WEB
     if suffix == ".pdf":
         return ResourceType.PDF
+    if suffix == ".docx":
+        return ResourceType.DOCX
     if suffix in {".mp4", ".mov", ".webm", ".m4v"}:
         return ResourceType.VIDEO
     if suffix == ".ipynb":

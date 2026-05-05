@@ -15,6 +15,7 @@ import {
 import type {
   AccessibilityCheckStatus,
   AccessibilityResource,
+  AccessibilityResourceKind,
   AccessibilityResponse,
   AppMode,
   CourseStructure,
@@ -64,6 +65,7 @@ interface ResourceFilters {
   onlyWarnings: boolean;
   onlyHtml: boolean;
   onlyPdf: boolean;
+  onlyWord: boolean;
   hideGlobalUnplaced: boolean;
 }
 
@@ -74,6 +76,7 @@ const EMPTY_FILTERS: ResourceFilters = {
   onlyWarnings: false,
   onlyHtml: false,
   onlyPdf: false,
+  onlyWord: false,
   hideGlobalUnplaced: false,
 };
 
@@ -226,29 +229,118 @@ function getSectionLabel(resource: ResourceListItem) {
   return normalizeSectionName(sectionName);
 }
 
+function getKindFromValue(
+  value: string | null | undefined,
+): AccessibilityResourceKind | null {
+  const normalizedValue = value
+    ?.trim()
+    .toUpperCase()
+    .replace(/\s+/g, '_')
+    .replace(/-/g, '_');
+
+  if (!normalizedValue) {
+    return null;
+  }
+
+  if (
+    normalizedValue === 'PDF' ||
+    normalizedValue.includes('APPLICATION/PDF') ||
+    normalizedValue.endsWith('.PDF')
+  ) {
+    return 'PDF';
+  }
+
+  if (
+    normalizedValue === 'DOCX' ||
+    normalizedValue === 'WORD' ||
+    normalizedValue.includes('WORDPROCESSINGML') ||
+    normalizedValue.includes('MSWORD') ||
+    normalizedValue.endsWith('.DOCX')
+  ) {
+    return 'WORD';
+  }
+
+  if (
+    normalizedValue === 'WEB' ||
+    normalizedValue === 'HTML' ||
+    normalizedValue.includes('TEXT/HTML') ||
+    normalizedValue.endsWith('.HTML') ||
+    normalizedValue.endsWith('.HTM')
+  ) {
+    return 'HTML';
+  }
+
+  return null;
+}
+
+function getResourceAccessibilityKind(
+  resource: ResourceListItem,
+  accessibilityResult: AccessibilityResource | undefined,
+): AccessibilityResourceKind {
+  if (accessibilityResult?.kind && accessibilityResult.kind !== 'OTHER') {
+    return accessibilityResult.kind;
+  }
+
+  const detectedKind = [
+    resource.type,
+    resource.core.type,
+    resource.resourceType,
+    resource.mimeType,
+    resource.filename,
+    resource.contentKind,
+    resource.analysisCategory,
+    resource.htmlPath,
+    resource.core.htmlPath,
+    resource.path,
+    resource.filePath,
+    resource.localPath,
+    resource.core.localPath,
+    resource.downloadUrl,
+    resource.sourceUrl,
+    resource.core.sourceUrl,
+    resource.url,
+  ]
+    .map(getKindFromValue)
+    .find((kind): kind is AccessibilityResourceKind => Boolean(kind));
+
+  return detectedKind ?? accessibilityResult?.kind ?? 'OTHER';
+}
+
 function isHtmlResource(
   resource: ResourceListItem,
   accessibilityResult: AccessibilityResource | undefined,
 ) {
-  if (accessibilityResult) {
-    return accessibilityResult.kind === 'HTML';
-  }
-
-  return (
-    Boolean(resource.htmlPath || resource.core.htmlPath) ||
-    (resource.type === 'WEB' && resource.contentAvailable)
-  );
+  return getResourceAccessibilityKind(resource, accessibilityResult) === 'HTML';
 }
 
 function isPdfResource(
   resource: ResourceListItem,
   accessibilityResult: AccessibilityResource | undefined,
 ) {
-  if (accessibilityResult) {
-    return accessibilityResult.kind === 'PDF';
+  return getResourceAccessibilityKind(resource, accessibilityResult) === 'PDF';
+}
+
+function isWordResource(
+  resource: ResourceListItem,
+  accessibilityResult: AccessibilityResource | undefined,
+) {
+  return getResourceAccessibilityKind(resource, accessibilityResult) === 'WORD';
+}
+
+function getAccessibilityChecklistTitle(kind: AccessibilityResourceKind) {
+  if (kind === 'HTML') {
+    return 'Checklist automático HTML';
   }
 
-  return resource.type === 'PDF' || resource.core.type === 'PDF';
+  if (kind === 'PDF') {
+    return 'Checklist automático PDF';
+  }
+
+  if (kind === 'WORD') {
+    return 'Checklist automático Word';
+  }
+
+  return 'Checklist automático de accesibilidad';
 }
 
 function isExternalAccessBlocked(resource: ResourceListItem) {
@@ -538,10 +630,11 @@ function resourceMatchesFilters(
 
   const accessibilityResult = accessibilityByResourceId.get(resource.id);
 
-  if (filters.onlyHtml || filters.onlyPdf) {
+  if (filters.onlyHtml || filters.onlyPdf || filters.onlyWord) {
     const matchesRequestedType =
       (filters.onlyHtml && isHtmlResource(resource, accessibilityResult)) ||
-      (filters.onlyPdf && isPdfResource(resource, accessibilityResult));
+      (filters.onlyPdf && isPdfResource(resource, accessibilityResult)) ||
+      (filters.onlyWord && isWordResource(resource, accessibilityResult));
 
     if (!matchesRequestedType) {
       return false;
@@ -618,9 +711,14 @@ function AutomaticAccessibilityChecklist({
   accessibilityResult: AccessibilityResource | undefined;
   resource: ResourceListItem;
 }) {
-  const isHtml = isHtmlResource(resource, accessibilityResult);
-  const isPdf = isPdfResource(resource, accessibilityResult);
-  const resourceKind = accessibilityResult?.kind ?? (isPdf ? 'PDF' : 'HTML');
+  const resourceKind = getResourceAccessibilityKind(
+    resource,
+    accessibilityResult,
+  );
+  const isCoveredResource =
+    resourceKind === 'HTML' ||
+    resourceKind === 'PDF' ||
+    resourceKind === 'WORD';
 
   if (isExternalAccessBlocked(resource)) {
     return (
@@ -631,7 +729,7 @@ function AutomaticAccessibilityChecklist({
     );
   }
 
-  if (!isHtml && !isPdf) {
+  if (!isCoveredResource && !accessibilityResult?.checks.length) {
     return (
       <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
         Este tipo de recurso se analizará en una fase posterior.
@@ -651,7 +749,7 @@ function AutomaticAccessibilityChecklist({
   return (
     <div className="space-y-3">
       <h5 className="text-sm font-semibold text-ink">
-        Checklist automático {accessibilityResult.kind}
+        {getAccessibilityChecklistTitle(resourceKind)}
       </h5>
       {accessibilityResult.error ? (
         <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-danger">
@@ -1032,6 +1130,7 @@ export function ResourcesPage() {
   const accessibilitySummary = accessibility?.summary ?? {
     htmlResourcesAnalyzed: 0,
     pdfResourcesAnalyzed: 0,
+    wordResourcesAnalyzed: 0,
     pass: 0,
     warning: 0,
     fail: 0,
@@ -1047,6 +1146,11 @@ export function ResourcesPage() {
     {
       label: 'Recursos PDF analizados',
       value: String(accessibilitySummary.pdfResourcesAnalyzed),
+      show: true,
+    },
+    {
+      label: 'Recursos Word analizados',
+      value: String(accessibilitySummary.wordResourcesAnalyzed),
       show: true,
     },
     {
@@ -1282,6 +1386,17 @@ export function ResourcesPage() {
                     type="checkbox"
                   />
                   <span>Mostrar solo recursos PDF</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.onlyWord}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('onlyWord', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Mostrar solo recursos Word</span>
                 </label>
                 <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
                   <input

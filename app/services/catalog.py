@@ -6,6 +6,7 @@ from pathlib import Path
 
 class ResourceType(str, Enum):
     PDF = "PDF"
+    DOCX = "DOCX"
     WEB = "Web"
     VIDEO = "Video"
     NOTEBOOK = "Notebook"
@@ -223,6 +224,8 @@ def infer_type(source: str | None) -> ResourceType:
     extension = Path(source).suffix.lower()
     if extension == ".pdf":
         return ResourceType.PDF
+    if extension == ".docx":
+        return ResourceType.DOCX
     if extension in {".html", ".htm", ".xhtml"}:
         return ResourceType.WEB
     if extension in {".mp4", ".mov", ".webm", ".m4v"}:

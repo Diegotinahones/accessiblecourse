@@ -50,6 +50,7 @@ interface RawJobStatusResponse {
     | 'ACCESS_SCAN'
     | 'HTML_ACCESSIBILITY_SCAN'
     | 'PDF_ACCESSIBILITY_SCAN'
+    | 'DOCX_ACCESSIBILITY_SCAN'
     | 'DONE'
     | 'ERROR';
   progress: number;
@@ -213,11 +214,30 @@ function normalizeReviewType(
 ): ReviewResourceType {
   const value = (type ?? 'OTHER').toUpperCase();
 
-  if (value === 'WEB') {
+  if (
+    value === 'WEB' ||
+    value === 'HTML' ||
+    value.includes('TEXT/HTML') ||
+    value.endsWith('.HTML') ||
+    value.endsWith('.HTM')
+  ) {
     return 'WEB';
   }
-  if (value === 'PDF') {
+  if (
+    value === 'PDF' ||
+    value.includes('APPLICATION/PDF') ||
+    value.endsWith('.PDF')
+  ) {
     return 'PDF';
+  }
+  if (
+    value === 'DOCX' ||
+    value === 'WORD' ||
+    value.includes('WORDPROCESSINGML') ||
+    value.includes('MSWORD') ||
+    value.endsWith('.DOCX')
+  ) {
+    return 'WORD';
   }
   if (value === 'VIDEO') {
     return 'VIDEO';
@@ -371,16 +391,32 @@ function normalizeAccessibilityKind(
   }
 
   if (
+    normalizedValue === 'PDF' ||
+    normalizedValue.startsWith('PDF_') ||
     normalizedValue.includes('PDF') ||
+    normalizedValue.endsWith('.PDF') ||
     normalizedValue.includes('PORTABLE_DOCUMENT')
   ) {
     return 'PDF';
   }
 
   if (
+    normalizedValue === 'WORD' ||
+    normalizedValue.startsWith('WORD_') ||
+    normalizedValue.startsWith('DOCX_') ||
+    normalizedValue.includes('DOCX') ||
+    normalizedValue.includes('WORDPROCESSINGML') ||
+    normalizedValue.includes('MSWORD') ||
+    normalizedValue.endsWith('.DOCX')
+  ) {
+    return 'WORD';
+  }
+
+  if (
     normalizedValue.includes('HTML') ||
     normalizedValue.includes('WEB') ||
-    normalizedValue.includes('PAGE')
+    normalizedValue.includes('PAGE') ||
+    normalizedValue.endsWith('.HTM')
   ) {
     return 'HTML';
   }
@@ -576,6 +612,21 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     item.accessStatus ?? item.access_status,
     item.status,
   );
+  const resourceType =
+    readString(item.resourceType) ?? readString(item.resource_type) ?? null;
+  const mimeType =
+    readString(item.mimeType) ??
+    readString(item.mime_type) ??
+    readString(item.contentType) ??
+    readString(item.content_type) ??
+    null;
+  const filename =
+    readString(item.filename) ??
+    readString(item.fileName) ??
+    readString(item.file_name) ??
+    null;
+  const contentKind =
+    readString(item.contentKind) ?? readString(item.content_kind) ?? null;
   const sourceUrl =
     readString(item.sourceUrl) ??
     readString(item.source_url) ??
@@ -655,7 +706,14 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     'resource-unknown';
   const title =
     readString(item.title) ?? readString(item.name) ?? 'Recurso sin título';
-  const type = normalizeReviewType(readString(item.type));
+  const type = normalizeReviewType(
+    readString(item.type) ??
+      resourceType ??
+      contentKind ??
+      mimeType ??
+      filename ??
+      filePath,
+  );
   const status = normalizeHealthStatus(readString(item.status));
   const reviewState = normalizeReviewState(
     readString(item.reviewState) ?? readString(item.review_state),
@@ -685,6 +743,10 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     jobId: readString(item.jobId) ?? readString(item.job_id) ?? '',
     title,
     type,
+    resourceType,
+    mimeType,
+    filename,
+    contentKind,
     status,
     reviewState,
     origin: readString(item.origin),
@@ -969,7 +1031,11 @@ function normalizeAccessibilityCheck(
       readString(item.name) ??
       `Check ${index + 1}`,
     status: normalizeAccessibilityStatus(
-      item.status ?? item.result ?? item.outcome,
+      item.status ??
+        item.result ??
+        item.outcome ??
+        item.accessStatus ??
+        item.access_status,
     ),
     evidence:
       readString(item.evidence) ??
@@ -986,7 +1052,7 @@ function normalizeAccessibilityCheck(
 
 function normalizeAccessibilityResource(
   value: unknown,
-  fallbackKind: AccessibilityResourceKind = 'HTML',
+  fallbackKind: AccessibilityResourceKind = 'OTHER',
 ): AccessibilityResource | null {
   const item = readRecord(value);
 
@@ -1006,11 +1072,15 @@ function normalizeAccessibilityResource(
   const rawChecks =
     readArray(item.checks).length > 0
       ? readArray(item.checks)
-      : readArray(item.checklist).length > 0
-        ? readArray(item.checklist)
-        : readArray(item.items).length > 0
-          ? readArray(item.items)
-          : readArray(item.results);
+      : readArray(item.accessibilityChecks).length > 0
+        ? readArray(item.accessibilityChecks)
+        : readArray(item.accessibility_checks).length > 0
+          ? readArray(item.accessibility_checks)
+          : readArray(item.checklist).length > 0
+            ? readArray(item.checklist)
+            : readArray(item.items).length > 0
+              ? readArray(item.items)
+              : readArray(item.results);
 
   return {
     resourceId,
@@ -1025,6 +1095,11 @@ function normalizeAccessibilityResource(
         item.resource_type ??
         item.mimeType ??
         item.mime_type ??
+        item.filename ??
+        item.fileName ??
+        item.file_name ??
+        item.contentKind ??
+        item.content_kind ??
         item.type,
       fallbackKind,
     ),
@@ -1084,6 +1159,9 @@ function deriveAccessibilitySummary(
     pdfResourcesAnalyzed: analyzedResources.filter(
       (resource) => resource.kind === 'PDF',
     ).length,
+    wordResourcesAnalyzed: analyzedResources.filter(
+      (resource) => resource.kind === 'WORD',
+    ).length,
     pass: allChecks.filter((check) => check.status === 'PASS').length,
     warning: allChecks.filter((check) => check.status === 'WARNING').length,
     fail: allChecks.filter((check) => check.status === 'FAIL').length,
@@ -1107,15 +1185,29 @@ function normalizeAccessibilitySummary(
       readNumber(summary.html_resources_analyzed) ??
       readNumber(summary.resourcesHtmlAnalyzed) ??
       readNumber(summary.resources_html_analyzed) ??
-      readNumber(summary.resourcesAnalyzed) ??
-      readNumber(summary.resources_analyzed) ??
+      readNumber(readRecord(summary.html).resourcesAnalyzed) ??
+      readNumber(readRecord(summary.html).resources_analyzed) ??
       fallbackSummary.htmlResourcesAnalyzed,
     pdfResourcesAnalyzed:
       readNumber(summary.pdfResourcesAnalyzed) ??
       readNumber(summary.pdf_resources_analyzed) ??
       readNumber(summary.resourcesPdfAnalyzed) ??
       readNumber(summary.resources_pdf_analyzed) ??
+      readNumber(readRecord(summary.pdf).resourcesAnalyzed) ??
+      readNumber(readRecord(summary.pdf).resources_analyzed) ??
       fallbackSummary.pdfResourcesAnalyzed,
+    wordResourcesAnalyzed:
+      readNumber(summary.wordResourcesAnalyzed) ??
+      readNumber(summary.word_resources_analyzed) ??
+      readNumber(summary.docxResourcesAnalyzed) ??
+      readNumber(summary.docx_resources_analyzed) ??
+      readNumber(summary.resourcesWordAnalyzed) ??
+      readNumber(summary.resources_word_analyzed) ??
+      readNumber(readRecord(summary.word).resourcesAnalyzed) ??
+      readNumber(readRecord(summary.word).resources_analyzed) ??
+      readNumber(readRecord(summary.docx).resourcesAnalyzed) ??
+      readNumber(readRecord(summary.docx).resources_analyzed) ??
+      fallbackSummary.wordResourcesAnalyzed,
     pass:
       readNumber(summary.pass) ??
       readNumber(summary.passed) ??
@@ -1157,6 +1249,7 @@ function emptyAccessibilityResponse(jobId: string): AccessibilityResponse {
     summary: {
       htmlResourcesAnalyzed: 0,
       pdfResourcesAnalyzed: 0,
+      wordResourcesAnalyzed: 0,
       pass: 0,
       warning: 0,
       fail: 0,
@@ -1184,9 +1277,9 @@ function normalizeAccessibilityResponse(
     fallbackKind: AccessibilityResourceKind;
     resources: unknown[];
   }> = [
-    { fallbackKind: 'HTML', resources: readArray(root.resources) },
-    { fallbackKind: 'HTML', resources: readArray(root.results) },
-    { fallbackKind: 'HTML', resources: readArray(root.items) },
+    { fallbackKind: 'OTHER', resources: readArray(root.resources) },
+    { fallbackKind: 'OTHER', resources: readArray(root.results) },
+    { fallbackKind: 'OTHER', resources: readArray(root.items) },
     { fallbackKind: 'HTML', resources: readArray(root.html) },
     { fallbackKind: 'HTML', resources: readArray(root.htmlResources) },
     { fallbackKind: 'HTML', resources: readArray(root.html_resources) },
@@ -1225,6 +1318,48 @@ function normalizeAccessibilityResponse(
     {
       fallbackKind: 'PDF',
       resources: readArray(readRecord(root.pdf_accessibility).resources),
+    },
+    { fallbackKind: 'WORD', resources: readArray(root.word) },
+    { fallbackKind: 'WORD', resources: readArray(root.docx) },
+    { fallbackKind: 'WORD', resources: readArray(root.wordResources) },
+    { fallbackKind: 'WORD', resources: readArray(root.word_resources) },
+    { fallbackKind: 'WORD', resources: readArray(root.docxResources) },
+    { fallbackKind: 'WORD', resources: readArray(root.docx_resources) },
+    { fallbackKind: 'WORD', resources: readArray(root.wordAccessibility) },
+    { fallbackKind: 'WORD', resources: readArray(root.word_accessibility) },
+    { fallbackKind: 'WORD', resources: readArray(root.docxAccessibility) },
+    { fallbackKind: 'WORD', resources: readArray(root.docx_accessibility) },
+    {
+      fallbackKind: 'WORD',
+      resources: readArray(readRecord(root.word).resources),
+    },
+    {
+      fallbackKind: 'WORD',
+      resources: readArray(readRecord(root.word).results),
+    },
+    {
+      fallbackKind: 'WORD',
+      resources: readArray(readRecord(root.docx).resources),
+    },
+    {
+      fallbackKind: 'WORD',
+      resources: readArray(readRecord(root.docx).results),
+    },
+    {
+      fallbackKind: 'WORD',
+      resources: readArray(readRecord(root.wordAccessibility).resources),
+    },
+    {
+      fallbackKind: 'WORD',
+      resources: readArray(readRecord(root.word_accessibility).resources),
+    },
+    {
+      fallbackKind: 'WORD',
+      resources: readArray(readRecord(root.docxAccessibility).resources),
+    },
+    {
+      fallbackKind: 'WORD',
+      resources: readArray(readRecord(root.docx_accessibility).resources),
     },
   ];
   const resources = mergeAccessibilityResources(
@@ -1424,9 +1559,9 @@ export function getReportDownloadUrl(path: string): string {
 
 export function getDirectReportDownloadUrls(jobId: string) {
   return {
-    pdf: resolveApiUrl(`/reports/${jobId}/download/pdf`),
-    docx: resolveApiUrl(`/reports/${jobId}/download/docx`),
-    json: resolveApiUrl(`/reports/${jobId}/download/json`),
+    pdf: resolveApiUrl(`/jobs/${jobId}/report/download?format=pdf`),
+    docx: resolveApiUrl(`/jobs/${jobId}/report/download?format=docx`),
+    json: resolveApiUrl(`/jobs/${jobId}/report/download?format=json`),
   };
 }
 

@@ -178,6 +178,8 @@ def classify_resource(reference: str | None, *, is_external: bool = False) -> st
         return "VIDEO"
     if suffix == ".pdf":
         return "PDF"
+    if suffix == ".docx":
+        return "DOCX"
     if suffix in {".html", ".htm"}:
         return "WEB"
     if suffix == ".ipynb":
@@ -458,7 +460,10 @@ class IMSCCParser:
                     "id": resource.identifier,
                     "identifier": resource.identifier,
                     "title": title,
-                    "type": classify_resource(url if origin == "external" else path, is_external=origin == "external"),
+                    "type": classify_resource(
+                        url if origin == "EXTERNAL_URL" else path,
+                        is_external=origin == "EXTERNAL_URL",
+                    ),
                     "origin": origin,
                     "url": url,
                     "sourceUrl": url,

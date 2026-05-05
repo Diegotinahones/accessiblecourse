@@ -43,6 +43,7 @@ from app.services.course_structure import (
     filter_course_structure,
     load_course_structure,
 )
+from app.services.docx_accessibility import ensure_docx_accessibility_report
 from app.services.html_accessibility import ensure_accessibility_report
 from app.services.jobs import (
     create_job_record,
@@ -142,8 +143,10 @@ def _accessibility_resource_payload(resource, analysis_type: str) -> dict:
 
 def _resource_analysis_type(resource) -> str:
     analysis_type = getattr(resource, "analysisType", None)
-    if analysis_type in {"HTML", "PDF"}:
+    if analysis_type in {"HTML", "PDF", "DOCX"}:
         return analysis_type
+    if getattr(resource, "type", None) == "DOCX":
+        return "DOCX"
     return "PDF" if getattr(resource, "type", None) == "PDF" else "HTML"
 
 
@@ -720,6 +723,14 @@ def get_job_accessibility(
         course_id=course_id,
     )
     report = ensure_pdf_accessibility_report(
+        settings=settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    report = ensure_docx_accessibility_report(
         settings=settings,
         job_id=job_id,
         resources=inventory,

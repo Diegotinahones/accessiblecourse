@@ -37,6 +37,7 @@ from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJo
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
 from app.services.course_structure import build_fallback_course_structure, build_section_key, section_key_from_path
+from app.services.docx_accessibility import run_docx_accessibility_scan
 from app.services.html_accessibility import run_html_accessibility_scan
 from app.services.imscc import build_resources_from_extracted
 from app.services.imscc_parser import HTML_RESOURCE_EXTENSIONS, IMSCCParser, ParserError
@@ -67,6 +68,7 @@ TECHNICAL_DIR_MARKERS = {"__macosx", "lti_resource_links"}
 
 RESOURCE_TYPE_TO_REVIEW_TYPE = {
     "PDF": "PDF",
+    "DOCX": "DOCX",
     "Web": "WEB",
     "Video": "VIDEO",
     "Notebook": "NOTEBOOK",
@@ -82,6 +84,7 @@ RESOURCE_STATUS_TO_REVIEW_STATUS = {
 REVIEW_TYPE_TO_LEGACY_TYPE = {
     "WEB": "Web",
     "PDF": "PDF",
+    "DOCX": "DOCX",
     "VIDEO": "Video",
     "NOTEBOOK": "Notebook",
     "IMAGE": "Other",
@@ -1549,6 +1552,29 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 progress=99,
                 details=pdf_accessibility_report.summary.model_dump(mode="json"),
             )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=5,
+                progress=99,
+                message="Procesando accesibilidad de los documentos Word",
+                phase=JobPhase.DOCX_ACCESSIBILITY_SCAN,
+            )
+            docx_accessibility_report = run_docx_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="docx_accessibility_scan_finished",
+                message="Accesibilidad Word procesada.",
+                progress=99,
+                details=docx_accessibility_report.summary.model_dump(mode="json"),
+            )
             session.commit()
 
             _update_job(
@@ -1843,6 +1869,32 @@ def process_online_job(
                 progress=99,
                 details=pdf_accessibility_report.summary.model_dump(mode="json"),
             )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=6,
+                progress=99,
+                message="Procesando accesibilidad de los documentos Word",
+                phase=JobPhase.DOCX_ACCESSIBILITY_SCAN,
+            )
+            docx_accessibility_report = run_docx_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+                canvas_client=client,
+                canvas_credentials=context.credentials,
+                course_id=course.id,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="docx_accessibility_scan_finished",
+                message="Accesibilidad Word procesada.",
+                progress=99,
+                details=docx_accessibility_report.summary.model_dump(mode="json"),
+            )
             session.commit()
 
             _update_job(
@@ -2100,6 +2152,33 @@ def rerun_access_analysis(
                 message="Accesibilidad PDF procesada.",
                 progress=99,
                 details=pdf_accessibility_report.summary.model_dump(mode="json"),
+            )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=job.total_steps,
+                progress=99,
+                message="Procesando accesibilidad de los documentos Word",
+                phase=JobPhase.DOCX_ACCESSIBILITY_SCAN,
+                event="docx_accessibility_retry_started",
+            )
+            docx_accessibility_report = run_docx_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+                canvas_client=html_canvas_client,
+                canvas_credentials=html_canvas_credentials,
+                course_id=html_course_id,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="docx_accessibility_scan_finished",
+                message="Accesibilidad Word procesada.",
+                progress=99,
+                details=docx_accessibility_report.summary.model_dump(mode="json"),
             )
             session.commit()
             _update_job(

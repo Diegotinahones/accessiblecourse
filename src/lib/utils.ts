@@ -35,7 +35,11 @@ export function getDecisionLabel(decision: ChecklistDecision) {
 
 export function buildStepMessage(progress: number) {
   if (progress >= 98) {
-    return 'Generando diagnóstico';
+    return 'Análisis completado';
+  }
+
+  if (progress >= 95) {
+    return 'Procesando accesibilidad de los documentos Word';
   }
 
   if (progress >= 90) {

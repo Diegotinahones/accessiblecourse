@@ -15,7 +15,7 @@ from app.models.entities import Resource
 from app.services.canvas_client import CanvasClient, CanvasCredentials
 from app.services.storage import get_job_dir, resolve_job_resource_path
 
-CoreResourceType = Literal["WEB", "PDF", "VIDEO", "IMAGE", "NOTEBOOK", "FILE", "OTHER"]
+CoreResourceType = Literal["WEB", "PDF", "DOCX", "VIDEO", "IMAGE", "NOTEBOOK", "FILE", "OTHER"]
 CoreResourceOrigin = Literal[
     "ONLINE_CANVAS",
     "OFFLINE_IMSCC",
@@ -63,7 +63,7 @@ RESOURCE_CORE_FIELDS = {
     "contentAvailable",
 }
 
-VALID_RESOURCE_TYPES: set[str] = {"WEB", "PDF", "VIDEO", "IMAGE", "NOTEBOOK", "FILE", "OTHER"}
+VALID_RESOURCE_TYPES: set[str] = {"WEB", "PDF", "DOCX", "VIDEO", "IMAGE", "NOTEBOOK", "FILE", "OTHER"}
 VALID_ACCESS_STATUSES: set[str] = {"OK", "NO_ACCEDE", "REQUIERE_SSO", "REQUIERE_INTERACCION", "NO_ANALIZABLE"}
 VALID_REASON_CODES: set[str] = {
     "OK",
@@ -197,6 +197,11 @@ def normalize_resource(resource: Any, inventory_item: Any | None = None) -> Reso
     source_url = _string(source, "sourceUrl", "source_url", "url") or _string(fallback, "sourceUrl", "source_url", "url")
     final_url = _string(source, "finalUrl", "final_url") or _string(fallback, "finalUrl", "final_url")
     html_path = _string(source, "htmlPath", "html_path") or _string(fallback, "htmlPath", "html_path")
+    content_type = (
+        _string(source, "mimeType", "mime_type", "contentType", "content_type")
+        or _string(details, "mimeType", "mime_type", "contentType", "content_type")
+        or _string(fallback, "mimeType", "mime_type", "contentType", "content_type")
+    )
     local_path = _string(source, "localPath", "filePath", "file_path", "path") or _string(
         fallback,
         "localPath",
@@ -229,7 +234,14 @@ def normalize_resource(resource: Any, inventory_item: Any | None = None) -> Reso
     return ResourceCore(
         id=_string(source, "id") or _string(fallback, "id") or "",
         title=_string(source, "title") or _string(fallback, "title") or "Recurso sin titulo",
-        type=_normalize_resource_type(source, fallback, local_path=local_path, source_url=source_url, canvas_type=canvas_type),
+        type=_normalize_resource_type(
+            source,
+            fallback,
+            local_path=local_path,
+            source_url=source_url,
+            canvas_type=canvas_type,
+            content_type=content_type,
+        ),
         origin=origin,
         modulePath=_normalize_module_path(source, fallback),
         sectionTitle=_string(source, "sectionTitle", "section_title", "moduleTitle", "module_title")
@@ -257,7 +269,14 @@ def normalize_resource(resource: Any, inventory_item: Any | None = None) -> Reso
             html_path=html_path,
             source_url=source_url,
             canvas_type=canvas_type,
-            resource_type=_normalize_resource_type(source, fallback, local_path=local_path, source_url=source_url, canvas_type=canvas_type),
+            resource_type=_normalize_resource_type(
+                source,
+                fallback,
+                local_path=local_path,
+                source_url=source_url,
+                canvas_type=canvas_type,
+                content_type=content_type,
+            ),
         ),
     )
 
@@ -673,12 +692,18 @@ def _normalize_resource_type(
     local_path: str | None,
     source_url: str | None,
     canvas_type: str | None,
+    content_type: str | None,
 ) -> CoreResourceType:
     raw_type = (_string(source, "type") or _string(fallback, "type") or "OTHER").upper()
+    normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return "DOCX"
     reference = source_url or local_path or ""
     suffix = Path(urlparse(reference).path).suffix.lower()
     if suffix == ".pdf":
         return "PDF"
+    if suffix == ".docx":
+        return "DOCX"
     if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
         return "IMAGE"
     if suffix in {".mp4", ".mov", ".m4v", ".webm", ".avi"}:
@@ -888,7 +913,7 @@ def _content_available(
         return True
     if canvas_type == "File" and (downloadable or source_url):
         return True
-    return bool(downloadable and resource_type in {"PDF", "FILE", "IMAGE", "VIDEO", "NOTEBOOK"})
+    return bool(downloadable and resource_type in {"PDF", "DOCX", "FILE", "IMAGE", "VIDEO", "NOTEBOOK"})
 
 
 def _contains_text(source: Any, fallback: Any, needle: str) -> bool:

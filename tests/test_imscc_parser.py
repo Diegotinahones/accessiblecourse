@@ -187,7 +187,7 @@ class IMSCCParserTests(unittest.TestCase):
         self.assertEqual(classify_resource("slides/week1.ipynb"), "NOTEBOOK")
         self.assertEqual(classify_resource("docs/manual.pdf"), "PDF")
         self.assertEqual(classify_resource("media/diagram.svg"), "IMAGE")
-        self.assertEqual(classify_resource("files/archive.docx"), "OTHER")
+        self.assertEqual(classify_resource("files/archive.docx"), "DOCX")
 
     def test_marks_missing_internal_file_as_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

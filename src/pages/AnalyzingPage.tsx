@@ -11,42 +11,90 @@ import {
   rememberAppMode,
 } from '../lib/utils';
 
-function getAnalysisMessage(status: JobStatus | null) {
+function getAnalysisCopy(status: JobStatus | null) {
   const progress = status?.progress ?? 0;
 
   if (status?.phase === 'HTML_ACCESSIBILITY_SCAN') {
-    return 'Procesando accesibilidad de los recursos HTML';
+    return {
+      context: 'Analizando la accesibilidad de las páginas HTML.',
+      title: 'Procesando accesibilidad de los recursos HTML',
+    };
   }
 
   if (status?.phase === 'PDF_ACCESSIBILITY_SCAN') {
-    return 'Procesando accesibilidad de los recursos PDF';
+    return {
+      context:
+        'Analizando la accesibilidad de los documentos PDF. La fase HTML ya se ha completado.',
+      title: 'Procesando accesibilidad de los recursos PDF',
+    };
+  }
+
+  if (status?.phase === 'DOCX_ACCESSIBILITY_SCAN') {
+    return {
+      context:
+        'Analizando la accesibilidad de los documentos Word. Las fases HTML y PDF ya se han completado.',
+      title: 'Procesando accesibilidad de los documentos Word',
+    };
+  }
+
+  if (status?.phase === 'DONE') {
+    return {
+      context: null,
+      title: 'Análisis completado',
+    };
   }
 
   if (progress >= 98) {
-    return 'Generando diagnóstico';
+    return {
+      context: null,
+      title: 'Análisis completado',
+    };
+  }
+
+  if (progress >= 95) {
+    return {
+      context:
+        'Analizando la accesibilidad de los documentos Word. Las fases HTML y PDF ya se han completado.',
+      title: 'Procesando accesibilidad de los documentos Word',
+    };
   }
 
   if (progress >= 90) {
-    return 'Procesando accesibilidad de los recursos PDF';
+    return {
+      context:
+        'Analizando la accesibilidad de los documentos PDF. La fase HTML ya se ha completado.',
+      title: 'Procesando accesibilidad de los recursos PDF',
+    };
   }
 
   if (progress >= 85) {
-    return 'Procesando accesibilidad de los recursos HTML';
+    return {
+      context: 'Analizando la accesibilidad de las páginas HTML.',
+      title: 'Procesando accesibilidad de los recursos HTML',
+    };
   }
 
   if (progress >= 75) {
-    return 'Buscando descargables';
+    return { context: null, title: 'Buscando descargables' };
   }
 
   if (progress >= 50) {
-    return 'Comprobando acceso';
+    return { context: null, title: 'Comprobando acceso' };
   }
 
   if (progress >= 25) {
-    return 'Detectando recursos';
+    return { context: null, title: 'Detectando recursos' };
   }
 
-  return 'Leyendo estructura del curso';
+  return { context: null, title: 'Leyendo estructura del curso' };
+}
+
+function isAccessibilityScanPhase(status: JobStatus | null) {
+  return (
+    status?.phase === 'HTML_ACCESSIBILITY_SCAN' ||
+    status?.phase === 'PDF_ACCESSIBILITY_SCAN' ||
+    status?.phase === 'DOCX_ACCESSIBILITY_SCAN'
+  );
 }
 
 export function AnalyzingPage() {
@@ -125,10 +173,13 @@ export function AnalyzingPage() {
   }, [appMode, jobId, navigate]);
 
   const progress = jobStatus?.progress ?? 0;
-  const statusMessage = getAnalysisMessage(jobStatus);
+  const statusCopy = getAnalysisCopy(jobStatus);
   const currentStep = jobStatus?.currentStep ?? 1;
   const totalSteps = jobStatus?.totalSteps ?? 1;
-  const liveMessage = `${statusMessage}. ${progress}% completado.`;
+  const liveMessage = `${statusCopy.title}. ${progress}% completado.`;
+  const backendMessage = isAccessibilityScanPhase(jobStatus)
+    ? null
+    : jobStatus?.message;
 
   return (
     <LayoutSimple
@@ -155,13 +206,16 @@ export function AnalyzingPage() {
             <p aria-live="polite" className="text-base font-medium text-ink">
               {liveMessage}
             </p>
+            {statusCopy.context ? (
+              <p className="text-sm leading-6 text-subtle">
+                {statusCopy.context}
+              </p>
+            ) : null}
             <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">
               Paso {currentStep} de {totalSteps}
             </p>
-            {jobStatus?.message ? (
-              <p className="text-sm leading-6 text-subtle">
-                {jobStatus.message}
-              </p>
+            {backendMessage ? (
+              <p className="text-sm leading-6 text-subtle">{backendMessage}</p>
             ) : null}
           </>
         )}

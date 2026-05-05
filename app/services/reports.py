@@ -36,6 +36,7 @@ from app.models.entities import (
 )
 from app.schemas import GeneratedReportResponse, ReportDownloads, ReportFailure, ReportGroup, ResourceResponse
 from app.services.catalog import SEVERITY_ORDER, get_item_severity
+from app.services.docx_accessibility import ensure_docx_accessibility_report
 from app.services.html_accessibility import ensure_accessibility_report
 from app.services.pdf_accessibility import ensure_pdf_accessibility_report
 from app.services.resource_core import normalize_resource
@@ -45,6 +46,7 @@ from app.services.storage import get_reports_dir
 TYPE_LABELS = {
     ResourceType.WEB: "Web",
     ResourceType.PDF: "PDF",
+    ResourceType.DOCX: "Word",
     ResourceType.VIDEO: "Video",
     ResourceType.NOTEBOOK: "Notebook",
     ResourceType.IMAGE: "Imagen",
@@ -317,6 +319,19 @@ def _is_pdf_candidate(item: Any) -> bool:
     return bool(core.contentAvailable)
 
 
+def _is_docx_candidate(item: Any) -> bool:
+    if not _is_main_item(item):
+        return False
+    core = normalize_resource(item)
+    if core.type != "DOCX":
+        return False
+    if core.origin in {"EXTERNAL_URL", "RALTI", "LTI"}:
+        return False
+    if core.accessStatus in {"REQUIERE_SSO", "REQUIERE_INTERACCION", "NO_ANALIZABLE"}:
+        return False
+    return bool(core.contentAvailable)
+
+
 def _build_access_summary_data(inventory_items: list[Any]) -> dict[str, int]:
     main_items = [item for item in inventory_items if _is_main_item(item)]
     relevant_items = [item for item in inventory_items if getattr(item, "analysis_category", "") != "TECHNICAL_IGNORED"]
@@ -377,6 +392,26 @@ def _ensure_pdf_accessibility_data(
     )
 
 
+def _ensure_docx_accessibility_data(
+    settings: Settings,
+    job_id: str,
+    inventory_items: list[Any],
+    *,
+    canvas_client: Any | None = None,
+    canvas_credentials: Any | None = None,
+    course_id: str | None = None,
+):
+    payload = [item.model_dump(mode="python") for item in inventory_items]
+    return ensure_docx_accessibility_report(
+        settings=settings,
+        job_id=job_id,
+        resources=payload,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+
+
 def _flatten_accessibility_resources(accessibility_report) -> list[tuple[str, Any]]:
     flattened: list[tuple[str, Any]] = []
     for module in accessibility_report.modules:
@@ -391,6 +426,15 @@ def _flatten_pdf_accessibility_resources(pdf_accessibility_report) -> list[tuple
     for module in pdf_accessibility_report.modules:
         for resource in module.resources:
             if getattr(resource, "analysisType", None) == "PDF":
+                flattened.append((module.title, resource))
+    return flattened
+
+
+def _flatten_docx_accessibility_resources(docx_accessibility_report) -> list[tuple[str, Any]]:
+    flattened: list[tuple[str, Any]] = []
+    for module in docx_accessibility_report.modules:
+        for resource in module.resources:
+            if getattr(resource, "analysisType", None) == "DOCX":
                 flattened.append((module.title, resource))
     return flattened
 
@@ -423,25 +467,54 @@ def _build_pdf_summary_data(inventory_items: list[Any], pdf_accessibility_report
     }
 
 
-def _build_automatic_summary_data(html_summary: dict[str, int], pdf_summary: dict[str, int]) -> dict[str, int]:
+def _build_docx_summary_data(inventory_items: list[Any], docx_accessibility_report) -> dict[str, int]:
+    type_summary = docx_accessibility_report.summary.byType.get("DOCX")
+    return {
+        "resourcesDetected": sum(1 for item in inventory_items if _is_docx_candidate(item)),
+        "resourcesAnalyzed": docx_accessibility_report.summary.docxResourcesAnalyzed,
+        "passCount": type_summary.passCount if type_summary else docx_accessibility_report.summary.passCount,
+        "failCount": type_summary.failCount if type_summary else docx_accessibility_report.summary.failCount,
+        "warningCount": type_summary.warningCount if type_summary else docx_accessibility_report.summary.warningCount,
+        "notApplicableCount": type_summary.notApplicableCount
+        if type_summary
+        else docx_accessibility_report.summary.notApplicableCount,
+        "errorCount": type_summary.errorCount if type_summary else docx_accessibility_report.summary.errorCount,
+    }
+
+
+def _build_automatic_summary_data(
+    html_summary: dict[str, int],
+    pdf_summary: dict[str, int],
+    docx_summary: dict[str, int],
+) -> dict[str, int]:
     return {
         "htmlResourcesDetected": html_summary["resourcesDetected"],
         "htmlResourcesAnalyzed": html_summary["resourcesAnalyzed"],
         "pdfResourcesDetected": pdf_summary["resourcesDetected"],
         "pdfResourcesAnalyzed": pdf_summary["resourcesAnalyzed"],
-        "passCount": html_summary["passCount"] + pdf_summary["passCount"],
-        "failCount": html_summary["failCount"] + pdf_summary["failCount"],
-        "warningCount": html_summary["warningCount"] + pdf_summary["warningCount"],
-        "notApplicableCount": html_summary["notApplicableCount"] + pdf_summary["notApplicableCount"],
-        "errorCount": html_summary["errorCount"] + pdf_summary["errorCount"],
+        "wordResourcesDetected": docx_summary["resourcesDetected"],
+        "wordResourcesAnalyzed": docx_summary["resourcesAnalyzed"],
+        "passCount": html_summary["passCount"] + pdf_summary["passCount"] + docx_summary["passCount"],
+        "failCount": html_summary["failCount"] + pdf_summary["failCount"] + docx_summary["failCount"],
+        "warningCount": html_summary["warningCount"] + pdf_summary["warningCount"] + docx_summary["warningCount"],
+        "notApplicableCount": (
+            html_summary["notApplicableCount"] + pdf_summary["notApplicableCount"] + docx_summary["notApplicableCount"]
+        ),
+        "errorCount": html_summary["errorCount"] + pdf_summary["errorCount"] + docx_summary["errorCount"],
     }
 
 
-def _build_key_issues(items_by_id: dict[str, Any], accessibility_report, pdf_accessibility_report) -> list[dict[str, str | None]]:
+def _build_key_issues(
+    items_by_id: dict[str, Any],
+    accessibility_report,
+    pdf_accessibility_report,
+    docx_accessibility_report,
+) -> list[dict[str, str | None]]:
     issues: list[dict[str, str | None]] = []
     for resource_type, resource_groups in (
         ("HTML", _flatten_accessibility_resources(accessibility_report)),
         ("PDF", _flatten_pdf_accessibility_resources(pdf_accessibility_report)),
+        ("WORD", _flatten_docx_accessibility_resources(docx_accessibility_report)),
     ):
         for module_title, resource in resource_groups:
             item = items_by_id.get(resource.resourceId)
@@ -616,6 +689,36 @@ def _build_pdf_resource_details(items_by_id: dict[str, Any], pdf_accessibility_r
     return sorted(details, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
 
 
+def _build_docx_resource_details(items_by_id: dict[str, Any], docx_accessibility_report) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for module_title, resource in _flatten_docx_accessibility_resources(docx_accessibility_report):
+        item = items_by_id.get(resource.resourceId)
+        overall_status = _overall_automatic_status(resource.checks)
+        checks = [
+            {
+                "checkId": check.checkId,
+                "checkTitle": check.checkTitle,
+                "status": check.status,
+                "evidence": check.evidence,
+                "recommendation": check.recommendation,
+            }
+            for check in resource.checks
+        ]
+        details.append(
+            {
+                "resourceId": resource.resourceId,
+                "title": resource.title,
+                "coursePath": _item_course_path(item) if item is not None else module_title,
+                "moduleTitle": _item_module_title(item) if item is not None else module_title,
+                "accessStatus": resource.accessStatus,
+                "overallStatus": overall_status,
+                "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
+                "checks": checks,
+            }
+        )
+    return sorted(details, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
+
+
 def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str]) -> list[dict[str, str | None]]:
     skipped: list[dict[str, str | None]] = []
     seen_ids: set[str] = set()
@@ -636,8 +739,10 @@ def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str])
             reason = "HTML_NO_ANALIZADO"
         elif _is_pdf_candidate(item) and item_id not in analyzed_ids:
             reason = "PDF_NO_ANALIZADO"
-        elif _is_main_item(item) and core.type not in {"WEB", "PDF"}:
-            reason = "TIPO_NO_CUBIERTO_PENDIENTE"
+        elif _is_docx_candidate(item) and item_id not in analyzed_ids:
+            reason = "DOCX_NO_ANALIZADO"
+        elif _is_main_item(item) and core.type not in {"WEB", "PDF", "DOCX"}:
+            reason = "TIPO_NO_HTML_CUBIERTO_PENDIENTE"
 
         if reason is None:
             continue
@@ -778,6 +883,14 @@ def _build_report_payload(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
+    docx_accessibility_report = _ensure_docx_accessibility_data(
+        settings,
+        job_id,
+        inventory_items,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
     items_by_id = {str(item.id): item for item in inventory_items}
 
     created_at = utcnow()
@@ -788,12 +901,19 @@ def _build_report_payload(
     access_summary = _build_access_summary_data(inventory_items)
     html_summary = _build_html_summary_data(inventory_items, accessibility_report)
     pdf_summary = _build_pdf_summary_data(inventory_items, pdf_accessibility_report)
-    automatic_summary = _build_automatic_summary_data(html_summary, pdf_summary)
-    key_issues = _build_key_issues(items_by_id, accessibility_report, pdf_accessibility_report)
+    docx_summary = _build_docx_summary_data(inventory_items, docx_accessibility_report)
+    automatic_summary = _build_automatic_summary_data(html_summary, pdf_summary, docx_summary)
+    key_issues = _build_key_issues(
+        items_by_id,
+        accessibility_report,
+        pdf_accessibility_report,
+        docx_accessibility_report,
+    )
     issue_summary = _build_issue_summary(key_issues)
     html_resources = _build_html_resource_details(items_by_id, accessibility_report)
     pdf_resources = _build_pdf_resource_details(items_by_id, pdf_accessibility_report)
-    analyzed_ids = {resource["resourceId"] for resource in html_resources + pdf_resources}
+    docx_resources = _build_docx_resource_details(items_by_id, docx_accessibility_report)
+    analyzed_ids = {resource["resourceId"] for resource in html_resources + pdf_resources + docx_resources}
     skipped_resources = _build_skipped_resources(inventory_items, analyzed_ids)
 
     routes, resource_sections, total_fails, total_pending = _build_manual_review_sections(
@@ -839,10 +959,12 @@ def _build_report_payload(
         "automaticAccessibilitySummary": automatic_summary,
         "htmlAccessibilitySummary": html_summary,
         "pdfAccessibilitySummary": pdf_summary,
+        "wordAccessibilitySummary": docx_summary,
         "issueSummary": issue_summary,
         "keyIssues": key_issues,
         "htmlResources": html_resources,
         "pdfResources": pdf_resources,
+        "wordResources": docx_resources,
         "notAutomaticallyAnalyzable": skipped_resources,
         "summary": {
             "resources": len(session.exec(select(Resource).where(Resource.job_id == job_id)).all()),
@@ -895,6 +1017,19 @@ def _append_docx_summary_table(document: Document, rows: list[tuple[str, str]]) 
         row[1].text = value
 
 
+def _auto_resource_type_label(value: Any) -> str:
+    normalized = str(value or "").upper()
+    if normalized in {"DOCX", "WORD"}:
+        return "Word"
+    return normalized
+
+
+def _compact_detail_recommendation(check: dict[str, Any]) -> str:
+    if check.get("status") in {"FAIL", "WARNING"}:
+        return "Ver recomendación en el resumen agrupado de incidencias."
+    return str(check.get("recommendation") or "")
+
+
 def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     document = Document()
@@ -930,6 +1065,8 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
             ("Recursos HTML analizados", str(report["automaticAccessibilitySummary"]["htmlResourcesAnalyzed"])),
             ("Recursos PDF detectados", str(report["automaticAccessibilitySummary"]["pdfResourcesDetected"])),
             ("Recursos PDF analizados", str(report["automaticAccessibilitySummary"]["pdfResourcesAnalyzed"])),
+            ("Recursos Word detectados", str(report["automaticAccessibilitySummary"]["wordResourcesDetected"])),
+            ("Recursos Word analizados", str(report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"])),
             ("Total PASS", str(report["automaticAccessibilitySummary"]["passCount"])),
             ("Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])),
             ("Total WARNING", str(report["automaticAccessibilitySummary"]["warningCount"])),
@@ -954,7 +1091,7 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
             header[4].text = "Recomendación"
             for issue_group in report["issueSummary"]:
                 row = summary_table.add_row().cells
-                row[0].text = issue_group["resourceType"]
+                row[0].text = _auto_resource_type_label(issue_group["resourceType"])
                 row[1].text = issue_group["checkTitle"]
                 row[2].text = issue_group["status"]
                 row[3].text = str(issue_group["resourceCount"])
@@ -962,16 +1099,22 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
 
         current_group = None
         for issue in report["keyIssues"]:
-            group_label = f"{issue['coursePath']} | {issue['resourceTitle']} ({issue['resourceType']})"
+            resource_type_label = _auto_resource_type_label(issue["resourceType"])
+            group_label = f"{issue['coursePath']} | {issue['resourceTitle']} ({resource_type_label})"
             if group_label != current_group:
                 document.add_heading(group_label, level=2)
                 current_group = group_label
             document.add_paragraph(
-                f"{issue['resourceType']} - {issue['checkTitle']} [{issue['status']}]",
+                f"{resource_type_label} - {issue['checkTitle']} [{issue['status']}]",
                 style="List Bullet",
             )
             document.add_paragraph(f"Evidencia: {issue['evidence']}")
-            document.add_paragraph(f"Recomendación: {issue['recommendation']}")
+            recommendation = (
+                "Ver recomendación en el resumen agrupado de incidencias."
+                if report["issueSummary"]
+                else issue["recommendation"]
+            )
+            document.add_paragraph(f"Recomendación: {recommendation}")
 
     document.add_page_break()
     document.add_heading("Detalle por recurso HTML", level=1)
@@ -1001,7 +1144,7 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
                 row[0].text = check["checkTitle"]
                 row[1].text = check["status"]
                 row[2].text = check["evidence"]
-                row[3].text = check["recommendation"]
+                row[3].text = _compact_detail_recommendation(check)
 
     document.add_heading("Detalle por recurso PDF", level=1)
     if not report["pdfResources"]:
@@ -1030,7 +1173,36 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
                 row[0].text = check["checkTitle"]
                 row[1].text = check["status"]
                 row[2].text = check["evidence"]
-                row[3].text = check["recommendation"]
+                row[3].text = _compact_detail_recommendation(check)
+
+    document.add_heading("Detalle por recurso Word", level=1)
+    if not report["wordResources"]:
+        document.add_paragraph("No hay documentos Word analizados automáticamente para este job.")
+    else:
+        for resource in report["wordResources"]:
+            document.add_heading(resource["title"], level=2)
+            document.add_paragraph(
+                f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
+                f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}"
+            )
+            if resource["summarized"]:
+                document.add_paragraph(
+                    "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE."
+                )
+                continue
+            table = document.add_table(rows=1, cols=4)
+            table.style = "Table Grid"
+            header = table.rows[0].cells
+            header[0].text = "Check"
+            header[1].text = "Estado"
+            header[2].text = "Evidencia"
+            header[3].text = "Recomendación"
+            for check in resource["checks"]:
+                row = table.add_row().cells
+                row[0].text = check["checkTitle"]
+                row[1].text = check["status"]
+                row[2].text = check["evidence"]
+                row[3].text = _compact_detail_recommendation(check)
 
     document.add_heading("Recursos no analizables automáticamente", level=1)
     if not report["notAutomaticallyAnalyzable"]:
@@ -1145,6 +1317,8 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
             ["Recursos HTML analizados", str(report["automaticAccessibilitySummary"]["htmlResourcesAnalyzed"])],
             ["Recursos PDF detectados", str(report["automaticAccessibilitySummary"]["pdfResourcesDetected"])],
             ["Recursos PDF analizados", str(report["automaticAccessibilitySummary"]["pdfResourcesAnalyzed"])],
+            ["Recursos Word detectados", str(report["automaticAccessibilitySummary"]["wordResourcesDetected"])],
+            ["Recursos Word analizados", str(report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"])],
             ["Total PASS", str(report["automaticAccessibilitySummary"]["passCount"])],
             ["Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])],
             ["Total WARNING", str(report["automaticAccessibilitySummary"]["warningCount"])],
@@ -1164,7 +1338,7 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
             for issue_group in report["issueSummary"]:
                 rows.append(
                     [
-                        issue_group["resourceType"],
+                        _auto_resource_type_label(issue_group["resourceType"]),
                         issue_group["checkTitle"],
                         issue_group["status"],
                         str(issue_group["resourceCount"]),
@@ -1175,13 +1349,19 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
 
         current_group = None
         for issue in report["keyIssues"]:
-            group_label = f"{issue['coursePath']} | {issue['resourceTitle']} ({issue['resourceType']})"
+            resource_type_label = _auto_resource_type_label(issue["resourceType"])
+            group_label = f"{issue['coursePath']} | {issue['resourceTitle']} ({resource_type_label})"
             if group_label != current_group:
                 story.append(_pdf_paragraph(group_label, styles["Heading2"]))
                 current_group = group_label
-            story.append(_pdf_paragraph(f"- {issue['resourceType']} - {issue['checkTitle']} [{issue['status']}]", styles["Normal"]))
+            story.append(_pdf_paragraph(f"- {resource_type_label} - {issue['checkTitle']} [{issue['status']}]", styles["Normal"]))
             story.append(_pdf_paragraph(f"Evidencia: {issue['evidence']}", styles["Normal"]))
-            story.append(_pdf_paragraph(f"Recomendación: {issue['recommendation']}", styles["Normal"]))
+            recommendation = (
+                "Ver recomendación en el resumen agrupado de incidencias."
+                if report["issueSummary"]
+                else issue["recommendation"]
+            )
+            story.append(_pdf_paragraph(f"Recomendación: {recommendation}", styles["Normal"]))
 
     story.extend([PageBreak(), _pdf_paragraph("Detalle por recurso HTML", styles["Section"])])
     if not report["htmlResources"]:
@@ -1211,7 +1391,7 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
                         check["checkTitle"],
                         check["status"],
                         check["evidence"],
-                        check["recommendation"],
+                        _compact_detail_recommendation(check),
                     ]
                 )
             _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
@@ -1244,7 +1424,40 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
                         check["checkTitle"],
                         check["status"],
                         check["evidence"],
-                        check["recommendation"],
+                        _compact_detail_recommendation(check),
+                    ]
+                )
+            _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
+
+    story.append(_pdf_paragraph("Detalle por recurso Word", styles["Section"]))
+    if not report["wordResources"]:
+        story.append(_pdf_paragraph("No hay documentos Word analizados automáticamente para este job.", styles["Normal"]))
+    else:
+        for resource in report["wordResources"]:
+            story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
+            story.append(
+                _pdf_paragraph(
+                    f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
+                    f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}",
+                    styles["Normal"],
+                )
+            )
+            if resource["summarized"]:
+                story.append(
+                    _pdf_paragraph(
+                        "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE.",
+                        styles["Normal"],
+                    )
+                )
+                continue
+            rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
+            for check in resource["checks"]:
+                rows.append(
+                    [
+                        check["checkTitle"],
+                        check["status"],
+                        check["evidence"],
+                        _compact_detail_recommendation(check),
                     ]
                 )
             _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
@@ -1395,7 +1608,48 @@ def generate_job_report(
 
 
 def load_job_report(session: Session, job_id: str) -> dict[str, Any]:
-    return get_report_or_404(session, job_id).payload
+    return _normalize_report_payload(get_report_or_404(session, job_id).payload)
+
+
+def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(payload))
+    automatic_summary = normalized.get("automaticAccessibilitySummary")
+    if isinstance(automatic_summary, dict):
+        if "wordResourcesDetected" not in automatic_summary:
+            automatic_summary["wordResourcesDetected"] = automatic_summary.pop("docxResourcesDetected", 0)
+        else:
+            automatic_summary.pop("docxResourcesDetected", None)
+        if "wordResourcesAnalyzed" not in automatic_summary:
+            automatic_summary["wordResourcesAnalyzed"] = automatic_summary.pop("docxResourcesAnalyzed", 0)
+        else:
+            automatic_summary.pop("docxResourcesAnalyzed", None)
+
+    if "wordAccessibilitySummary" not in normalized:
+        normalized["wordAccessibilitySummary"] = normalized.pop("docxAccessibilitySummary", _empty_auto_summary())
+    else:
+        normalized.pop("docxAccessibilitySummary", None)
+    if "wordResources" not in normalized:
+        normalized["wordResources"] = normalized.pop("docxResources", [])
+    else:
+        normalized.pop("docxResources", None)
+
+    for collection_name in ("issueSummary", "keyIssues"):
+        for item in normalized.get(collection_name, []):
+            if isinstance(item, dict) and item.get("resourceType") == "DOCX":
+                item["resourceType"] = "WORD"
+    return normalized
+
+
+def _empty_auto_summary() -> dict[str, int]:
+    return {
+        "resourcesDetected": 0,
+        "resourcesAnalyzed": 0,
+        "passCount": 0,
+        "failCount": 0,
+        "warningCount": 0,
+        "notApplicableCount": 0,
+        "errorCount": 0,
+    }
 
 
 def get_report_file_info(session: Session, settings: Settings, job_id: str, fmt: str) -> tuple[Path, str, str]:

@@ -17,29 +17,46 @@ from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJo
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.access_analysis import OnlineAccessAdapter, analyze_access
 from app.services.jobs import create_online_job_record, process_online_job
+from app.services.token_session import (
+    CANVAS_TOKEN_REQUIRED_MESSAGE,
+    get_active_canvas_token,
+    get_canvas_token_session_status,
+    require_active_canvas_token,
+)
 from app.services.url_check import URLCheckService
 
 router = APIRouter(prefix="/canvas", tags=["canvas"])
 
 
 @router.get("/health")
-def canvas_health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+def canvas_health(request: Request, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    token_status = get_canvas_token_session_status(request, settings)
+    token = get_active_canvas_token(request, settings)
+    if not token:
+        return {
+            "ok": False,
+            **token_status.as_payload(),
+            "status": None,
+            "detail": CANVAS_TOKEN_REQUIRED_MESSAGE,
+        }
     try:
-        client = CanvasAPIClient(settings)
+        client = CanvasAPIClient(_settings_with_canvas_token(settings, token))
         client.get_json("/users/self/profile")
     except CanvasAPIError as exc:
         return {
             "ok": False,
+            **token_status.as_payload(),
             "status": exc.status,
             "detail": exc.detail or exc.message,
         }
-    return {"ok": True}
+    return {"ok": True, **token_status.as_payload()}
 
 
 @router.get("/profile")
-def canvas_profile(settings: Settings = Depends(get_settings)) -> Any:
+def canvas_profile(request: Request, settings: Settings = Depends(get_settings)) -> Any:
     try:
-        client = CanvasAPIClient(settings)
+        token = require_active_canvas_token(request, settings)
+        client = CanvasAPIClient(_settings_with_canvas_token(settings, token))
         return client.get_json("/users/self/profile")
     except CanvasAPIError as exc:
         _raise_canvas_error(exc)
@@ -47,10 +64,12 @@ def canvas_profile(settings: Settings = Depends(get_settings)) -> Any:
 
 @router.get("/courses")
 def canvas_courses(
+    request: Request,
     settings: Settings = Depends(get_settings),
 ) -> list[dict[str, Any]]:
     try:
-        client = CanvasAPIClient(settings)
+        token = require_active_canvas_token(request, settings)
+        client = CanvasAPIClient(_settings_with_canvas_token(settings, token))
         courses = client.get_paginated_json(
             "/courses",
             params={
@@ -89,7 +108,7 @@ def create_canvas_job(
         key=get_client_ip(request),
         limit=settings.online_rate_limit_per_minute,
     )
-    credentials = _canvas_credentials_from_settings(settings)
+    credentials = _canvas_credentials_from_request(request, settings)
     client = _build_canvas_client(credentials, settings)
     course = client.get_course(payload.courseId)
 
@@ -103,7 +122,7 @@ def create_canvas_job(
     )
     request.app.state.online_job_contexts.put(
         response.jobId,
-        OnlineJobContext(credentials=credentials, course_id=course.id, course_name=course.name),
+        OnlineJobContext(credentials=credentials, course_id=course.id, course_name=course.name, auth_source="demo"),
     )
     background_tasks.add_task(
         process_online_job,
@@ -129,7 +148,7 @@ def get_canvas_course_access_summary(
         key=get_client_ip(request),
         limit=settings.online_rate_limit_per_minute,
     )
-    credentials = _canvas_credentials_from_settings(settings)
+    credentials = _canvas_credentials_from_request(request, settings)
     client = _build_canvas_client(credentials, settings)
     url_checker = _build_url_checker(settings)
 
@@ -231,7 +250,7 @@ def download_canvas_course_resource(
         key=get_client_ip(request),
         limit=settings.online_rate_limit_per_minute,
     )
-    credentials = _canvas_credentials_from_settings(settings)
+    credentials = _canvas_credentials_from_request(request, settings)
     client = _build_canvas_client(credentials, settings)
     modules = client.list_modules(course_id)
     if not modules:
@@ -309,11 +328,12 @@ def _raise_canvas_error(exc: CanvasAPIError) -> None:
     ) from exc
 
 
-def _canvas_credentials_from_settings(settings: Settings) -> CanvasCredentials:
+def _canvas_credentials_from_request(request: Request, settings: Settings) -> CanvasCredentials:
+    token = require_active_canvas_token(request, settings)
     try:
         return CanvasCredentials.create(
             base_url=settings.canvas_base_url or "",
-            token=settings.canvas_token or "",
+            token=token,
         )
     except AppError as exc:
         raise AppError(
@@ -322,6 +342,10 @@ def _canvas_credentials_from_settings(settings: Settings) -> CanvasCredentials:
             status_code=exc.status_code,
             details=exc.details,
         ) from exc
+
+
+def _settings_with_canvas_token(settings: Settings, token: str) -> Settings:
+    return settings.model_copy(update={"canvas_token": token})
 
 
 def _build_canvas_client(credentials: CanvasCredentials, settings: Settings) -> CanvasClient:

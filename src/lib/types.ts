@@ -63,6 +63,10 @@ export interface OnlineCourse {
   endAt: string | null;
 }
 
+export interface TokenStatus {
+  tokenActive: boolean;
+}
+
 export interface ReportFailure {
   itemId: string;
   label: string;

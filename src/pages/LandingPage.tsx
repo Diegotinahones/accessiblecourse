@@ -38,7 +38,15 @@ function resolveInitialMode(value: string | null): AppMode {
   return loadRememberedAppMode() ?? 'offline';
 }
 
-export function LandingPage() {
+interface LandingPageProps {
+  tokenActive: boolean;
+  tokenStatusError: string | null;
+}
+
+export function LandingPage({
+  tokenActive,
+  tokenStatusError,
+}: LandingPageProps) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialModeParam = searchParams.get('mode');
@@ -94,6 +102,15 @@ export function LandingPage() {
           <p className="text-lg leading-8 text-subtle">
             Analiza los recursos de un aula online o de un paquete IMSCC.
           </p>
+          {tokenStatusError ? (
+            <p
+              aria-live="polite"
+              className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-[#8a5a00]"
+              role="status"
+            >
+              {tokenStatusError} El modo offline sigue disponible.
+            </p>
+          ) : null}
         </div>
 
         <fieldset className="space-y-4 text-left">
@@ -138,6 +155,12 @@ export function LandingPage() {
                       >
                         {option.description}
                       </span>
+                      {option.mode === 'online' && !tokenActive ? (
+                        <span className="block text-sm font-semibold leading-6 text-[#8a5a00]">
+                          Requiere configurar un token de acceso antes de cargar
+                          cursos.
+                        </span>
+                      ) : null}
                     </span>
                   </span>
                 </label>

@@ -60,6 +60,7 @@ from app.services.jobs import (
 )
 from app.services.reports import generate_job_report, get_report_file_info, load_job_report
 from app.services.resource_core import ResourceContentResult, get_resource_content, normalize_resource
+from app.services.token_session import get_active_canvas_token, require_active_canvas_token
 from app.services.video_accessibility import ensure_video_accessibility_report
 from app.services.review_service import (
     build_summary_payload,
@@ -72,6 +73,7 @@ from app.services.review_service import (
     upsert_checklist,
 )
 from app.services.storage import (
+    get_extracted_dir,
     get_upload_path,
     resolve_job_resource_path,
     sanitize_filename,
@@ -107,6 +109,7 @@ def _load_resource_content(
     job_id: str,
     resource_id: str,
 ) -> ResourceContentResult:
+    content_settings = _settings_for_request_canvas_token(request, settings)
     canvas_client, canvas_credentials, course_id = _load_online_context(
         request=request,
         settings=settings,
@@ -115,7 +118,7 @@ def _load_resource_content(
     return get_resource_content(
         job_id,
         resource_id,
-        settings=settings,
+        settings=content_settings,
         canvas_client=canvas_client,
         canvas_credentials=canvas_credentials,
         course_id=course_id,
@@ -130,10 +133,21 @@ def _load_online_context(
 ) -> tuple[CanvasClient | None, CanvasCredentials | None, str | None]:
     context_store = getattr(request.app.state, "online_job_contexts", None)
     context = context_store.get(job_id) if context_store is not None else None
+    active_token = get_active_canvas_token(request, settings)
+    if context is None and active_token is None:
+        return None, None, None
+    if context is not None and getattr(context, "auth_source", "header") == "demo" and active_token is None:
+        return None, None, None
     canvas_client = _canvas_client_factory(context.credentials, settings) if context is not None else None
     canvas_credentials = context.credentials if context is not None else None
     course_id = context.course_id if context is not None else None
     return canvas_client, canvas_credentials, course_id
+
+
+def _settings_for_request_canvas_token(request: Request, settings: Settings) -> Settings:
+    if get_active_canvas_token(request, settings) is not None:
+        return settings
+    return settings.model_copy(update={"canvas_token": None})
 
 
 def _accessibility_resource_payload(resource, analysis_type: str) -> dict:
@@ -711,14 +725,15 @@ def get_job_accessibility(
 ) -> AccessibilityReportRead:
     get_processing_job_or_404(session, job_id)
     _ensure_review_inventory(session, settings, job_id)
+    report_settings = _settings_for_request_canvas_token(request, settings)
     canvas_client, canvas_credentials, course_id = _load_online_context(
         request=request,
         settings=settings,
         job_id=job_id,
     )
-    inventory = [item.model_dump(mode="python") for item in load_inventory_file(settings, job_id)]
+    inventory = [item.model_dump(mode="python") for item in load_inventory_file(report_settings, job_id)]
     ensure_accessibility_report(
-        settings=settings,
+        settings=report_settings,
         job_id=job_id,
         resources=inventory,
         canvas_client=canvas_client,
@@ -726,7 +741,7 @@ def get_job_accessibility(
         course_id=course_id,
     )
     report = ensure_pdf_accessibility_report(
-        settings=settings,
+        settings=report_settings,
         job_id=job_id,
         resources=inventory,
         canvas_client=canvas_client,
@@ -734,7 +749,7 @@ def get_job_accessibility(
         course_id=course_id,
     )
     report = ensure_docx_accessibility_report(
-        settings=settings,
+        settings=report_settings,
         job_id=job_id,
         resources=inventory,
         canvas_client=canvas_client,
@@ -742,7 +757,7 @@ def get_job_accessibility(
         course_id=course_id,
     )
     report = ensure_video_accessibility_report(
-        settings=settings,
+        settings=report_settings,
         job_id=job_id,
         resources=inventory,
         canvas_client=canvas_client,
@@ -761,6 +776,8 @@ def retry_access_analysis(
     settings: Settings = Depends(get_settings),
     engine=Depends(get_engine),
 ) -> JobStatusResponse:
+    if not get_extracted_dir(settings, job_id).exists():
+        require_active_canvas_token(request, settings)
     response = prepare_access_analysis_retry(session, settings, job_id)
     background_tasks.add_task(
         rerun_access_analysis,
@@ -990,6 +1007,7 @@ def create_job_report(
         key=get_client_ip(request),
         limit=settings.reports_rate_limit_per_minute,
     )
+    report_settings = _settings_for_request_canvas_token(request, settings)
     canvas_client, canvas_credentials, course_id = _load_online_context(
         request=request,
         settings=settings,
@@ -997,7 +1015,7 @@ def create_job_report(
     )
     report_payload = generate_job_report(
         session,
-        settings,
+        report_settings,
         job_id,
         include_pending=payload.includePending if payload else True,
         only_fails=payload.onlyFails if payload else False,

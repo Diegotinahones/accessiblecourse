@@ -131,6 +131,7 @@ class OnlineJobContext:
     credentials: CanvasCredentials
     course_id: str
     course_name: str | None = None
+    auth_source: str = "header"
 
 
 class OnlineJobContextStore:

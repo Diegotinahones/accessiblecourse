@@ -24,6 +24,7 @@ import type {
   ReviewSession,
   ReviewState,
   ReviewSummary,
+  TokenStatus,
 } from './types';
 import { buildStepMessage } from './utils';
 
@@ -132,7 +133,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(response.status, message);
   }
 
-  return (await response.json()) as T;
+  const rawText = await response.text();
+  if (!rawText) {
+    return {} as T;
+  }
+
+  return JSON.parse(rawText) as T;
 }
 
 function uploadRequest<T>(
@@ -207,6 +213,21 @@ function normalizeOnlineCourse(course: RawOnlineCourse): OnlineCourse {
     term: course.term ?? null,
     startAt: course.start_at ?? null,
     endAt: course.end_at ?? null,
+  };
+}
+
+function normalizeTokenStatus(payload: unknown, fallbackActive = false) {
+  const item = readRecord(payload);
+
+  return {
+    tokenActive:
+      readBoolean(
+        item.tokenActive ??
+          item.token_active ??
+          item.active ??
+          item.isActive ??
+          item.is_active,
+      ) ?? fallbackActive,
   };
 }
 
@@ -1515,6 +1536,25 @@ export function resolveApiUrl(path: string): string {
 }
 
 export const api = {
+  async getTokenStatus(): Promise<TokenStatus> {
+    const payload = await request<unknown>('/token/status');
+    return normalizeTokenStatus(payload);
+  },
+
+  async activateDemoToken(): Promise<TokenStatus> {
+    const payload = await request<unknown>('/token/activate-demo', {
+      method: 'POST',
+    });
+    return normalizeTokenStatus(payload, true);
+  },
+
+  async deactivateToken(): Promise<TokenStatus> {
+    const payload = await request<unknown>('/token/deactivate', {
+      method: 'POST',
+    });
+    return normalizeTokenStatus(payload, false);
+  },
+
   async createJob(
     file: File,
     options?: UploadRequestOptions,

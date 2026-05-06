@@ -28,7 +28,7 @@ export function LayoutSimple({
   }, [title]);
 
   return (
-    <div className="min-h-screen bg-[#f8faf7] text-ink">
+    <div className="min-h-screen bg-[var(--color-page)] text-ink">
       <a
         href="#page-content"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-xl focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
@@ -40,13 +40,21 @@ export function LayoutSimple({
         id="page-content"
         className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-6 sm:px-6 sm:py-8 lg:px-8"
       >
-        {backTo ? (
-          <nav aria-label="Navegación de página" className="mb-8">
-            <Link className="button-secondary text-sm" to={backTo}>
-              {backLabel ?? 'Volver'}
-            </Link>
-          </nav>
-        ) : null}
+        <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          {backTo ? (
+            <nav aria-label="Navegación de página">
+              <Link className="button-secondary text-sm" to={backTo}>
+                {backLabel ?? 'Volver'}
+              </Link>
+            </nav>
+          ) : (
+            <span aria-hidden="true" />
+          )}
+
+          <Link className="button-secondary text-sm" to="/token">
+            Gestionar token de acceso
+          </Link>
+        </div>
 
         <header
           className={classNames(

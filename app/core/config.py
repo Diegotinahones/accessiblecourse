@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     canvas_token: str | None = None
     canvas_per_page: int = 100
     canvas_timeout_seconds: float = 20.0
+    token_session_secret: str | None = None
+    token_cookie_secure: bool = False
+    token_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     online_rate_limit_per_minute: int = 20
     online_deep_scan_enabled: bool = True
     online_deep_scan_max_depth: int = 2

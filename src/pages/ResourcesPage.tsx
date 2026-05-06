@@ -66,6 +66,7 @@ interface ResourceFilters {
   onlyHtml: boolean;
   onlyPdf: boolean;
   onlyWord: boolean;
+  onlyVideo: boolean;
   hideGlobalUnplaced: boolean;
 }
 
@@ -77,6 +78,7 @@ const EMPTY_FILTERS: ResourceFilters = {
   onlyHtml: false,
   onlyPdf: false,
   onlyWord: false,
+  onlyVideo: false,
   hideGlobalUnplaced: false,
 };
 
@@ -244,6 +246,7 @@ function getKindFromValue(
 
   if (
     normalizedValue === 'PDF' ||
+    normalizedValue.startsWith('PDF_') ||
     normalizedValue.includes('APPLICATION/PDF') ||
     normalizedValue.endsWith('.PDF')
   ) {
@@ -258,6 +261,23 @@ function getKindFromValue(
     normalizedValue.endsWith('.DOCX')
   ) {
     return 'WORD';
+  }
+
+  if (
+    normalizedValue === 'VIDEO' ||
+    normalizedValue.startsWith('VIDEO_') ||
+    normalizedValue.includes('VIDEO') ||
+    normalizedValue.includes('YOUTUBE') ||
+    normalizedValue.includes('YOUTU_BE') ||
+    normalizedValue.includes('VIMEO') ||
+    normalizedValue.includes('KALTURA') ||
+    normalizedValue.includes('PANOPTO') ||
+    normalizedValue.includes('MEDIA_SITE') ||
+    normalizedValue.endsWith('.MP4') ||
+    normalizedValue.endsWith('.WEBM') ||
+    normalizedValue.endsWith('.MOV')
+  ) {
+    return 'VIDEO';
   }
 
   if (
@@ -277,20 +297,12 @@ function getResourceAccessibilityKind(
   resource: ResourceListItem,
   accessibilityResult: AccessibilityResource | undefined,
 ): AccessibilityResourceKind {
-  if (accessibilityResult?.kind && accessibilityResult.kind !== 'OTHER') {
-    return accessibilityResult.kind;
-  }
-
-  const detectedKind = [
+  const documentKind = [
     resource.type,
     resource.core.type,
     resource.resourceType,
     resource.mimeType,
     resource.filename,
-    resource.contentKind,
-    resource.analysisCategory,
-    resource.htmlPath,
-    resource.core.htmlPath,
     resource.path,
     resource.filePath,
     resource.localPath,
@@ -301,9 +313,57 @@ function getResourceAccessibilityKind(
     resource.url,
   ]
     .map(getKindFromValue)
-    .find((kind): kind is AccessibilityResourceKind => Boolean(kind));
+    .find((kind) => kind === 'PDF' || kind === 'WORD');
 
-  return detectedKind ?? accessibilityResult?.kind ?? 'OTHER';
+  if (documentKind) {
+    return documentKind;
+  }
+
+  const hasVideoIndicator = Boolean(
+    resource.provider ||
+    resource.videoUrl ||
+    resource.embedUrl ||
+    resource.iframe,
+  );
+  const videoKind = [
+    resource.type,
+    resource.core.type,
+    resource.resourceType,
+    resource.provider,
+    resource.videoUrl,
+    resource.embedUrl,
+    resource.iframe,
+    resource.path,
+    resource.filePath,
+    resource.localPath,
+    resource.core.localPath,
+    resource.downloadUrl,
+    resource.sourceUrl,
+    resource.core.sourceUrl,
+    resource.url,
+  ]
+    .map(getKindFromValue)
+    .find((kind) => kind === 'VIDEO');
+
+  if (videoKind || hasVideoIndicator) {
+    return 'VIDEO';
+  }
+
+  const htmlKind = [
+    resource.type,
+    resource.core.type,
+    resource.resourceType,
+    resource.contentKind,
+    resource.provider,
+    resource.analysisCategory,
+    resource.htmlPath,
+    resource.core.htmlPath,
+    resource.url,
+  ]
+    .map(getKindFromValue)
+    .find((kind) => kind === 'HTML');
+
+  return htmlKind ?? accessibilityResult?.kind ?? 'OTHER';
 }
 
 function isHtmlResource(
@@ -327,6 +387,15 @@ function isWordResource(
   return getResourceAccessibilityKind(resource, accessibilityResult) === 'WORD';
 }
 
+function isVideoResource(
+  resource: ResourceListItem,
+  accessibilityResult: AccessibilityResource | undefined,
+) {
+  return (
+    getResourceAccessibilityKind(resource, accessibilityResult) === 'VIDEO'
+  );
+}
+
 function getAccessibilityChecklistTitle(kind: AccessibilityResourceKind) {
   if (kind === 'HTML') {
     return 'Checklist automático HTML';
@@ -338,6 +407,10 @@ function getAccessibilityChecklistTitle(kind: AccessibilityResourceKind) {
 
   if (kind === 'WORD') {
     return 'Checklist automático Word';
+  }
+
+  if (kind === 'VIDEO') {
+    return 'Checklist automático Vídeo';
   }
 
   return 'Checklist automático de accesibilidad';
@@ -630,11 +703,17 @@ function resourceMatchesFilters(
 
   const accessibilityResult = accessibilityByResourceId.get(resource.id);
 
-  if (filters.onlyHtml || filters.onlyPdf || filters.onlyWord) {
+  if (
+    filters.onlyHtml ||
+    filters.onlyPdf ||
+    filters.onlyWord ||
+    filters.onlyVideo
+  ) {
     const matchesRequestedType =
       (filters.onlyHtml && isHtmlResource(resource, accessibilityResult)) ||
       (filters.onlyPdf && isPdfResource(resource, accessibilityResult)) ||
-      (filters.onlyWord && isWordResource(resource, accessibilityResult));
+      (filters.onlyWord && isWordResource(resource, accessibilityResult)) ||
+      (filters.onlyVideo && isVideoResource(resource, accessibilityResult));
 
     if (!matchesRequestedType) {
       return false;
@@ -718,7 +797,8 @@ function AutomaticAccessibilityChecklist({
   const isCoveredResource =
     resourceKind === 'HTML' ||
     resourceKind === 'PDF' ||
-    resourceKind === 'WORD';
+    resourceKind === 'WORD' ||
+    resourceKind === 'VIDEO';
 
   if (isExternalAccessBlocked(resource)) {
     return (
@@ -733,6 +813,14 @@ function AutomaticAccessibilityChecklist({
     return (
       <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
         Este tipo de recurso se analizará en una fase posterior.
+      </p>
+    );
+  }
+
+  if (resourceKind === 'VIDEO' && !accessibilityResult?.checks.length) {
+    return (
+      <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
+        Requiere revisión manual del proveedor de vídeo.
       </p>
     );
   }
@@ -1131,6 +1219,7 @@ export function ResourcesPage() {
     htmlResourcesAnalyzed: 0,
     pdfResourcesAnalyzed: 0,
     wordResourcesAnalyzed: 0,
+    videoResourcesAnalyzed: 0,
     pass: 0,
     warning: 0,
     fail: 0,
@@ -1151,6 +1240,11 @@ export function ResourcesPage() {
     {
       label: 'Recursos Word analizados',
       value: String(accessibilitySummary.wordResourcesAnalyzed),
+      show: true,
+    },
+    {
+      label: 'Recursos de vídeo analizados',
+      value: String(accessibilitySummary.videoResourcesAnalyzed),
       show: true,
     },
     {
@@ -1397,6 +1491,17 @@ export function ResourcesPage() {
                     type="checkbox"
                   />
                   <span>Mostrar solo recursos Word</span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
+                  <input
+                    checked={filters.onlyVideo}
+                    className="mt-1 h-5 w-5 accent-[#0f766e]"
+                    onChange={(event) =>
+                      updateFilter('onlyVideo', event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Mostrar solo recursos de vídeo</span>
                 </label>
                 <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
                   <input

@@ -60,6 +60,7 @@ from app.services.jobs import (
 )
 from app.services.reports import generate_job_report, get_report_file_info, load_job_report
 from app.services.resource_core import ResourceContentResult, get_resource_content, normalize_resource
+from app.services.video_accessibility import ensure_video_accessibility_report
 from app.services.review_service import (
     build_summary_payload,
     ensure_job_inventory,
@@ -143,8 +144,10 @@ def _accessibility_resource_payload(resource, analysis_type: str) -> dict:
 
 def _resource_analysis_type(resource) -> str:
     analysis_type = getattr(resource, "analysisType", None)
-    if analysis_type in {"HTML", "PDF", "DOCX"}:
+    if analysis_type in {"HTML", "PDF", "DOCX", "VIDEO"}:
         return analysis_type
+    if getattr(resource, "type", None) == "VIDEO":
+        return "VIDEO"
     if getattr(resource, "type", None) == "DOCX":
         return "DOCX"
     return "PDF" if getattr(resource, "type", None) == "PDF" else "HTML"
@@ -731,6 +734,14 @@ def get_job_accessibility(
         course_id=course_id,
     )
     report = ensure_docx_accessibility_report(
+        settings=settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    report = ensure_video_accessibility_report(
         settings=settings,
         job_id=job_id,
         resources=inventory,

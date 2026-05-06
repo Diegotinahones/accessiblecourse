@@ -582,10 +582,10 @@ class IMSCCParser:
         self._apply_html_discovery_details(inventory, parent_child_ids)
         return discovered_resources
 
-    def extract_html_links(self, html_path: Path, extracted_root: Path) -> list[dict[str, str]]:
+    def extract_html_links(self, html_path: Path, extracted_root: Path) -> list[dict[str, Any]]:
         relative_html_path = html_path.resolve().relative_to(extracted_root.resolve()).as_posix()
         soup = BeautifulSoup(html_path.read_text(encoding="utf-8", errors="ignore"), "html.parser")
-        discovered: list[dict[str, str]] = []
+        discovered: list[dict[str, Any]] = []
         local_seen: set[str] = set()
         external_seen: set[str] = set()
 
@@ -612,6 +612,11 @@ class IMSCCParser:
                             "title": title or _derive_title(source_url),
                             "tag": tag_name,
                             "attribute": attribute_name,
+                            "elementAttrs": _html_attrs_payload(element),
+                            "parentTag": _html_parent_tag(element),
+                            "parentAttrs": _html_attrs_payload(element.parent),
+                            "trackKinds": _html_track_values(element, "kind"),
+                            "trackSources": _html_track_values(element, "src"),
                             "parentHtmlPath": relative_html_path,
                         }
                     )
@@ -632,6 +637,11 @@ class IMSCCParser:
                         "title": title or _derive_title(relative_path),
                         "tag": tag_name,
                         "attribute": attribute_name,
+                        "elementAttrs": _html_attrs_payload(element),
+                        "parentTag": _html_parent_tag(element),
+                        "parentAttrs": _html_attrs_payload(element.parent),
+                        "trackKinds": _html_track_values(element, "kind"),
+                        "trackSources": _html_track_values(element, "src"),
                         "parentHtmlPath": relative_html_path,
                     }
                 )
@@ -922,6 +932,11 @@ class IMSCCParser:
                 "parentHtmlPath": parent_html_path,
                 "tag": candidate["tag"],
                 "attribute": candidate["attribute"],
+                "elementAttrs": candidate.get("elementAttrs") or {},
+                "parentTag": candidate.get("parentTag"),
+                "parentAttrs": candidate.get("parentAttrs") or {},
+                "trackKinds": candidate.get("trackKinds") or [],
+                "trackSources": candidate.get("trackSources") or [],
             }
         }
 
@@ -1279,3 +1294,40 @@ def _extract_html_reference_title(element: Any, reference: str) -> str | None:
     if text:
         return text
     return _derive_title(reference)
+
+
+def _html_attrs_payload(element: Any) -> dict[str, str]:
+    attrs = getattr(element, "attrs", None)
+    if not isinstance(attrs, dict):
+        return {}
+    payload: dict[str, str] = {}
+    for key, value in attrs.items():
+        if isinstance(value, list):
+            payload[str(key)] = " ".join(str(item) for item in value if str(item).strip())
+        elif value is None:
+            payload[str(key)] = ""
+        else:
+            payload[str(key)] = str(value)
+    return payload
+
+
+def _html_parent_tag(element: Any) -> str | None:
+    parent = getattr(element, "parent", None)
+    name = getattr(parent, "name", None)
+    return str(name).lower() if isinstance(name, str) and name else None
+
+
+def _html_track_values(element: Any, attribute_name: str) -> list[str]:
+    search_root = element
+    parent = getattr(element, "parent", None)
+    if getattr(parent, "name", None) == "video":
+        search_root = parent
+    find_all = getattr(search_root, "find_all", None)
+    if not callable(find_all):
+        return []
+    values: list[str] = []
+    for track in find_all("track"):
+        value = track.get(attribute_name)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    return values

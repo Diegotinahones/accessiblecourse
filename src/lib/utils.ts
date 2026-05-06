@@ -34,8 +34,12 @@ export function getDecisionLabel(decision: ChecklistDecision) {
 }
 
 export function buildStepMessage(progress: number) {
-  if (progress >= 98) {
+  if (progress >= 99) {
     return 'Análisis completado';
+  }
+
+  if (progress >= 97) {
+    return 'Procesando accesibilidad de los recursos de vídeo';
   }
 
   if (progress >= 95) {

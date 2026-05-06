@@ -42,6 +42,11 @@ from app.services.pdf_accessibility import ensure_pdf_accessibility_report
 from app.services.resource_core import normalize_resource
 from app.services.review_service import ensure_job_inventory, ensure_review_rollups, get_templates_by_type, load_inventory_file
 from app.services.storage import get_reports_dir
+from app.services.video_accessibility import (
+    VIDEO_ANALYSIS_SCOPE_NOTE,
+    detect_video_provider,
+    ensure_video_accessibility_report,
+)
 
 TYPE_LABELS = {
     ResourceType.WEB: "Web",
@@ -332,6 +337,19 @@ def _is_docx_candidate(item: Any) -> bool:
     return bool(core.contentAvailable)
 
 
+def _is_video_candidate(item: Any) -> bool:
+    if not _is_main_item(item):
+        return False
+    core = normalize_resource(item)
+    if core.type != "VIDEO":
+        return False
+    if core.origin in {"RALTI", "LTI"}:
+        return False
+    if core.accessStatus in {"REQUIERE_SSO", "REQUIERE_INTERACCION", "NO_ANALIZABLE", "NO_ACCEDE"}:
+        return False
+    return True
+
+
 def _build_access_summary_data(inventory_items: list[Any]) -> dict[str, int]:
     main_items = [item for item in inventory_items if _is_main_item(item)]
     relevant_items = [item for item in inventory_items if getattr(item, "analysis_category", "") != "TECHNICAL_IGNORED"]
@@ -412,6 +430,26 @@ def _ensure_docx_accessibility_data(
     )
 
 
+def _ensure_video_accessibility_data(
+    settings: Settings,
+    job_id: str,
+    inventory_items: list[Any],
+    *,
+    canvas_client: Any | None = None,
+    canvas_credentials: Any | None = None,
+    course_id: str | None = None,
+):
+    payload = [item.model_dump(mode="python") for item in inventory_items]
+    return ensure_video_accessibility_report(
+        settings=settings,
+        job_id=job_id,
+        resources=payload,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+
+
 def _flatten_accessibility_resources(accessibility_report) -> list[tuple[str, Any]]:
     flattened: list[tuple[str, Any]] = []
     for module in accessibility_report.modules:
@@ -435,6 +473,15 @@ def _flatten_docx_accessibility_resources(docx_accessibility_report) -> list[tup
     for module in docx_accessibility_report.modules:
         for resource in module.resources:
             if getattr(resource, "analysisType", None) == "DOCX":
+                flattened.append((module.title, resource))
+    return flattened
+
+
+def _flatten_video_accessibility_resources(video_accessibility_report) -> list[tuple[str, Any]]:
+    flattened: list[tuple[str, Any]] = []
+    for module in video_accessibility_report.modules:
+        for resource in module.resources:
+            if getattr(resource, "analysisType", None) == "VIDEO":
                 flattened.append((module.title, resource))
     return flattened
 
@@ -482,10 +529,24 @@ def _build_docx_summary_data(inventory_items: list[Any], docx_accessibility_repo
     }
 
 
+def _build_video_summary_data(inventory_items: list[Any], video_accessibility_report) -> dict[str, int]:
+    type_summary = video_accessibility_report.summary.byType.get("VIDEO")
+    return {
+        "resourcesDetected": sum(1 for item in inventory_items if _is_video_candidate(item)),
+        "resourcesAnalyzed": video_accessibility_report.summary.videoResourcesAnalyzed,
+        "passCount": type_summary.passCount if type_summary else 0,
+        "failCount": type_summary.failCount if type_summary else 0,
+        "warningCount": type_summary.warningCount if type_summary else 0,
+        "notApplicableCount": type_summary.notApplicableCount if type_summary else 0,
+        "errorCount": type_summary.errorCount if type_summary else 0,
+    }
+
+
 def _build_automatic_summary_data(
     html_summary: dict[str, int],
     pdf_summary: dict[str, int],
     docx_summary: dict[str, int],
+    video_summary: dict[str, int],
 ) -> dict[str, int]:
     return {
         "htmlResourcesDetected": html_summary["resourcesDetected"],
@@ -494,13 +555,29 @@ def _build_automatic_summary_data(
         "pdfResourcesAnalyzed": pdf_summary["resourcesAnalyzed"],
         "wordResourcesDetected": docx_summary["resourcesDetected"],
         "wordResourcesAnalyzed": docx_summary["resourcesAnalyzed"],
-        "passCount": html_summary["passCount"] + pdf_summary["passCount"] + docx_summary["passCount"],
-        "failCount": html_summary["failCount"] + pdf_summary["failCount"] + docx_summary["failCount"],
-        "warningCount": html_summary["warningCount"] + pdf_summary["warningCount"] + docx_summary["warningCount"],
-        "notApplicableCount": (
-            html_summary["notApplicableCount"] + pdf_summary["notApplicableCount"] + docx_summary["notApplicableCount"]
+        "videoResourcesDetected": video_summary["resourcesDetected"],
+        "videoResourcesAnalyzed": video_summary["resourcesAnalyzed"],
+        "passCount": (
+            html_summary["passCount"] + pdf_summary["passCount"] + docx_summary["passCount"] + video_summary["passCount"]
         ),
-        "errorCount": html_summary["errorCount"] + pdf_summary["errorCount"] + docx_summary["errorCount"],
+        "failCount": (
+            html_summary["failCount"] + pdf_summary["failCount"] + docx_summary["failCount"] + video_summary["failCount"]
+        ),
+        "warningCount": (
+            html_summary["warningCount"]
+            + pdf_summary["warningCount"]
+            + docx_summary["warningCount"]
+            + video_summary["warningCount"]
+        ),
+        "notApplicableCount": (
+            html_summary["notApplicableCount"]
+            + pdf_summary["notApplicableCount"]
+            + docx_summary["notApplicableCount"]
+            + video_summary["notApplicableCount"]
+        ),
+        "errorCount": (
+            html_summary["errorCount"] + pdf_summary["errorCount"] + docx_summary["errorCount"] + video_summary["errorCount"]
+        ),
     }
 
 
@@ -509,12 +586,14 @@ def _build_key_issues(
     accessibility_report,
     pdf_accessibility_report,
     docx_accessibility_report,
+    video_accessibility_report,
 ) -> list[dict[str, str | None]]:
     issues: list[dict[str, str | None]] = []
     for resource_type, resource_groups in (
         ("HTML", _flatten_accessibility_resources(accessibility_report)),
         ("PDF", _flatten_pdf_accessibility_resources(pdf_accessibility_report)),
         ("WORD", _flatten_docx_accessibility_resources(docx_accessibility_report)),
+        ("VIDEO", _flatten_video_accessibility_resources(video_accessibility_report)),
     ):
         for module_title, resource in resource_groups:
             item = items_by_id.get(resource.resourceId)
@@ -719,6 +798,38 @@ def _build_docx_resource_details(items_by_id: dict[str, Any], docx_accessibility
     return sorted(details, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
 
 
+def _build_video_resource_details(items_by_id: dict[str, Any], video_accessibility_report) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for module_title, resource in _flatten_video_accessibility_resources(video_accessibility_report):
+        item = items_by_id.get(resource.resourceId)
+        overall_status = _overall_automatic_status(resource.checks)
+        provider, _host = detect_video_provider(item if item is not None else resource.model_dump(mode="python"))
+        checks = [
+            {
+                "checkId": check.checkId,
+                "checkTitle": check.checkTitle,
+                "status": check.status,
+                "evidence": check.evidence,
+                "recommendation": check.recommendation,
+            }
+            for check in resource.checks
+        ]
+        details.append(
+            {
+                "resourceId": resource.resourceId,
+                "title": resource.title,
+                "coursePath": _item_course_path(item) if item is not None else module_title,
+                "moduleTitle": _item_module_title(item) if item is not None else module_title,
+                "accessStatus": resource.accessStatus,
+                "overallStatus": overall_status,
+                "provider": provider or "No identificado",
+                "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
+                "checks": checks,
+            }
+        )
+    return sorted(details, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
+
+
 def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str]) -> list[dict[str, str | None]]:
     skipped: list[dict[str, str | None]] = []
     seen_ids: set[str] = set()
@@ -733,16 +844,18 @@ def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str])
             reason = "REQUIERE_SSO"
         elif core.accessStatus == "REQUIERE_INTERACCION":
             reason = "REQUIERE_INTERACCION"
-        elif core.origin == "EXTERNAL_URL":
+        elif core.origin == "EXTERNAL_URL" and item_id not in analyzed_ids:
             reason = "EXTERNO_NO_ANALIZADO"
         elif _is_html_candidate(item) and item_id not in analyzed_ids:
             reason = "HTML_NO_ANALIZADO"
         elif _is_pdf_candidate(item) and item_id not in analyzed_ids:
             reason = "PDF_NO_ANALIZADO"
         elif _is_docx_candidate(item) and item_id not in analyzed_ids:
-            reason = "DOCX_NO_ANALIZADO"
-        elif _is_main_item(item) and core.type not in {"WEB", "PDF", "DOCX"}:
-            reason = "TIPO_NO_HTML_CUBIERTO_PENDIENTE"
+            reason = "WORD_NO_ANALIZADO"
+        elif _is_video_candidate(item) and item_id not in analyzed_ids:
+            reason = "VIDEO_NO_ANALIZADO"
+        elif _is_main_item(item) and core.type not in {"WEB", "PDF", "DOCX", "VIDEO"}:
+            reason = "TIPO_NO_CUBIERTO_PENDIENTE"
 
         if reason is None:
             continue
@@ -891,6 +1004,14 @@ def _build_report_payload(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
+    video_accessibility_report = _ensure_video_accessibility_data(
+        settings,
+        job_id,
+        inventory_items,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
     items_by_id = {str(item.id): item for item in inventory_items}
 
     created_at = utcnow()
@@ -902,18 +1023,23 @@ def _build_report_payload(
     html_summary = _build_html_summary_data(inventory_items, accessibility_report)
     pdf_summary = _build_pdf_summary_data(inventory_items, pdf_accessibility_report)
     docx_summary = _build_docx_summary_data(inventory_items, docx_accessibility_report)
-    automatic_summary = _build_automatic_summary_data(html_summary, pdf_summary, docx_summary)
+    video_summary = _build_video_summary_data(inventory_items, video_accessibility_report)
+    automatic_summary = _build_automatic_summary_data(html_summary, pdf_summary, docx_summary, video_summary)
     key_issues = _build_key_issues(
         items_by_id,
         accessibility_report,
         pdf_accessibility_report,
         docx_accessibility_report,
+        video_accessibility_report,
     )
     issue_summary = _build_issue_summary(key_issues)
     html_resources = _build_html_resource_details(items_by_id, accessibility_report)
     pdf_resources = _build_pdf_resource_details(items_by_id, pdf_accessibility_report)
     docx_resources = _build_docx_resource_details(items_by_id, docx_accessibility_report)
-    analyzed_ids = {resource["resourceId"] for resource in html_resources + pdf_resources + docx_resources}
+    video_resources = _build_video_resource_details(items_by_id, video_accessibility_report)
+    analyzed_ids = {
+        resource["resourceId"] for resource in html_resources + pdf_resources + docx_resources + video_resources
+    }
     skipped_resources = _build_skipped_resources(inventory_items, analyzed_ids)
 
     routes, resource_sections, total_fails, total_pending = _build_manual_review_sections(
@@ -960,11 +1086,13 @@ def _build_report_payload(
         "htmlAccessibilitySummary": html_summary,
         "pdfAccessibilitySummary": pdf_summary,
         "wordAccessibilitySummary": docx_summary,
+        "videoAccessibilitySummary": video_summary,
         "issueSummary": issue_summary,
         "keyIssues": key_issues,
         "htmlResources": html_resources,
         "pdfResources": pdf_resources,
         "wordResources": docx_resources,
+        "videoResources": video_resources,
         "notAutomaticallyAnalyzable": skipped_resources,
         "summary": {
             "resources": len(session.exec(select(Resource).where(Resource.job_id == job_id)).all()),
@@ -1021,6 +1149,8 @@ def _auto_resource_type_label(value: Any) -> str:
     normalized = str(value or "").upper()
     if normalized in {"DOCX", "WORD"}:
         return "Word"
+    if normalized == "VIDEO":
+        return "Vídeo"
     return normalized
 
 
@@ -1067,6 +1197,8 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
             ("Recursos PDF analizados", str(report["automaticAccessibilitySummary"]["pdfResourcesAnalyzed"])),
             ("Recursos Word detectados", str(report["automaticAccessibilitySummary"]["wordResourcesDetected"])),
             ("Recursos Word analizados", str(report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"])),
+            ("Recursos de vídeo detectados", str(report["automaticAccessibilitySummary"]["videoResourcesDetected"])),
+            ("Recursos de vídeo analizados", str(report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"])),
             ("Total PASS", str(report["automaticAccessibilitySummary"]["passCount"])),
             ("Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])),
             ("Total WARNING", str(report["automaticAccessibilitySummary"]["warningCount"])),
@@ -1204,6 +1336,32 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
                 row[2].text = check["evidence"]
                 row[3].text = _compact_detail_recommendation(check)
 
+    document.add_heading("Detalle por recurso de vídeo", level=1)
+    document.add_paragraph(VIDEO_ANALYSIS_SCOPE_NOTE)
+    if not report["videoResources"]:
+        document.add_paragraph("No hay recursos de vídeo analizados automáticamente para este job.")
+    else:
+        for resource in report["videoResources"]:
+            document.add_heading(resource["title"], level=2)
+            document.add_paragraph(
+                f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
+                f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']} | "
+                f"Proveedor: {resource['provider']}"
+            )
+            table = document.add_table(rows=1, cols=4)
+            table.style = "Table Grid"
+            header = table.rows[0].cells
+            header[0].text = "Check"
+            header[1].text = "Estado"
+            header[2].text = "Evidencia"
+            header[3].text = "Recomendación"
+            for check in resource["checks"]:
+                row = table.add_row().cells
+                row[0].text = check["checkTitle"]
+                row[1].text = check["status"]
+                row[2].text = check["evidence"]
+                row[3].text = _compact_detail_recommendation(check)
+
     document.add_heading("Recursos no analizables automáticamente", level=1)
     if not report["notAutomaticallyAnalyzable"]:
         document.add_paragraph("No hay recursos pendientes de análisis automático por autenticación, interacción o cobertura.")
@@ -1319,6 +1477,8 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
             ["Recursos PDF analizados", str(report["automaticAccessibilitySummary"]["pdfResourcesAnalyzed"])],
             ["Recursos Word detectados", str(report["automaticAccessibilitySummary"]["wordResourcesDetected"])],
             ["Recursos Word analizados", str(report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"])],
+            ["Recursos de vídeo detectados", str(report["automaticAccessibilitySummary"]["videoResourcesDetected"])],
+            ["Recursos de vídeo analizados", str(report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"])],
             ["Total PASS", str(report["automaticAccessibilitySummary"]["passCount"])],
             ["Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])],
             ["Total WARNING", str(report["automaticAccessibilitySummary"]["warningCount"])],
@@ -1450,6 +1610,33 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
                     )
                 )
                 continue
+            rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
+            for check in resource["checks"]:
+                rows.append(
+                    [
+                        check["checkTitle"],
+                        check["status"],
+                        check["evidence"],
+                        _compact_detail_recommendation(check),
+                    ]
+                )
+            _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
+
+    story.append(_pdf_paragraph("Detalle por recurso de vídeo", styles["Section"]))
+    story.append(_pdf_paragraph(VIDEO_ANALYSIS_SCOPE_NOTE, styles["Normal"]))
+    if not report["videoResources"]:
+        story.append(_pdf_paragraph("No hay recursos de vídeo analizados automáticamente para este job.", styles["Normal"]))
+    else:
+        for resource in report["videoResources"]:
+            story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
+            story.append(
+                _pdf_paragraph(
+                    f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
+                    f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']} | "
+                    f"Proveedor: {resource['provider']}",
+                    styles["Normal"],
+                )
+            )
             rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
             for check in resource["checks"]:
                 rows.append(
@@ -1623,6 +1810,8 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
             automatic_summary["wordResourcesAnalyzed"] = automatic_summary.pop("docxResourcesAnalyzed", 0)
         else:
             automatic_summary.pop("docxResourcesAnalyzed", None)
+        automatic_summary.setdefault("videoResourcesDetected", 0)
+        automatic_summary.setdefault("videoResourcesAnalyzed", 0)
 
     if "wordAccessibilitySummary" not in normalized:
         normalized["wordAccessibilitySummary"] = normalized.pop("docxAccessibilitySummary", _empty_auto_summary())
@@ -1632,6 +1821,8 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
         normalized["wordResources"] = normalized.pop("docxResources", [])
     else:
         normalized.pop("docxResources", None)
+    normalized.setdefault("videoAccessibilitySummary", _empty_auto_summary())
+    normalized.setdefault("videoResources", [])
 
     for collection_name in ("issueSummary", "keyIssues"):
         for item in normalized.get(collection_name, []):

@@ -52,6 +52,7 @@ from app.services.storage import (
     get_upload_path,
 )
 from app.services.url_check import URLCheckService
+from app.services.video_accessibility import run_video_accessibility_scan
 
 logger = logging.getLogger("accessiblecourse.jobs")
 DEFAULT_GENERIC_MODULE_TITLE = "Módulo general"
@@ -1575,6 +1576,29 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 progress=99,
                 details=docx_accessibility_report.summary.model_dump(mode="json"),
             )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=5,
+                progress=99,
+                message="Procesando accesibilidad de los recursos de vídeo",
+                phase=JobPhase.VIDEO_ACCESSIBILITY_SCAN,
+            )
+            video_accessibility_report = run_video_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="video_accessibility_scan_finished",
+                message="Accesibilidad de vídeo procesada.",
+                progress=99,
+                details=video_accessibility_report.summary.model_dump(mode="json"),
+            )
             session.commit()
 
             _update_job(
@@ -1895,6 +1919,32 @@ def process_online_job(
                 progress=99,
                 details=docx_accessibility_report.summary.model_dump(mode="json"),
             )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=6,
+                progress=99,
+                message="Procesando accesibilidad de los recursos de vídeo",
+                phase=JobPhase.VIDEO_ACCESSIBILITY_SCAN,
+            )
+            video_accessibility_report = run_video_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+                canvas_client=client,
+                canvas_credentials=context.credentials,
+                course_id=course.id,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="video_accessibility_scan_finished",
+                message="Accesibilidad de vídeo procesada.",
+                progress=99,
+                details=video_accessibility_report.summary.model_dump(mode="json"),
+            )
             session.commit()
 
             _update_job(
@@ -2179,6 +2229,33 @@ def rerun_access_analysis(
                 message="Accesibilidad Word procesada.",
                 progress=99,
                 details=docx_accessibility_report.summary.model_dump(mode="json"),
+            )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=job.total_steps,
+                progress=99,
+                message="Procesando accesibilidad de los recursos de vídeo",
+                phase=JobPhase.VIDEO_ACCESSIBILITY_SCAN,
+                event="video_accessibility_retry_started",
+            )
+            video_accessibility_report = run_video_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+                canvas_client=html_canvas_client,
+                canvas_credentials=html_canvas_credentials,
+                course_id=html_course_id,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="video_accessibility_scan_finished",
+                message="Accesibilidad de vídeo procesada.",
+                progress=99,
+                details=video_accessibility_report.summary.model_dump(mode="json"),
             )
             session.commit()
             _update_job(

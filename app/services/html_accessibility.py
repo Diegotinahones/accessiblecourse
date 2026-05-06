@@ -14,7 +14,7 @@ from app.core.config import Settings
 from app.services.resource_core import ResourceContentResult, get_resource_content, normalize_resource
 
 AccessibilityStatus = Literal["PASS", "FAIL", "WARNING", "NOT_APPLICABLE", "ERROR"]
-AccessibilityAnalysisType = Literal["HTML", "PDF", "DOCX"]
+AccessibilityAnalysisType = Literal["HTML", "PDF", "DOCX", "VIDEO"]
 
 GENERIC_PAGE_TITLES = {
     "home",
@@ -104,6 +104,8 @@ class AccessibilitySummary(BaseModel):
     pdfResourcesAnalyzed: int = 0
     docxResourcesTotal: int = 0
     docxResourcesAnalyzed: int = 0
+    videoResourcesTotal: int = 0
+    videoResourcesAnalyzed: int = 0
     passCount: int = 0
     failCount: int = 0
     warningCount: int = 0
@@ -465,8 +467,10 @@ def _should_attempt_html_scan(core: Any) -> bool:
 
 
 def _resource_analysis_type(resource: AccessibilityResourceResult) -> AccessibilityAnalysisType:
-    if resource.analysisType in {"HTML", "PDF", "DOCX"}:
+    if resource.analysisType in {"HTML", "PDF", "DOCX", "VIDEO"}:
         return resource.analysisType
+    if resource.type == "VIDEO":
+        return "VIDEO"
     if resource.type == "DOCX":
         return "DOCX"
     if resource.type == "PDF":
@@ -487,6 +491,9 @@ def _increment_resource_counts(summary: AccessibilitySummary, analysis_type: Acc
     elif analysis_type == "DOCX":
         summary.docxResourcesTotal += 1
         summary.docxResourcesAnalyzed += 1
+    elif analysis_type == "VIDEO":
+        summary.videoResourcesTotal += 1
+        summary.videoResourcesAnalyzed += 1
 
 
 def _increment_summary(

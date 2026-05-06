@@ -51,6 +51,7 @@ interface RawJobStatusResponse {
     | 'HTML_ACCESSIBILITY_SCAN'
     | 'PDF_ACCESSIBILITY_SCAN'
     | 'DOCX_ACCESSIBILITY_SCAN'
+    | 'VIDEO_ACCESSIBILITY_SCAN'
     | 'DONE'
     | 'ERROR';
   progress: number;
@@ -242,6 +243,18 @@ function normalizeReviewType(
   if (value === 'VIDEO') {
     return 'VIDEO';
   }
+  if (
+    value.includes('VIDEO') ||
+    value.includes('YOUTUBE') ||
+    value.includes('VIMEO') ||
+    value.includes('KALTURA') ||
+    value.includes('PANOPTO') ||
+    value.endsWith('.MP4') ||
+    value.endsWith('.WEBM') ||
+    value.endsWith('.MOV')
+  ) {
+    return 'VIDEO';
+  }
   if (value === 'NOTEBOOK') {
     return 'NOTEBOOK';
   }
@@ -410,6 +423,23 @@ function normalizeAccessibilityKind(
     normalizedValue.endsWith('.DOCX')
   ) {
     return 'WORD';
+  }
+
+  if (
+    normalizedValue === 'VIDEO' ||
+    normalizedValue.startsWith('VIDEO_') ||
+    normalizedValue.includes('VIDEO') ||
+    normalizedValue.includes('YOUTUBE') ||
+    normalizedValue.includes('YOUTU_BE') ||
+    normalizedValue.includes('VIMEO') ||
+    normalizedValue.includes('KALTURA') ||
+    normalizedValue.includes('PANOPTO') ||
+    normalizedValue.includes('MEDIA_SITE') ||
+    normalizedValue.endsWith('.MP4') ||
+    normalizedValue.endsWith('.WEBM') ||
+    normalizedValue.endsWith('.MOV')
+  ) {
+    return 'VIDEO';
   }
 
   if (
@@ -627,6 +657,23 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     null;
   const contentKind =
     readString(item.contentKind) ?? readString(item.content_kind) ?? null;
+  const provider =
+    readString(item.provider) ??
+    readString(item.videoProvider) ??
+    readString(item.video_provider) ??
+    null;
+  const videoUrl =
+    readString(item.videoUrl) ??
+    readString(item.video_url) ??
+    readString(item.mediaUrl) ??
+    readString(item.media_url) ??
+    null;
+  const embedUrl =
+    readString(item.embedUrl) ??
+    readString(item.embed_url) ??
+    readString(item.embed) ??
+    null;
+  const iframe = readString(item.iframe) ?? readString(item.iframeHtml) ?? null;
   const sourceUrl =
     readString(item.sourceUrl) ??
     readString(item.source_url) ??
@@ -710,6 +757,10 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     readString(item.type) ??
       resourceType ??
       contentKind ??
+      provider ??
+      videoUrl ??
+      embedUrl ??
+      iframe ??
       mimeType ??
       filename ??
       filePath,
@@ -747,6 +798,10 @@ function normalizeResource(item: RawResourceListItem): ResourceListItem {
     mimeType,
     filename,
     contentKind,
+    provider,
+    videoUrl,
+    embedUrl,
+    iframe,
     status,
     reviewState,
     origin: readString(item.origin),
@@ -1089,6 +1144,8 @@ function normalizeAccessibilityResource(
       item.kind ??
         item.resourceKind ??
         item.resource_kind ??
+        item.analysisType ??
+        item.analysis_type ??
         item.scanType ??
         item.scan_type ??
         item.resourceType ??
@@ -1100,6 +1157,18 @@ function normalizeAccessibilityResource(
         item.file_name ??
         item.contentKind ??
         item.content_kind ??
+        item.provider ??
+        item.videoProvider ??
+        item.video_provider ??
+        item.videoUrl ??
+        item.video_url ??
+        item.mediaUrl ??
+        item.media_url ??
+        item.embedUrl ??
+        item.embed_url ??
+        item.embed ??
+        item.iframe ??
+        item.iframeHtml ??
         item.type,
       fallbackKind,
     ),
@@ -1162,6 +1231,9 @@ function deriveAccessibilitySummary(
     wordResourcesAnalyzed: analyzedResources.filter(
       (resource) => resource.kind === 'WORD',
     ).length,
+    videoResourcesAnalyzed: analyzedResources.filter(
+      (resource) => resource.kind === 'VIDEO',
+    ).length,
     pass: allChecks.filter((check) => check.status === 'PASS').length,
     warning: allChecks.filter((check) => check.status === 'WARNING').length,
     fail: allChecks.filter((check) => check.status === 'FAIL').length,
@@ -1208,6 +1280,14 @@ function normalizeAccessibilitySummary(
       readNumber(readRecord(summary.docx).resourcesAnalyzed) ??
       readNumber(readRecord(summary.docx).resources_analyzed) ??
       fallbackSummary.wordResourcesAnalyzed,
+    videoResourcesAnalyzed:
+      readNumber(summary.videoResourcesAnalyzed) ??
+      readNumber(summary.video_resources_analyzed) ??
+      readNumber(summary.resourcesVideoAnalyzed) ??
+      readNumber(summary.resources_video_analyzed) ??
+      readNumber(readRecord(summary.video).resourcesAnalyzed) ??
+      readNumber(readRecord(summary.video).resources_analyzed) ??
+      fallbackSummary.videoResourcesAnalyzed,
     pass:
       readNumber(summary.pass) ??
       readNumber(summary.passed) ??
@@ -1250,6 +1330,7 @@ function emptyAccessibilityResponse(jobId: string): AccessibilityResponse {
       htmlResourcesAnalyzed: 0,
       pdfResourcesAnalyzed: 0,
       wordResourcesAnalyzed: 0,
+      videoResourcesAnalyzed: 0,
       pass: 0,
       warning: 0,
       fail: 0,
@@ -1360,6 +1441,28 @@ function normalizeAccessibilityResponse(
     {
       fallbackKind: 'WORD',
       resources: readArray(readRecord(root.docx_accessibility).resources),
+    },
+    { fallbackKind: 'VIDEO', resources: readArray(root.video) },
+    { fallbackKind: 'VIDEO', resources: readArray(root.videos) },
+    { fallbackKind: 'VIDEO', resources: readArray(root.videoResources) },
+    { fallbackKind: 'VIDEO', resources: readArray(root.video_resources) },
+    { fallbackKind: 'VIDEO', resources: readArray(root.videoAccessibility) },
+    { fallbackKind: 'VIDEO', resources: readArray(root.video_accessibility) },
+    {
+      fallbackKind: 'VIDEO',
+      resources: readArray(readRecord(root.video).resources),
+    },
+    {
+      fallbackKind: 'VIDEO',
+      resources: readArray(readRecord(root.video).results),
+    },
+    {
+      fallbackKind: 'VIDEO',
+      resources: readArray(readRecord(root.videoAccessibility).resources),
+    },
+    {
+      fallbackKind: 'VIDEO',
+      resources: readArray(readRecord(root.video_accessibility).resources),
     },
   ];
   const resources = mergeAccessibilityResources(

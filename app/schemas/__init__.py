@@ -41,6 +41,7 @@ class JobPhase(str, Enum):
     HTML_ACCESSIBILITY_SCAN = "HTML_ACCESSIBILITY_SCAN"
     PDF_ACCESSIBILITY_SCAN = "PDF_ACCESSIBILITY_SCAN"
     DOCX_ACCESSIBILITY_SCAN = "DOCX_ACCESSIBILITY_SCAN"
+    VIDEO_ACCESSIBILITY_SCAN = "VIDEO_ACCESSIBILITY_SCAN"
     DONE = "DONE"
     ERROR = "ERROR"
 
@@ -353,7 +354,7 @@ class AccessibilityResourceRead(StrictModel):
     resourceId: str
     title: str
     type: str
-    analysisType: Literal["HTML", "PDF", "DOCX"] | None = None
+    analysisType: Literal["HTML", "PDF", "DOCX", "VIDEO"] | None = None
     accessStatus: str
     checks: list[AccessibilityCheckRead] = Field(default_factory=list)
 
@@ -380,6 +381,8 @@ class AccessibilitySummaryRead(StrictModel):
     pdfResourcesAnalyzed: int = 0
     docxResourcesTotal: int = 0
     docxResourcesAnalyzed: int = 0
+    videoResourcesTotal: int = 0
+    videoResourcesAnalyzed: int = 0
     passCount: int = 0
     failCount: int = 0
     warningCount: int = 0
@@ -623,6 +626,8 @@ class ReportAutomaticAccessibilitySummaryRead(StrictModel):
     pdfResourcesAnalyzed: int
     wordResourcesDetected: int
     wordResourcesAnalyzed: int
+    videoResourcesDetected: int
+    videoResourcesAnalyzed: int
     passCount: int
     failCount: int
     warningCount: int
@@ -631,7 +636,7 @@ class ReportAutomaticAccessibilitySummaryRead(StrictModel):
 
 
 class ReportIssueSummaryRead(StrictModel):
-    resourceType: Literal["HTML", "PDF", "WORD"]
+    resourceType: Literal["HTML", "PDF", "WORD", "VIDEO"]
     checkId: str
     checkTitle: str
     status: Literal["FAIL", "WARNING"]
@@ -645,7 +650,7 @@ class ReportKeyIssueRead(StrictModel):
     moduleTitle: str | None = None
     resourceId: str
     resourceTitle: str
-    resourceType: Literal["HTML", "PDF", "WORD"]
+    resourceType: Literal["HTML", "PDF", "WORD", "VIDEO"]
     checkId: str
     checkTitle: str
     status: Literal["FAIL", "WARNING"]
@@ -700,6 +705,22 @@ class ReportWordResourceRead(StrictModel):
     overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
     summarized: bool = False
     checks: list[ReportWordCheckRead]
+
+
+class ReportVideoCheckRead(ReportHtmlCheckRead):
+    pass
+
+
+class ReportVideoResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    coursePath: str
+    moduleTitle: str | None = None
+    accessStatus: str
+    overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
+    provider: str
+    summarized: bool = False
+    checks: list[ReportVideoCheckRead]
 
 
 class ReportSkippedResourceRead(StrictModel):
@@ -776,11 +797,13 @@ class JobReportRead(StrictModel):
     htmlAccessibilitySummary: ReportHtmlAccessibilitySummaryRead
     pdfAccessibilitySummary: ReportPdfAccessibilitySummaryRead
     wordAccessibilitySummary: ReportWordAccessibilitySummaryRead
+    videoAccessibilitySummary: ReportHtmlAccessibilitySummaryRead
     issueSummary: list[ReportIssueSummaryRead]
     keyIssues: list[ReportKeyIssueRead]
     htmlResources: list[ReportHtmlResourceRead]
     pdfResources: list[ReportPdfResourceRead]
     wordResources: list[ReportWordResourceRead]
+    videoResources: list[ReportVideoResourceRead]
     notAutomaticallyAnalyzable: list[ReportSkippedResourceRead]
     summary: ReportSummaryRead
     routes: list[ReportRouteRead]

@@ -37,6 +37,14 @@ function getAnalysisCopy(status: JobStatus | null) {
     };
   }
 
+  if (status?.phase === 'VIDEO_ACCESSIBILITY_SCAN') {
+    return {
+      context:
+        'Verificando subtítulos, transcripción, proveedor y accesibilidad básica de los vídeos.',
+      title: 'Procesando accesibilidad de los recursos de vídeo',
+    };
+  }
+
   if (status?.phase === 'DONE') {
     return {
       context: null,
@@ -44,10 +52,18 @@ function getAnalysisCopy(status: JobStatus | null) {
     };
   }
 
-  if (progress >= 98) {
+  if (progress >= 99) {
     return {
       context: null,
       title: 'Análisis completado',
+    };
+  }
+
+  if (progress >= 97) {
+    return {
+      context:
+        'Verificando subtítulos, transcripción, proveedor y accesibilidad básica de los vídeos.',
+      title: 'Procesando accesibilidad de los recursos de vídeo',
     };
   }
 
@@ -93,7 +109,8 @@ function isAccessibilityScanPhase(status: JobStatus | null) {
   return (
     status?.phase === 'HTML_ACCESSIBILITY_SCAN' ||
     status?.phase === 'PDF_ACCESSIBILITY_SCAN' ||
-    status?.phase === 'DOCX_ACCESSIBILITY_SCAN'
+    status?.phase === 'DOCX_ACCESSIBILITY_SCAN' ||
+    status?.phase === 'VIDEO_ACCESSIBILITY_SCAN'
   );
 }
 

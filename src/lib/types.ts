@@ -14,6 +14,7 @@ export type JobPhase =
   | 'HTML_ACCESSIBILITY_SCAN'
   | 'PDF_ACCESSIBILITY_SCAN'
   | 'DOCX_ACCESSIBILITY_SCAN'
+  | 'VIDEO_ACCESSIBILITY_SCAN'
   | 'DONE'
   | 'ERROR';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
@@ -165,6 +166,10 @@ export interface ResourceListItem {
   mimeType?: string | null;
   filename?: string | null;
   contentKind?: string | null;
+  provider?: string | null;
+  videoUrl?: string | null;
+  embedUrl?: string | null;
+  iframe?: string | null;
   url: string | null;
   sourceUrl: string | null;
   downloadUrl: string | null;
@@ -249,7 +254,12 @@ export interface ResourceListResponse {
   structure: CourseStructure;
 }
 
-export type AccessibilityResourceKind = 'HTML' | 'PDF' | 'WORD' | 'OTHER';
+export type AccessibilityResourceKind =
+  | 'HTML'
+  | 'PDF'
+  | 'WORD'
+  | 'VIDEO'
+  | 'OTHER';
 
 export type AccessibilityCheckStatus =
   | 'PASS'
@@ -278,6 +288,7 @@ export interface AccessibilitySummary {
   htmlResourcesAnalyzed: number;
   pdfResourcesAnalyzed: number;
   wordResourcesAnalyzed: number;
+  videoResourcesAnalyzed: number;
   pass: number;
   warning: number;
   fail: number;

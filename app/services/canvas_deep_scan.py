@@ -42,6 +42,13 @@ class DiscoveredCanvasLink:
     title: str
     url: str
     normalized_url: str
+    html_tag: str
+    html_attribute: str
+    html_attrs: dict[str, str]
+    parent_tag: str | None
+    parent_attrs: dict[str, str]
+    track_kinds: list[str]
+    track_sources: list[str]
     file_id: str | None
     page_url: str | None
     is_internal: bool
@@ -101,6 +108,13 @@ def extract_canvas_links(
                 title=title,
                 url=absolute_url,
                 normalized_url=normalized_url,
+                html_tag=str(getattr(candidate, "name", "") or "").lower(),
+                html_attribute=attribute,
+                html_attrs=_html_attrs_payload(candidate),
+                parent_tag=_html_parent_tag(candidate),
+                parent_attrs=_html_attrs_payload(getattr(candidate, "parent", None)),
+                track_kinds=_html_track_values(candidate, "kind"),
+                track_sources=_html_track_values(candidate, "src"),
                 file_id=file_id,
                 page_url=page_url,
                 is_internal=is_internal,
@@ -306,6 +320,43 @@ def _html_attr(candidate: Any, attribute: str) -> str | None:
     return str(value).strip() if value is not None and str(value).strip() else None
 
 
+def _html_attrs_payload(candidate: Any) -> dict[str, str]:
+    attrs = getattr(candidate, "attrs", None)
+    if not isinstance(attrs, dict):
+        return {}
+    payload: dict[str, str] = {}
+    for key, value in attrs.items():
+        if isinstance(value, list):
+            payload[str(key)] = " ".join(str(item) for item in value if str(item).strip())
+        elif value is None:
+            payload[str(key)] = ""
+        else:
+            payload[str(key)] = str(value)
+    return payload
+
+
+def _html_parent_tag(candidate: Any) -> str | None:
+    parent = getattr(candidate, "parent", None)
+    name = getattr(parent, "name", None)
+    return str(name).lower() if isinstance(name, str) and name else None
+
+
+def _html_track_values(candidate: Any, attribute: str) -> list[str]:
+    search_root = candidate
+    parent = getattr(candidate, "parent", None)
+    if getattr(parent, "name", None) == "video":
+        search_root = parent
+    find_all = getattr(search_root, "find_all", None)
+    if not callable(find_all):
+        return []
+    values: list[str] = []
+    for track in find_all("track"):
+        value = _html_attr(track, attribute)
+        if value:
+            values.append(value)
+    return values
+
+
 def _extract_link_title(candidate: Any, url: str) -> str:
     text = getattr(candidate, "text", "")
     if not isinstance(text, str):
@@ -464,6 +515,13 @@ def _build_discovered_resource(
                 "parentResourceId": parent_id,
                 "depth": depth,
                 "normalizedUrl": link.normalized_url,
+                "tag": link.html_tag,
+                "attribute": link.html_attribute,
+                "elementAttrs": link.html_attrs,
+                "parentTag": link.parent_tag,
+                "parentAttrs": link.parent_attrs,
+                "trackKinds": link.track_kinds,
+                "trackSources": link.track_sources,
                 "fileId": link.file_id,
                 "pageUrl": link.page_url,
                 "downloadCandidate": link.is_downloadable_candidate,

@@ -1068,6 +1068,17 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     assert any(event.message == "Procesando accesibilidad de los recursos PDF" for event in events)
     assert any(event.message == "Procesando accesibilidad de los recursos de vídeo" for event in events)
 
+    executive_response = client.get(f"/api/jobs/{job_id}/executive-summary")
+    assert executive_response.status_code == 200, executive_response.text
+    executive = executive_response.json()
+    assert executive["jobId"] == job_id
+    assert executive["mode"] == "OFFLINE_IMSCC"
+    assert isinstance(executive["accessibilityScore"], int)
+    assert executive["priority"] in {"HIGH", "MEDIUM", "LOW"}
+    assert executive["summary"]["resourcesAnalyzed"] == 3
+    assert executive["summary"]["notScoredResources"] == 1
+    assert executive["modules"][0]["resources"][0]["reportAnchorId"].startswith("resource-")
+
 
 def test_report_generation_includes_access_html_pdf_word_and_video_accessibility_summaries(
     client,
@@ -1126,6 +1137,15 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
     assert report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"] == 1
     assert report["automaticAccessibilitySummary"]["failCount"] >= 1
     assert report["automaticAccessibilitySummary"]["warningCount"] >= 1
+    assert 0 <= report["executiveSummary"]["score"] <= 100
+    assert report["executiveSummary"]["priority"] in {"alta", "media", "baja"}
+    assert report["executiveSummary"]["resourcesDetected"] == 5
+    assert report["executiveSummary"]["resourcesAnalyzed"] == 4
+    assert len(report["executiveSummary"]["priorityRecommendations"]) == 3
+    assert report["moduleScores"]
+    assert report["moduleScores"][0]["resourcesAnalyzed"] == 4
+    assert report["resourceScores"]
+    assert any(resource["type"] == "VIDEO" for resource in report["resourceScores"])
     assert report["htmlAccessibilitySummary"]["resourcesDetected"] == 1
     assert report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert report["htmlAccessibilitySummary"]["failCount"] >= 1
@@ -1179,6 +1199,9 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
     assert stored_report["automaticAccessibilitySummary"]["pdfResourcesAnalyzed"] == 1
     assert stored_report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"] == 1
     assert stored_report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"] == 1
+    assert stored_report["executiveSummary"]["resourcesAnalyzed"] == 4
+    assert stored_report["moduleScores"]
+    assert stored_report["resourceScores"]
     assert stored_report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert stored_report["pdfAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert stored_report["wordAccessibilitySummary"]["resourcesAnalyzed"] == 1
@@ -1187,9 +1210,13 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
 
     word_document = Document(str(docx_path))
     paragraphs = [paragraph.text for paragraph in word_document.paragraphs if paragraph.text]
+    assert "Resumen ejecutivo" in paragraphs
     assert "Resumen de acceso" in paragraphs
     assert "Resumen de accesibilidad automática" in paragraphs
+    assert "Puntuación por módulo" in paragraphs
+    assert "Puntuación por recurso" in paragraphs
     assert "Principales incidencias" in paragraphs
+    assert "Detalle técnico" in paragraphs
     assert "Detalle por recurso HTML" in paragraphs
     assert "Detalle por recurso PDF" in paragraphs
     assert "Detalle por recurso Word" in paragraphs

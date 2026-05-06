@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import { ApiError, api } from '../lib/api';
@@ -35,6 +35,7 @@ export function OnlinePage() {
   const [isLoadingCourses, setIsLoadingCourses] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hasRequestedCoursesRef = useRef(false);
 
   useEffect(() => {
     rememberAppMode('online');
@@ -44,7 +45,7 @@ export function OnlinePage() {
     }
   }, [searchParams, setSearchParams]);
 
-  async function loadCourses() {
+  const loadCourses = useCallback(async () => {
     try {
       setIsLoadingCourses(true);
       setHasLoadedCourses(true);
@@ -65,7 +66,16 @@ export function OnlinePage() {
     } finally {
       setIsLoadingCourses(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    if (hasRequestedCoursesRef.current) {
+      return;
+    }
+
+    hasRequestedCoursesRef.current = true;
+    void loadCourses();
+  }, [loadCourses]);
 
   const selectedCourse =
     courses.find((course) => course.id === selectedCourseId) ?? null;
@@ -105,7 +115,8 @@ export function OnlinePage() {
       align="center"
       backLabel="Cambiar modo"
       backTo="/?mode=online"
-      title="Selecciona un curso"
+      showTokenButton={false}
+      title="Selecciona tu curso"
     >
       <form
         className="mx-auto max-w-3xl space-y-6 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8"
@@ -122,20 +133,18 @@ export function OnlinePage() {
             </p>
           </div>
 
-          <button
-            className="button-secondary w-full sm:w-auto"
-            disabled={isLoadingCourses}
-            onClick={() => {
-              void loadCourses();
-            }}
-            type="button"
-          >
-            {isLoadingCourses
-              ? 'Cargando cursos…'
-              : hasLoadedCourses
-                ? 'Recargar cursos'
-                : 'Cargar cursos'}
-          </button>
+          {error ? (
+            <button
+              className="button-secondary w-full sm:w-auto"
+              disabled={isLoadingCourses}
+              onClick={() => {
+                void loadCourses();
+              }}
+              type="button"
+            >
+              {isLoadingCourses ? 'Reintentando…' : 'Reintentar carga'}
+            </button>
+          ) : null}
         </div>
 
         {error ? (
@@ -150,14 +159,14 @@ export function OnlinePage() {
 
         <div className="space-y-4 text-left">
           {!hasLoadedCourses && !isLoadingCourses ? (
-            <p className="rounded-2xl border border-line bg-[#f7faf7] px-4 py-4 text-sm leading-6 text-subtle">
-              Pulsa “Cargar cursos” para consultar Canvas/UOC.
+            <p className="rounded-2xl border border-line bg-[var(--color-surface-soft)] px-4 py-4 text-sm leading-6 text-subtle">
+              Estamos consultando Canvas/UOC automáticamente.
             </p>
           ) : null}
 
           {isLoadingCourses ? (
             <p
-              className="rounded-2xl border border-line bg-[#f7faf7] px-4 py-4 text-sm leading-6 text-subtle"
+              className="rounded-2xl border border-line bg-[var(--color-surface-soft)] px-4 py-4 text-sm leading-6 text-subtle"
               role="status"
             >
               Cargando cursos…
@@ -166,7 +175,7 @@ export function OnlinePage() {
 
           {hasLoadedCourses && !isLoadingCourses && courses.length === 0 ? (
             <p
-              className="rounded-2xl border border-line bg-[#f7faf7] px-4 py-4 text-sm leading-6 text-subtle"
+              className="rounded-2xl border border-line bg-[var(--color-surface-soft)] px-4 py-4 text-sm leading-6 text-subtle"
               role="status"
             >
               No hay cursos disponibles. Revisa la configuración de Canvas/UOC o
@@ -224,7 +233,7 @@ export function OnlinePage() {
                           <input
                             aria-describedby={meta ? descriptionId : undefined}
                             checked={checked}
-                            className="mt-1 h-5 w-5 accent-[#0f766e]"
+                            className="mt-1 h-5 w-5 accent-[var(--uoc-blue)]"
                             id={inputId}
                             name="canvas-course"
                             onChange={() => setSelectedCourseId(course.id)}

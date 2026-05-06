@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 
 interface TokenWelcomePageProps {
@@ -16,11 +16,16 @@ export function TokenWelcomePage({
   onContinueWithoutToken,
   statusError,
 }: TokenWelcomePageProps) {
+  const navigate = useNavigate();
+
   return (
     <LayoutSimple
       align="center"
       description="Configura el acceso online o continúa con el modo offline."
+      showSkipLink={false}
+      showTokenButton={false}
       title="Bienvenido a AccessibleCourse"
+      variant="plain"
     >
       <section className="mx-auto max-w-3xl space-y-6 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8">
         <div className="space-y-4 text-left">
@@ -75,9 +80,13 @@ export function TokenWelcomePage({
               Continuar sin token
             </button>
           ) : (
-            <Link className="button-secondary w-full sm:w-auto" to="/">
+            <button
+              className="button-secondary w-full sm:w-auto"
+              onClick={() => navigate('/')}
+              type="button"
+            >
               Continuar sin token
-            </Link>
+            </button>
           )}
         </div>
       </section>

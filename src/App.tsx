@@ -113,7 +113,10 @@ export default function App() {
       <LayoutSimple
         align="center"
         description="Comprobando si el modo online está disponible."
+        showSkipLink={false}
+        showTokenButton={false}
         title="Comprobando token de acceso"
+        variant="plain"
       >
         <section className="mx-auto max-w-2xl rounded-3xl border border-line bg-white p-6 text-center text-sm leading-6 text-subtle shadow-card">
           Consultando el estado del token…

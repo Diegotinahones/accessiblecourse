@@ -20,6 +20,7 @@ from app.schemas import (
     ChecklistSaveRequest,
     ChecklistSaveResult,
     AccessModuleRead,
+    ExecutiveSummaryRead,
     JobCreatedResponse,
     JobAccessRead,
     JobPhase,
@@ -44,6 +45,7 @@ from app.services.course_structure import (
     load_course_structure,
 )
 from app.services.docx_accessibility import ensure_docx_accessibility_report
+from app.services.executive_summary import build_executive_summary
 from app.services.html_accessibility import ensure_accessibility_report
 from app.services.jobs import (
     create_job_record,
@@ -765,6 +767,67 @@ def get_job_accessibility(
         course_id=course_id,
     )
     return _accessibility_report_read(report)
+
+
+@router.get("/{job_id}/executive-summary", response_model=ExecutiveSummaryRead)
+def get_job_executive_summary(
+    job_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    job = get_processing_job_or_404(session, job_id)
+    _ensure_review_inventory(session, settings, job_id)
+    report_settings = _settings_for_request_canvas_token(request, settings)
+    canvas_client, canvas_credentials, course_id = _load_online_context(
+        request=request,
+        settings=settings,
+        job_id=job_id,
+    )
+    inventory = [item.model_dump(mode="python") for item in load_inventory_file(report_settings, job_id)]
+    ensure_accessibility_report(
+        settings=report_settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    report = ensure_pdf_accessibility_report(
+        settings=report_settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    report = ensure_docx_accessibility_report(
+        settings=report_settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    report = ensure_video_accessibility_report(
+        settings=report_settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+    return build_executive_summary(
+        job_id=job_id,
+        mode=_job_mode(report_settings, job_id),
+        course_title=job.original_filename,
+        inventory_items=inventory,
+        accessibility_report=report,
+    )
+
+
+def _job_mode(settings: Settings, job_id: str) -> str:
+    return "OFFLINE_IMSCC" if get_extracted_dir(settings, job_id).exists() else "ONLINE_CANVAS"
 
 
 @router.post("/{job_id}/access-analysis/retry", response_model=JobStatusResponse, status_code=status.HTTP_202_ACCEPTED)

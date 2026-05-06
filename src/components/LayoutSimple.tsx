@@ -1,5 +1,5 @@
 import { ReactNode, useEffect, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { classNames } from '../lib/utils';
 
 interface LayoutSimpleProps {
@@ -10,6 +10,9 @@ interface LayoutSimpleProps {
   backTo?: string;
   backLabel?: string;
   align?: 'left' | 'center';
+  showSkipLink?: boolean;
+  showTokenButton?: boolean;
+  variant?: 'app' | 'plain';
 }
 
 export function LayoutSimple({
@@ -20,7 +23,11 @@ export function LayoutSimple({
   backTo,
   backLabel,
   align = 'left',
+  showSkipLink = true,
+  showTokenButton = true,
+  variant = 'app',
 }: LayoutSimpleProps) {
+  const navigate = useNavigate();
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
@@ -29,33 +36,53 @@ export function LayoutSimple({
 
   return (
     <div className="min-h-screen bg-[var(--color-page)] text-ink">
-      <a
-        href="#page-content"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-xl focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
-      >
-        Saltar al contenido
-      </a>
+      {showSkipLink ? (
+        <a
+          href="#page-content"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-xl focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
+        >
+          Saltar al contenido
+        </a>
+      ) : null}
+
+      {variant === 'app' ? (
+        <header className="bg-[var(--uoc-blue)] text-white">
+          <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+            <p className="text-lg font-semibold tracking-[-0.02em]">
+              AccessibleCourse
+            </p>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              {backTo ? (
+                <button
+                  className="button-on-blue"
+                  onClick={() => navigate(backTo)}
+                  type="button"
+                >
+                  {backLabel ?? 'Volver'}
+                </button>
+              ) : null}
+              {showTokenButton ? (
+                <button
+                  className="button-on-blue"
+                  onClick={() => navigate('/token')}
+                  type="button"
+                >
+                  Gestionar token de acceso
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </header>
+      ) : null}
 
       <main
         id="page-content"
-        className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-6 sm:px-6 sm:py-8 lg:px-8"
+        className={classNames(
+          'mx-auto flex w-full max-w-6xl flex-col px-4 py-8 sm:px-6 sm:py-10 lg:px-8',
+          variant === 'plain' && 'min-h-screen justify-center',
+          variant === 'app' && 'min-h-[calc(100vh-88px)]',
+        )}
       >
-        <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          {backTo ? (
-            <nav aria-label="Navegación de página">
-              <Link className="button-secondary text-sm" to={backTo}>
-                {backLabel ?? 'Volver'}
-              </Link>
-            </nav>
-          ) : (
-            <span aria-hidden="true" />
-          )}
-
-          <Link className="button-secondary text-sm" to="/token">
-            Gestionar token de acceso
-          </Link>
-        </div>
-
         <header
           className={classNames(
             'mb-8',

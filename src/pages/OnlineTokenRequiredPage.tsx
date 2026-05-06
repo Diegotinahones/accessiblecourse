@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 
 interface OnlineTokenRequiredPageProps {
@@ -14,12 +14,15 @@ export function OnlineTokenRequiredPage({
   onActivateDemo,
   statusError,
 }: OnlineTokenRequiredPageProps) {
+  const navigate = useNavigate();
+
   return (
     <LayoutSimple
       align="center"
       backLabel="Cambiar modo"
       backTo="/?mode=online"
       description="El modo online necesita un token activo para consultar Canvas/UOC."
+      showTokenButton={false}
       title="Token necesario para el modo online"
     >
       <section className="mx-auto max-w-3xl space-y-6 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8">
@@ -59,12 +62,13 @@ export function OnlineTokenRequiredPage({
           >
             {isSubmitting ? 'Configurando token…' : 'Configurar token'}
           </button>
-          <Link
+          <button
             className="button-secondary w-full sm:w-auto"
-            to="/offline?mode=offline"
+            onClick={() => navigate('/offline?mode=offline')}
+            type="button"
           >
             Usar modo offline
-          </Link>
+          </button>
         </div>
       </section>
     </LayoutSimple>

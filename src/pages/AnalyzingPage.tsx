@@ -14,104 +14,71 @@ import {
 function getAnalysisCopy(status: JobStatus | null) {
   const progress = status?.progress ?? 0;
 
+  if (status?.phase === 'UPLOAD') {
+    return 'Accediendo al curso';
+  }
+
+  if (status?.phase === 'INVENTORY') {
+    return 'Detectando recursos';
+  }
+
+  if (status?.phase === 'ACCESS_SCAN') {
+    return progress >= 75 ? 'Buscando descargables' : 'Accediendo al curso';
+  }
+
   if (status?.phase === 'HTML_ACCESSIBILITY_SCAN') {
-    return {
-      context: 'Analizando la accesibilidad de las páginas HTML.',
-      title: 'Procesando accesibilidad de los recursos HTML',
-    };
+    return 'Analizando HTML';
   }
 
   if (status?.phase === 'PDF_ACCESSIBILITY_SCAN') {
-    return {
-      context:
-        'Analizando la accesibilidad de los documentos PDF. La fase HTML ya se ha completado.',
-      title: 'Procesando accesibilidad de los recursos PDF',
-    };
+    return 'Analizando PDF';
   }
 
   if (status?.phase === 'DOCX_ACCESSIBILITY_SCAN') {
-    return {
-      context:
-        'Analizando la accesibilidad de los documentos Word. Las fases HTML y PDF ya se han completado.',
-      title: 'Procesando accesibilidad de los documentos Word',
-    };
+    return 'Analizando Word';
   }
 
   if (status?.phase === 'VIDEO_ACCESSIBILITY_SCAN') {
-    return {
-      context:
-        'Verificando subtítulos, transcripción, proveedor y accesibilidad básica de los vídeos.',
-      title: 'Procesando accesibilidad de los recursos de vídeo',
-    };
+    return 'Analizando vídeo';
   }
 
   if (status?.phase === 'DONE') {
-    return {
-      context: null,
-      title: 'Análisis completado',
-    };
+    return 'Análisis completado';
   }
 
   if (progress >= 99) {
-    return {
-      context: null,
-      title: 'Análisis completado',
-    };
+    return 'Análisis completado';
   }
 
   if (progress >= 97) {
-    return {
-      context:
-        'Verificando subtítulos, transcripción, proveedor y accesibilidad básica de los vídeos.',
-      title: 'Procesando accesibilidad de los recursos de vídeo',
-    };
+    return 'Analizando vídeo';
   }
 
   if (progress >= 95) {
-    return {
-      context:
-        'Analizando la accesibilidad de los documentos Word. Las fases HTML y PDF ya se han completado.',
-      title: 'Procesando accesibilidad de los documentos Word',
-    };
+    return 'Analizando Word';
   }
 
   if (progress >= 90) {
-    return {
-      context:
-        'Analizando la accesibilidad de los documentos PDF. La fase HTML ya se ha completado.',
-      title: 'Procesando accesibilidad de los recursos PDF',
-    };
+    return 'Analizando PDF';
   }
 
   if (progress >= 85) {
-    return {
-      context: 'Analizando la accesibilidad de las páginas HTML.',
-      title: 'Procesando accesibilidad de los recursos HTML',
-    };
+    return 'Analizando HTML';
   }
 
   if (progress >= 75) {
-    return { context: null, title: 'Buscando descargables' };
+    return 'Buscando descargables';
   }
 
   if (progress >= 50) {
-    return { context: null, title: 'Comprobando acceso' };
+    return 'Accediendo al curso';
   }
 
   if (progress >= 25) {
-    return { context: null, title: 'Detectando recursos' };
+    return 'Detectando recursos';
   }
 
-  return { context: null, title: 'Leyendo estructura del curso' };
-}
-
-function isAccessibilityScanPhase(status: JobStatus | null) {
-  return (
-    status?.phase === 'HTML_ACCESSIBILITY_SCAN' ||
-    status?.phase === 'PDF_ACCESSIBILITY_SCAN' ||
-    status?.phase === 'DOCX_ACCESSIBILITY_SCAN' ||
-    status?.phase === 'VIDEO_ACCESSIBILITY_SCAN'
-  );
+  return 'Accediendo al curso';
 }
 
 export function AnalyzingPage() {
@@ -190,22 +157,18 @@ export function AnalyzingPage() {
   }, [appMode, jobId, navigate]);
 
   const progress = jobStatus?.progress ?? 0;
-  const statusCopy = getAnalysisCopy(jobStatus);
-  const currentStep = jobStatus?.currentStep ?? 1;
-  const totalSteps = jobStatus?.totalSteps ?? 1;
-  const liveMessage = `${statusCopy.title}. ${progress}% completado.`;
-  const backendMessage = isAccessibilityScanPhase(jobStatus)
-    ? null
-    : jobStatus?.message;
+  const statusMessage = getAnalysisCopy(jobStatus);
+  const liveMessage = `${statusMessage}. ${progress}% completado.`;
 
   return (
     <LayoutSimple
       backLabel="Volver"
       backTo={`/${appMode}${getModeSearch(appMode)}`}
-      description="Estamos preparando el diagnóstico de acceso a recursos."
-      title="Analizando recursos"
+      description="Esto puede tardar unos minutos."
+      showTokenButton={false}
+      title="Estamos analizando los recursos"
     >
-      <section className="mx-auto max-w-2xl space-y-6 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8">
+      <section className="mx-auto max-w-2xl space-y-6 rounded-3xl border border-line bg-white p-6 text-center shadow-card sm:p-8">
         {error ? (
           <div
             aria-live="assertive"
@@ -220,20 +183,9 @@ export function AnalyzingPage() {
         ) : (
           <>
             <ProgressBar label="Progreso del análisis" value={progress} />
-            <p aria-live="polite" className="text-base font-medium text-ink">
+            <p aria-live="polite" className="text-lg font-semibold text-ink">
               {liveMessage}
             </p>
-            {statusCopy.context ? (
-              <p className="text-sm leading-6 text-subtle">
-                {statusCopy.context}
-              </p>
-            ) : null}
-            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-subtle">
-              Paso {currentStep} de {totalSteps}
-            </p>
-            {backendMessage ? (
-              <p className="text-sm leading-6 text-subtle">{backendMessage}</p>
-            ) : null}
           </>
         )}
       </section>

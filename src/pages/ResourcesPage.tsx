@@ -1,22 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Link,
-  useNavigate,
-  useParams,
-  useSearchParams,
-} from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import {
+  api,
   fetchAccessibility,
   fetchResources,
   getResourceDownloadUrl,
-  api,
 } from '../lib/api';
 import type {
   AccessibilityCheckStatus,
   AccessibilityResource,
   AccessibilityResourceKind,
   AccessibilityResponse,
+  AccessibilitySummary,
   AppMode,
   CourseStructure,
   CourseStructureNode,
@@ -24,24 +20,15 @@ import type {
 } from '../lib/types';
 import { getReviewResourceTypeLabel } from '../lib/types';
 import {
+  classNames,
   getModeSearch,
   isAppMode,
   loadRememberedAppMode,
   rememberAppMode,
 } from '../lib/utils';
 
-type BadgeTone = 'ok' | 'warning' | 'danger' | 'neutral';
-
-interface ResourceTreeNode {
-  resource: ResourceListItem;
-  children: ResourceTreeNode[];
-}
-
-interface ResourceSubsection {
-  id: string;
-  title: string;
-  resources: ResourceListItem[];
-}
+type BadgeTone = 'success' | 'warning' | 'danger' | 'neutral';
+type PriorityLevel = 'high' | 'medium' | 'low' | 'notAnalyzable';
 
 interface ResourceGroup {
   id: string;
@@ -49,43 +36,24 @@ interface ResourceGroup {
   description?: string;
   isGlobalUnplaced: boolean;
   resources: ResourceListItem[];
-  directResources: ResourceListItem[];
-  subsections: ResourceSubsection[];
 }
-
-interface BackendResourceCounts {
-  globalUnplacedCount: number | null;
-  noAccessCount: number | null;
-}
-
-interface ResourceFilters {
-  onlyNoAccess: boolean;
-  onlyDownloadable: boolean;
-  onlyFailures: boolean;
-  onlyWarnings: boolean;
-  onlyHtml: boolean;
-  onlyPdf: boolean;
-  onlyWord: boolean;
-  onlyVideo: boolean;
-  hideGlobalUnplaced: boolean;
-}
-
-const EMPTY_FILTERS: ResourceFilters = {
-  onlyNoAccess: false,
-  onlyDownloadable: false,
-  onlyFailures: false,
-  onlyWarnings: false,
-  onlyHtml: false,
-  onlyPdf: false,
-  onlyWord: false,
-  onlyVideo: false,
-  hideGlobalUnplaced: false,
-};
 
 const GLOBAL_UNPLACED_SECTION_LABEL =
   'Recursos globales o no ubicados en la estructura del curso';
 const GLOBAL_UNPLACED_SECTION_DESCRIPTION =
   'Recursos incluidos en el paquete, pero no asociados claramente a un módulo o PEC.';
+
+const EMPTY_ACCESSIBILITY_SUMMARY: AccessibilitySummary = {
+  htmlResourcesAnalyzed: 0,
+  pdfResourcesAnalyzed: 0,
+  wordResourcesAnalyzed: 0,
+  videoResourcesAnalyzed: 0,
+  pass: 0,
+  warning: 0,
+  fail: 0,
+  notApplicable: 0,
+  errors: 0,
+};
 
 function normalizeComparableText(value: string | null | undefined) {
   return (
@@ -123,97 +91,6 @@ function normalizeSectionName(value: string | null | undefined) {
     : (value?.trim() ?? GLOBAL_UNPLACED_SECTION_LABEL);
 }
 
-function buildGlobalMetadata(isGlobalUnplaced: boolean) {
-  return isGlobalUnplaced
-    ? {
-        description: GLOBAL_UNPLACED_SECTION_DESCRIPTION,
-        isGlobalUnplaced,
-      }
-    : {
-        isGlobalUnplaced,
-      };
-}
-
-function getAccessLabel(resource: ResourceListItem) {
-  if (resource.accessStatus === 'REQUIERE_INTERACCION') {
-    return 'REQUIERE INTERACCIÓN';
-  }
-
-  if (resource.accessStatus === 'REQUIERE_SSO') {
-    return 'REQUIERE SSO';
-  }
-
-  if (resource.accessStatus === 'NO_ANALIZABLE') {
-    return 'NO ANALIZABLE';
-  }
-
-  return resource.canAccess && resource.accessStatus === 'OK'
-    ? 'OK'
-    : 'NO ACCEDE';
-}
-
-function getAccessTone(resource: ResourceListItem): BadgeTone {
-  const accessLabel = getAccessLabel(resource);
-
-  if (accessLabel === 'OK') {
-    return 'ok';
-  }
-
-  if (
-    accessLabel === 'REQUIERE INTERACCIÓN' ||
-    accessLabel === 'REQUIERE SSO' ||
-    accessLabel === 'NO ANALIZABLE'
-  ) {
-    return 'warning';
-  }
-
-  return 'danger';
-}
-
-function getDownloadLabel(resource: ResourceListItem) {
-  return resource.canDownload ? 'DESCARGABLE' : 'NO DESCARGABLE';
-}
-
-function getDownloadTone(resource: ResourceListItem): BadgeTone {
-  return resource.canDownload ? 'ok' : 'neutral';
-}
-
-function getStatusClasses(tone: BadgeTone) {
-  if (tone === 'ok') {
-    return 'border-emerald-200 bg-emerald-50 text-[#166534]';
-  }
-
-  if (tone === 'warning') {
-    return 'border-amber-200 bg-amber-50 text-[#8a5a00]';
-  }
-
-  if (tone === 'neutral') {
-    return 'border-slate-200 bg-slate-50 text-slate-700';
-  }
-
-  return 'border-rose-200 bg-rose-50 text-danger';
-}
-
-function getAccessibilityStatusLabel(status: AccessibilityCheckStatus) {
-  if (status === 'NO_APLICA') {
-    return 'NO APLICA';
-  }
-
-  return status;
-}
-
-function getAccessibilityTone(status: AccessibilityCheckStatus): BadgeTone {
-  if (status === 'PASS') {
-    return 'ok';
-  }
-
-  if (status === 'WARNING' || status === 'NO_APLICA') {
-    return 'warning';
-  }
-
-  return 'danger';
-}
-
 function getSectionLabel(resource: ResourceListItem) {
   const sectionName =
     resource.sectionTitle ||
@@ -231,6 +108,161 @@ function getSectionLabel(resource: ResourceListItem) {
   return normalizeSectionName(sectionName);
 }
 
+function uniqueResources(resources: ResourceListItem[]) {
+  const seenResourceIds = new Set<string>();
+  return resources.filter((resource) => {
+    if (seenResourceIds.has(resource.id)) {
+      return false;
+    }
+
+    seenResourceIds.add(resource.id);
+    return true;
+  });
+}
+
+function collectNodeResources(
+  node: CourseStructureNode,
+  resourcesById: Map<string, ResourceListItem>,
+): ResourceListItem[] {
+  const collected: ResourceListItem[] = [];
+
+  if (node.resourceId) {
+    const resource = resourcesById.get(node.resourceId);
+    if (resource) {
+      collected.push(resource);
+    }
+  }
+
+  node.children.forEach((childNode) => {
+    collected.push(...collectNodeResources(childNode, resourcesById));
+  });
+
+  return uniqueResources(collected);
+}
+
+function createGroup(
+  id: string,
+  title: string | null | undefined,
+  resources: ResourceListItem[],
+): ResourceGroup {
+  const section = normalizeSectionName(title);
+  const isGlobalUnplaced = section === GLOBAL_UNPLACED_SECTION_LABEL;
+
+  return {
+    id,
+    section,
+    description: isGlobalUnplaced
+      ? GLOBAL_UNPLACED_SECTION_DESCRIPTION
+      : undefined,
+    isGlobalUnplaced,
+    resources: uniqueResources(resources),
+  };
+}
+
+function buildGroupsByPath(resources: ResourceListItem[]) {
+  const groups = new Map<string, ResourceListItem[]>();
+
+  resources.forEach((resource) => {
+    const section = getSectionLabel(resource);
+    groups.set(section, [...(groups.get(section) ?? []), resource]);
+  });
+
+  return Array.from(groups.entries()).map(([section, sectionResources]) =>
+    createGroup(section, section, sectionResources),
+  );
+}
+
+function sortGlobalGroupLast(groups: ResourceGroup[]) {
+  return [...groups].sort((left, right) => {
+    if (left.isGlobalUnplaced === right.isGlobalUnplaced) {
+      return 0;
+    }
+
+    return left.isGlobalUnplaced ? 1 : -1;
+  });
+}
+
+function buildGroupsFromStructure(
+  structure: CourseStructure,
+  resources: ResourceListItem[],
+) {
+  const resourcesById = new Map(
+    resources.map((resource) => [resource.id, resource]),
+  );
+  const groupedResourceIds = new Set<string>();
+  const groups: ResourceGroup[] = [];
+
+  structure.organizations.forEach((organization) => {
+    const organizationDirectResources: ResourceListItem[] = [];
+
+    organization.children.forEach((node) => {
+      if (node.resourceId && node.children.length === 0) {
+        const resource = resourcesById.get(node.resourceId);
+        if (resource) {
+          organizationDirectResources.push(resource);
+          groupedResourceIds.add(resource.id);
+        }
+        return;
+      }
+
+      const nodeResources = collectNodeResources(node, resourcesById);
+      if (nodeResources.length === 0) {
+        return;
+      }
+
+      nodeResources.forEach((resource) => groupedResourceIds.add(resource.id));
+      groups.push(createGroup(node.nodeId, node.title, nodeResources));
+    });
+
+    if (organizationDirectResources.length > 0) {
+      groups.push(
+        createGroup(
+          `${organization.nodeId}-direct`,
+          organization.title,
+          organizationDirectResources,
+        ),
+      );
+    }
+  });
+
+  const unplacedResources = structure.unplacedResourceIds
+    .map((resourceId) => resourcesById.get(resourceId))
+    .filter((resource): resource is ResourceListItem => {
+      if (!resource) {
+        return false;
+      }
+
+      return !groupedResourceIds.has(resource.id);
+    });
+
+  unplacedResources.forEach((resource) => groupedResourceIds.add(resource.id));
+
+  if (unplacedResources.length > 0) {
+    groups.push(
+      createGroup(
+        'unplaced-resources',
+        GLOBAL_UNPLACED_SECTION_LABEL,
+        unplacedResources,
+      ),
+    );
+  }
+
+  const remainingResources = resources.filter(
+    (resource) => !groupedResourceIds.has(resource.id),
+  );
+
+  return sortGlobalGroupLast([
+    ...groups,
+    ...buildGroupsByPath(remainingResources),
+  ]);
+}
+
+function toPanelId(prefix: string, id: string) {
+  const normalizedId =
+    id.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'panel';
+  return `${prefix}-${normalizedId.toLowerCase()}`;
+}
+
 function getKindFromValue(
   value: string | null | undefined,
 ): AccessibilityResourceKind | null {
@@ -246,7 +278,6 @@ function getKindFromValue(
 
   if (
     normalizedValue === 'PDF' ||
-    normalizedValue.startsWith('PDF_') ||
     normalizedValue.includes('APPLICATION/PDF') ||
     normalizedValue.endsWith('.PDF')
   ) {
@@ -265,14 +296,12 @@ function getKindFromValue(
 
   if (
     normalizedValue === 'VIDEO' ||
-    normalizedValue.startsWith('VIDEO_') ||
     normalizedValue.includes('VIDEO') ||
     normalizedValue.includes('YOUTUBE') ||
     normalizedValue.includes('YOUTU_BE') ||
     normalizedValue.includes('VIMEO') ||
     normalizedValue.includes('KALTURA') ||
     normalizedValue.includes('PANOPTO') ||
-    normalizedValue.includes('MEDIA_SITE') ||
     normalizedValue.endsWith('.MP4') ||
     normalizedValue.endsWith('.WEBM') ||
     normalizedValue.endsWith('.MOV')
@@ -296,7 +325,7 @@ function getKindFromValue(
 function getResourceAccessibilityKind(
   resource: ResourceListItem,
   accessibilityResult: AccessibilityResource | undefined,
-): AccessibilityResourceKind {
+) {
   const documentKind = [
     resource.type,
     resource.core.type,
@@ -315,7 +344,7 @@ function getResourceAccessibilityKind(
     .map(getKindFromValue)
     .find((kind) => kind === 'PDF' || kind === 'WORD');
 
-  if (documentKind) {
+  if (documentKind === 'PDF' || documentKind === 'WORD') {
     return documentKind;
   }
 
@@ -354,7 +383,6 @@ function getResourceAccessibilityKind(
     resource.core.type,
     resource.resourceType,
     resource.contentKind,
-    resource.provider,
     resource.analysisCategory,
     resource.htmlPath,
     resource.core.htmlPath,
@@ -366,648 +394,330 @@ function getResourceAccessibilityKind(
   return htmlKind ?? accessibilityResult?.kind ?? 'OTHER';
 }
 
-function isHtmlResource(
-  resource: ResourceListItem,
-  accessibilityResult: AccessibilityResource | undefined,
-) {
-  return getResourceAccessibilityKind(resource, accessibilityResult) === 'HTML';
-}
-
-function isPdfResource(
-  resource: ResourceListItem,
-  accessibilityResult: AccessibilityResource | undefined,
-) {
-  return getResourceAccessibilityKind(resource, accessibilityResult) === 'PDF';
-}
-
-function isWordResource(
-  resource: ResourceListItem,
-  accessibilityResult: AccessibilityResource | undefined,
-) {
-  return getResourceAccessibilityKind(resource, accessibilityResult) === 'WORD';
-}
-
-function isVideoResource(
-  resource: ResourceListItem,
-  accessibilityResult: AccessibilityResource | undefined,
-) {
-  return (
-    getResourceAccessibilityKind(resource, accessibilityResult) === 'VIDEO'
-  );
-}
-
-function getAccessibilityChecklistTitle(kind: AccessibilityResourceKind) {
-  if (kind === 'HTML') {
-    return 'Checklist automático HTML';
+function getAccessLabel(resource: ResourceListItem) {
+  if (resource.accessStatus === 'REQUIERE_INTERACCION') {
+    return 'REQUIERE INTERACCIÓN';
   }
 
-  if (kind === 'PDF') {
-    return 'Checklist automático PDF';
+  if (resource.accessStatus === 'REQUIERE_SSO') {
+    return 'REQUIERE SSO';
   }
 
-  if (kind === 'WORD') {
-    return 'Checklist automático Word';
+  if (resource.accessStatus === 'NO_ANALIZABLE') {
+    return 'NO ANALIZABLE';
   }
 
-  if (kind === 'VIDEO') {
-    return 'Checklist automático Vídeo';
-  }
-
-  return 'Checklist automático de accesibilidad';
-}
-
-function isExternalAccessBlocked(resource: ResourceListItem) {
-  return (
-    resource.accessStatus === 'REQUIERE_SSO' ||
-    resource.accessStatus === 'REQUIERE_INTERACCION'
-  );
+  return resource.canAccess && resource.accessStatus === 'OK'
+    ? 'OK'
+    : 'NO ACCEDE';
 }
 
 function isNoAccessResource(resource: ResourceListItem) {
   return getAccessLabel(resource) === 'NO ACCEDE';
 }
 
-function getNoAccessReason(resource: ResourceListItem) {
-  if (resource.reasonCode) {
-    return resource.reasonCode;
+function getBadgeClasses(tone: BadgeTone) {
+  if (tone === 'success') {
+    return 'border-emerald-200 bg-emerald-50 text-[#166534]';
   }
 
-  if (typeof resource.httpStatus === 'number') {
-    return `http_${resource.httpStatus}`;
+  if (tone === 'warning') {
+    return 'border-amber-200 bg-amber-50 text-[#8a5a00]';
   }
 
-  if (resource.urlStatus) {
-    return resource.urlStatus;
+  if (tone === 'danger') {
+    return 'border-rose-200 bg-rose-50 text-danger';
   }
 
-  if (resource.accessStatus && resource.accessStatus !== 'OK') {
-    return resource.accessStatus.toLocaleLowerCase('es-ES');
-  }
-
-  return 'no_access';
+  return 'border-slate-200 bg-slate-50 text-slate-700';
 }
 
-function getNoAccessDetail(resource: ResourceListItem) {
-  return (
-    resource.reasonDetail ||
-    resource.errorMessage ||
-    resource.accessNote ||
-    null
+function getAccessTone(resource: ResourceListItem): BadgeTone {
+  const label = getAccessLabel(resource);
+
+  if (label === 'OK') {
+    return 'success';
+  }
+
+  if (label === 'NO ACCEDE') {
+    return 'danger';
+  }
+
+  return 'warning';
+}
+
+function getCheckScore(status: AccessibilityCheckStatus) {
+  if (status === 'PASS' || status === 'NO_APLICA') {
+    return 100;
+  }
+
+  if (status === 'WARNING') {
+    return 70;
+  }
+
+  if (status === 'FAIL') {
+    return 25;
+  }
+
+  return 0;
+}
+
+function getResourceScore(
+  accessibilityResult: AccessibilityResource | undefined,
+) {
+  if (!accessibilityResult?.checks.length) {
+    return null;
+  }
+
+  const total = accessibilityResult.checks.reduce(
+    (sum, check) => sum + getCheckScore(check.status),
+    0,
+  );
+
+  return Math.round(total / accessibilityResult.checks.length);
+}
+
+function averageScores(scores: Array<number | null>) {
+  const scoredValues = scores.filter(
+    (score): score is number => score !== null,
+  );
+
+  if (scoredValues.length === 0) {
+    return null;
+  }
+
+  return Math.round(
+    scoredValues.reduce((total, score) => total + score, 0) /
+      scoredValues.length,
   );
 }
 
-function hasTechnicalDetails(resource: ResourceListItem) {
-  return typeof resource.httpStatus === 'number' || Boolean(resource.finalUrl);
-}
-
-function toPanelId(prefix: string, id: string) {
-  const normalizedId =
-    id.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'panel';
-  return `${prefix}-${normalizedId.toLowerCase()}`;
-}
-
-function uniqueResources(resources: ResourceListItem[]) {
-  const seenResourceIds = new Set<string>();
-  return resources.filter((resource) => {
-    if (seenResourceIds.has(resource.id)) {
-      return false;
-    }
-
-    seenResourceIds.add(resource.id);
-    return true;
-  });
-}
-
-function collectNodeResources(
-  node: CourseStructureNode,
-  resourcesById: Map<string, ResourceListItem>,
-): ResourceListItem[] {
-  const collected: ResourceListItem[] = [];
-
-  if (node.resourceId) {
-    const resource = resourcesById.get(node.resourceId);
-    if (resource) {
-      collected.push(resource);
-    }
+function getPriority(score: number | null): PriorityLevel {
+  if (score === null) {
+    return 'notAnalyzable';
   }
 
-  node.children.forEach((childNode) => {
-    collected.push(...collectNodeResources(childNode, resourcesById));
-  });
-
-  return uniqueResources(collected);
-}
-
-function createGroup(
-  id: string,
-  title: string | null | undefined,
-  directResources: ResourceListItem[],
-  subsections: ResourceSubsection[] = [],
-): ResourceGroup {
-  const section = normalizeSectionName(title);
-  const isGlobalUnplaced = section === GLOBAL_UNPLACED_SECTION_LABEL;
-  const subsectionResources = subsections.flatMap(
-    (subsection) => subsection.resources,
-  );
-  const resources = uniqueResources([
-    ...directResources,
-    ...subsectionResources,
-  ]);
-
-  return {
-    id,
-    section,
-    ...buildGlobalMetadata(isGlobalUnplaced),
-    resources,
-    directResources: uniqueResources(directResources),
-    subsections,
-  };
-}
-
-function buildGroupFromStructureNode(
-  node: CourseStructureNode,
-  resourcesById: Map<string, ResourceListItem>,
-): ResourceGroup | null {
-  const directResources: ResourceListItem[] = [];
-  const subsections: ResourceSubsection[] = [];
-
-  node.children.forEach((childNode) => {
-    if (childNode.resourceId && childNode.children.length === 0) {
-      const resource = resourcesById.get(childNode.resourceId);
-      if (resource) {
-        directResources.push(resource);
-      }
-      return;
-    }
-
-    const subsectionResources = collectNodeResources(childNode, resourcesById);
-    if (subsectionResources.length > 0) {
-      subsections.push({
-        id: childNode.nodeId,
-        title: normalizeSectionName(childNode.title),
-        resources: subsectionResources,
-      });
-    }
-  });
-
-  if (directResources.length === 0 && subsections.length === 0) {
-    directResources.push(...collectNodeResources(node, resourcesById));
+  if (score >= 80) {
+    return 'low';
   }
 
-  const group = createGroup(
-    node.nodeId,
-    node.title,
-    directResources,
-    subsections,
-  );
-  return group.resources.length > 0 ? group : null;
+  if (score >= 60) {
+    return 'medium';
+  }
+
+  return 'high';
 }
 
-function buildGroupsByPath(resources: ResourceListItem[]): ResourceGroup[] {
-  const groups = new Map<string, ResourceListItem[]>();
+function getPriorityLabel(priority: PriorityLevel) {
+  if (priority === 'low') {
+    return 'Prioridad baja';
+  }
 
-  resources.forEach((resource) => {
-    const section = getSectionLabel(resource);
-    groups.set(section, [...(groups.get(section) ?? []), resource]);
-  });
+  if (priority === 'medium') {
+    return 'Prioridad media';
+  }
 
-  return Array.from(groups.entries()).map(([section, sectionResources]) =>
-    createGroup(section, section, sectionResources),
-  );
+  if (priority === 'high') {
+    return 'Prioridad alta';
+  }
+
+  return 'No analizable';
 }
 
-function sortGlobalGroupLast(groups: ResourceGroup[]) {
-  return [...groups].sort((left, right) => {
-    if (left.isGlobalUnplaced === right.isGlobalUnplaced) {
-      return 0;
-    }
+function getPriorityTone(priority: PriorityLevel): BadgeTone {
+  if (priority === 'low') {
+    return 'success';
+  }
 
-    return left.isGlobalUnplaced ? 1 : -1;
-  });
+  if (priority === 'medium') {
+    return 'warning';
+  }
+
+  if (priority === 'high') {
+    return 'danger';
+  }
+
+  return 'neutral';
 }
 
-function buildGroupsFromStructure(
-  structure: CourseStructure,
+function getScoreClass(score: number | null) {
+  if (score === null) {
+    return 'text-subtle';
+  }
+
+  if (score >= 80) {
+    return 'score-green';
+  }
+
+  if (score >= 60) {
+    return 'score-yellow';
+  }
+
+  return 'score-red';
+}
+
+function formatScore(score: number | null) {
+  return score === null ? 'Sin puntuación' : `${score}/100`;
+}
+
+function hasChecks(accessibilityResult: AccessibilityResource | undefined) {
+  return Boolean(accessibilityResult?.checks.length);
+}
+
+function isNonAnalyzableResource(
+  resource: ResourceListItem,
+  accessibilityResult: AccessibilityResource | undefined,
+) {
+  return !hasChecks(accessibilityResult) || getAccessLabel(resource) !== 'OK';
+}
+
+function buildPriorityRecommendations(
+  accessibility: AccessibilityResponse | null,
   resources: ResourceListItem[],
-): ResourceGroup[] {
+) {
+  const recommendations: string[] = [];
   const resourcesById = new Map(
     resources.map((resource) => [resource.id, resource]),
   );
-  const groupedResourceIds = new Set<string>();
-  const groups: ResourceGroup[] = [];
 
-  structure.organizations.forEach((organization) => {
-    const organizationDirectResources: ResourceListItem[] = [];
+  function kindHasIssue(kind: AccessibilityResourceKind) {
+    return (accessibility?.resources ?? []).some((result) => {
+      const resource = resourcesById.get(result.resourceId);
+      const resolvedKind = resource
+        ? getResourceAccessibilityKind(resource, result)
+        : result.kind;
 
-    organization.children.forEach((node) => {
-      if (node.resourceId && node.children.length === 0) {
-        const resource = resourcesById.get(node.resourceId);
-        if (resource) {
-          organizationDirectResources.push(resource);
-          groupedResourceIds.add(resource.id);
-        }
-        return;
-      }
-
-      const group = buildGroupFromStructureNode(node, resourcesById);
-      if (!group) {
-        return;
-      }
-
-      group.resources.forEach((resource) =>
-        groupedResourceIds.add(resource.id),
+      return (
+        resolvedKind === kind &&
+        result.checks.some(
+          (check) => check.status === 'FAIL' || check.status === 'WARNING',
+        )
       );
-      groups.push(group);
     });
+  }
 
-    if (organizationDirectResources.length > 0) {
-      groups.push(
-        createGroup(
-          `${organization.nodeId}-direct`,
-          organization.title,
-          organizationDirectResources,
-        ),
-      );
-    }
-  });
-
-  const unplacedResources = structure.unplacedResourceIds
-    .map((resourceId) => resourcesById.get(resourceId))
-    .filter((resource): resource is ResourceListItem => Boolean(resource));
-
-  unplacedResources.forEach((resource) => groupedResourceIds.add(resource.id));
-
-  if (unplacedResources.length > 0) {
-    groups.push(
-      createGroup(
-        'unplaced-resources',
-        GLOBAL_UNPLACED_SECTION_LABEL,
-        unplacedResources,
-      ),
+  if (kindHasIssue('HTML')) {
+    recommendations.push(
+      'Definir idioma principal y estructura semántica en páginas HTML.',
     );
   }
 
-  const remainingResources = resources.filter(
-    (resource) => !groupedResourceIds.has(resource.id),
-  );
-
-  if (remainingResources.length > 0) {
-    groups.push(...buildGroupsByPath(remainingResources));
+  if (kindHasIssue('PDF')) {
+    recommendations.push(
+      'Exportar PDF como documentos etiquetados y revisar el orden de lectura.',
+    );
   }
 
-  return sortGlobalGroupLast(groups);
-}
-
-function buildResourceTree(resources: ResourceListItem[]): ResourceTreeNode[] {
-  const nodeMap = new Map<string, ResourceTreeNode>();
-
-  resources.forEach((resource) => {
-    nodeMap.set(resource.id, { resource, children: [] });
-  });
-
-  const roots: ResourceTreeNode[] = [];
-
-  resources.forEach((resource) => {
-    const node = nodeMap.get(resource.id);
-    if (!node) {
-      return;
-    }
-
-    const parentNode = resource.parentResourceId
-      ? nodeMap.get(resource.parentResourceId)
-      : null;
-
-    if (parentNode && resource.parentResourceId !== resource.id) {
-      parentNode.children.push(node);
-      return;
-    }
-
-    roots.push(node);
-  });
-
-  return roots;
-}
-
-function resourceMatchesFilters(
-  resource: ResourceListItem,
-  filters: ResourceFilters,
-  accessibilityByResourceId: Map<string, AccessibilityResource>,
-) {
-  if (filters.onlyNoAccess && !isNoAccessResource(resource)) {
-    return false;
+  if (kindHasIssue('WORD')) {
+    recommendations.push(
+      'Usar estilos de título y texto alternativo en documentos Word.',
+    );
   }
 
-  if (filters.onlyDownloadable && !resource.canDownload) {
-    return false;
+  if (kindHasIssue('VIDEO')) {
+    recommendations.push(
+      'Revisar subtítulos, transcripción y proveedor de los vídeos.',
+    );
   }
 
-  const accessibilityResult = accessibilityByResourceId.get(resource.id);
-
-  if (
-    filters.onlyHtml ||
-    filters.onlyPdf ||
-    filters.onlyWord ||
-    filters.onlyVideo
-  ) {
-    const matchesRequestedType =
-      (filters.onlyHtml && isHtmlResource(resource, accessibilityResult)) ||
-      (filters.onlyPdf && isPdfResource(resource, accessibilityResult)) ||
-      (filters.onlyWord && isWordResource(resource, accessibilityResult)) ||
-      (filters.onlyVideo && isVideoResource(resource, accessibilityResult));
-
-    if (!matchesRequestedType) {
-      return false;
-    }
+  if (resources.some(isNoAccessResource)) {
+    recommendations.push(
+      'Corregir enlaces rotos o permisos de recursos que no se pueden acceder.',
+    );
   }
 
-  if (
-    filters.onlyFailures &&
-    !accessibilityResult?.checks.some((check) => check.status === 'FAIL')
-  ) {
-    return false;
-  }
+  const fallbackRecommendations = [
+    'Priorizar los recursos con puntuación baja antes de publicar el aula.',
+    'Revisar el informe detallado para confirmar las evidencias automáticas.',
+    'Validar manualmente los recursos no analizables o que requieren SSO.',
+  ];
 
-  if (
-    filters.onlyWarnings &&
-    !accessibilityResult?.checks.some((check) => check.status === 'WARNING')
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-function filterGroup(
-  group: ResourceGroup,
-  filters: ResourceFilters,
-  accessibilityByResourceId: Map<string, AccessibilityResource>,
-) {
-  if (filters.hideGlobalUnplaced && group.isGlobalUnplaced) {
-    return null;
-  }
-
-  const directResources = group.directResources.filter((resource) =>
-    resourceMatchesFilters(resource, filters, accessibilityByResourceId),
-  );
-  const subsections = group.subsections
-    .map((subsection) => ({
-      ...subsection,
-      resources: subsection.resources.filter((resource) =>
-        resourceMatchesFilters(resource, filters, accessibilityByResourceId),
-      ),
-    }))
-    .filter((subsection) => subsection.resources.length > 0);
-  const resourceIds = new Set([
-    ...directResources.map((resource) => resource.id),
-    ...subsections.flatMap((subsection) =>
-      subsection.resources.map((resource) => resource.id),
-    ),
-  ]);
-  const resources = group.resources.filter((resource) =>
-    resourceIds.has(resource.id),
-  );
-
-  if (resources.length === 0) {
-    return null;
-  }
-
-  return {
-    ...group,
-    resources,
-    directResources,
-    subsections,
-  };
+  return [...recommendations, ...fallbackRecommendations].slice(0, 3);
 }
 
 function Badge({ children, tone }: { children: string; tone: BadgeTone }) {
-  return <span className={`badge ${getStatusClasses(tone)}`}>{children}</span>;
+  return (
+    <span className={classNames('badge', getBadgeClasses(tone))}>
+      {children}
+    </span>
+  );
 }
 
-function AutomaticAccessibilityChecklist({
+function MetricCard({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number;
+}) {
+  return (
+    <article className="rounded-2xl border border-line bg-white p-4 shadow-card">
+      <p className="text-sm font-medium text-subtle">{label}</p>
+      <p className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-ink">
+        {value}
+      </p>
+    </article>
+  );
+}
+
+function ResourceRow({
   accessibilityResult,
+  jobId,
   resource,
 }: {
   accessibilityResult: AccessibilityResource | undefined;
+  jobId: string | undefined;
   resource: ResourceListItem;
 }) {
+  const score = getResourceScore(accessibilityResult);
+  const priority = getPriority(score);
   const resourceKind = getResourceAccessibilityKind(
     resource,
     accessibilityResult,
   );
-  const isCoveredResource =
-    resourceKind === 'HTML' ||
-    resourceKind === 'PDF' ||
-    resourceKind === 'WORD' ||
-    resourceKind === 'VIDEO';
-
-  if (isExternalAccessBlocked(resource)) {
-    return (
-      <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-[#8a5a00]">
-        No analizable automáticamente porque requiere acceso externo, SSO o
-        interacción.
-      </p>
-    );
-  }
-
-  if (!isCoveredResource && !accessibilityResult?.checks.length) {
-    return (
-      <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
-        Este tipo de recurso se analizará en una fase posterior.
-      </p>
-    );
-  }
-
-  if (resourceKind === 'VIDEO' && !accessibilityResult?.checks.length) {
-    return (
-      <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
-        Requiere revisión manual del proveedor de vídeo.
-      </p>
-    );
-  }
-
-  if (!accessibilityResult || accessibilityResult.checks.length === 0) {
-    return (
-      <p className="rounded-xl border border-line bg-[#f8faf7] px-3 py-2 text-sm leading-6 text-subtle">
-        No hay resultados automáticos de accesibilidad {resourceKind} para este
-        recurso.
-      </p>
-    );
-  }
 
   return (
-    <div className="space-y-3">
-      <h5 className="text-sm font-semibold text-ink">
-        {getAccessibilityChecklistTitle(resourceKind)}
-      </h5>
-      {accessibilityResult.error ? (
-        <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-danger">
-          Error de análisis: {accessibilityResult.error}
-        </p>
-      ) : null}
-      <ul className="space-y-3">
-        {accessibilityResult.checks.map((check) => (
-          <li
-            className="space-y-2 rounded-xl border border-line bg-[#f8faf7] p-3"
-            key={check.id}
-          >
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-              <p className="text-sm font-semibold text-ink">{check.title}</p>
-              <Badge tone={getAccessibilityTone(check.status)}>
-                {getAccessibilityStatusLabel(check.status)}
-              </Badge>
-            </div>
-            {check.evidence ? (
-              <p className="text-sm leading-6 text-subtle">
-                <span className="font-semibold text-ink">Evidencia:</span>{' '}
-                {check.evidence}
-              </p>
-            ) : null}
-            {check.recommendation ? (
-              <p className="text-sm leading-6 text-subtle">
-                <span className="font-semibold text-ink">Recomendación:</span>{' '}
-                {check.recommendation}
-              </p>
-            ) : null}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function ResourceItem({
-  accessibilityResult,
-  jobId,
-  resource,
-}: {
-  accessibilityResult: AccessibilityResource | undefined;
-  jobId: string | undefined;
-  resource: ResourceListItem;
-}) {
-  const accessLabel = getAccessLabel(resource);
-  const isNoAccess = isNoAccessResource(resource);
-  const reasonDetail = getNoAccessDetail(resource);
-  const showTechnicalDetails = hasTechnicalDetails(resource);
-
-  return (
-    <div className="space-y-3 rounded-2xl border border-line bg-white p-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0 space-y-3">
+    <li className="rounded-2xl border border-line bg-white p-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
           <h4 className="break-words text-base font-semibold text-ink">
             {resource.title}
           </h4>
-
-          <div className="flex flex-wrap gap-2">
-            <Badge tone="neutral">
-              {`Tipo: ${getReviewResourceTypeLabel(resource.type)}`}
-            </Badge>
-            <Badge tone={getAccessTone(resource)}>{accessLabel}</Badge>
-            <Badge tone={getDownloadTone(resource)}>
-              {getDownloadLabel(resource)}
-            </Badge>
-          </div>
-        </div>
-
-        {resource.canDownload && jobId ? (
-          <a
-            aria-label={`Descargar ${resource.title}`}
-            className="button-secondary w-full shrink-0 sm:w-auto"
-            href={getResourceDownloadUrl(jobId, resource.id)}
-          >
-            Descargar
-          </a>
-        ) : null}
-      </div>
-
-      {isNoAccess ? (
-        <div className="space-y-1 text-sm leading-6 text-ink">
-          <p>
-            <span className="font-semibold">Motivo:</span>{' '}
-            {getNoAccessReason(resource)}
+          <p className="mt-1 text-sm text-subtle">
+            Tipo: {getReviewResourceTypeLabel(resource.type)}
+            {resourceKind !== 'OTHER'
+              ? ` · Análisis ${resourceKind === 'WORD' ? 'Word' : resourceKind}`
+              : ''}
           </p>
-          {reasonDetail ? (
-            <p>
-              <span className="font-semibold">Detalle:</span> {reasonDetail}
-            </p>
-          ) : null}
-          {showTechnicalDetails ? (
-            <details className="mt-2 rounded-xl border border-line bg-[#f8faf7] px-3 py-2">
-              <summary className="cursor-pointer font-semibold text-ink focus:outline-none focus-visible:rounded-md focus-visible:outline focus-visible:outline-4 focus-visible:outline-offset-2 focus-visible:outline-[#0f766e]">
-                Más detalles
-              </summary>
-              <dl className="mt-3 space-y-2 text-sm text-subtle">
-                {typeof resource.httpStatus === 'number' ? (
-                  <div>
-                    <dt className="font-semibold text-ink">Estado HTTP</dt>
-                    <dd>{resource.httpStatus}</dd>
-                  </div>
-                ) : null}
-                {resource.finalUrl ? (
-                  <div>
-                    <dt className="font-semibold text-ink">URL final</dt>
-                    <dd className="break-all">{resource.finalUrl}</dd>
-                  </div>
-                ) : null}
-              </dl>
-            </details>
+        </div>
+
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center lg:justify-end">
+          <span
+            className={classNames(
+              'text-sm font-semibold',
+              getScoreClass(score),
+            )}
+          >
+            Score: {formatScore(score)}
+          </span>
+          <Badge tone={getPriorityTone(priority)}>
+            {getPriorityLabel(priority)}
+          </Badge>
+          <Badge tone={getAccessTone(resource)}>
+            {`Acceso: ${getAccessLabel(resource)}`}
+          </Badge>
+          {resource.canDownload && jobId ? (
+            <a
+              aria-label={`Descargar ${resource.title}`}
+              className="button-secondary min-h-10 px-4 py-2 text-sm"
+              href={getResourceDownloadUrl(jobId, resource.id)}
+            >
+              Descargar
+            </a>
           ) : null}
         </div>
-      ) : null}
-
-      <AutomaticAccessibilityChecklist
-        accessibilityResult={accessibilityResult}
-        resource={resource}
-      />
-    </div>
-  );
-}
-
-function ResourceTreeList({
-  accessibilityByResourceId,
-  jobId,
-  nodes,
-  level = 0,
-}: {
-  accessibilityByResourceId: Map<string, AccessibilityResource>;
-  jobId: string | undefined;
-  nodes: ResourceTreeNode[];
-  level?: number;
-}) {
-  if (nodes.length === 0) {
-    return null;
-  }
-
-  return (
-    <ul
-      className={
-        level > 0 ? 'mt-3 space-y-3 border-l border-line pl-4' : 'space-y-3'
-      }
-    >
-      {nodes.map((node) => (
-        <li key={node.resource.id}>
-          <ResourceItem
-            accessibilityResult={accessibilityByResourceId.get(
-              node.resource.id,
-            )}
-            jobId={jobId}
-            resource={node.resource}
-          />
-          {node.children.length > 0 ? (
-            <div className="mt-3">
-              <p className="mb-2 text-sm font-semibold text-subtle">
-                Recursos detectados dentro
-              </p>
-              <ResourceTreeList
-                accessibilityByResourceId={accessibilityByResourceId}
-                jobId={jobId}
-                level={level + 1}
-                nodes={node.children}
-              />
-            </div>
-          ) : null}
-        </li>
-      ))}
-    </ul>
+      </div>
+    </li>
   );
 }
 
@@ -1019,11 +729,6 @@ export function ResourcesPage() {
   const [structure, setStructure] = useState<CourseStructure | null>(null);
   const [accessibility, setAccessibility] =
     useState<AccessibilityResponse | null>(null);
-  const [backendCounts, setBackendCounts] = useState<BackendResourceCounts>({
-    globalUnplacedCount: null,
-    noAccessCount: null,
-  });
-  const [filters, setFilters] = useState<ResourceFilters>(EMPTY_FILTERS);
   const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>(
     {},
   );
@@ -1064,16 +769,6 @@ export function ResourcesPage() {
 
         setResources(payload.resources);
         setStructure(payload.structure);
-        setBackendCounts({
-          globalUnplacedCount:
-            typeof payload.globalUnplacedCount === 'number'
-              ? payload.globalUnplacedCount
-              : null,
-          noAccessCount:
-            typeof payload.noAccessCount === 'number'
-              ? payload.noAccessCount
-              : null,
-        });
 
         try {
           const accessibilityPayload = await fetchAccessibility(resolvedJobId);
@@ -1112,13 +807,6 @@ export function ResourcesPage() {
     };
   }, [jobId]);
 
-  const groups = useMemo(() => {
-    if (structure) {
-      return buildGroupsFromStructure(structure, resources);
-    }
-
-    return sortGlobalGroupLast(buildGroupsByPath(resources));
-  }, [resources, structure]);
   const accessibilityByResourceId = useMemo(
     () =>
       new Map(
@@ -1129,162 +817,53 @@ export function ResourcesPage() {
       ),
     [accessibility],
   );
+  const groups = useMemo(() => {
+    if (structure) {
+      return buildGroupsFromStructure(structure, resources);
+    }
 
-  const filteredGroups = useMemo(
+    return sortGlobalGroupLast(buildGroupsByPath(resources));
+  }, [resources, structure]);
+  const resourceScores = useMemo(
     () =>
-      groups
-        .map((group) => filterGroup(group, filters, accessibilityByResourceId))
-        .filter((group): group is ResourceGroup => Boolean(group)),
-    [accessibilityByResourceId, filters, groups],
+      resources.map((resource) =>
+        getResourceScore(accessibilityByResourceId.get(resource.id)),
+      ),
+    [accessibilityByResourceId, resources],
   );
-  const accessedCount = useMemo(
-    () =>
-      resources.filter((resource) => getAccessLabel(resource) === 'OK').length,
-    [resources],
+  const globalScore = useMemo(
+    () => averageScores(resourceScores),
+    [resourceScores],
   );
-  const inaccessibleCount = useMemo(
-    () => resources.filter(isNoAccessResource).length,
-    [resources],
+  const globalPriority = getPriority(globalScore);
+  const accessibilitySummary =
+    accessibility?.summary ?? EMPTY_ACCESSIBILITY_SUMMARY;
+  const analyzedResourceCount = resources.filter((resource) =>
+    hasChecks(accessibilityByResourceId.get(resource.id)),
+  ).length;
+  const criticalCount =
+    accessibilitySummary.fail +
+    accessibilitySummary.errors +
+    resources.filter(isNoAccessResource).length;
+  const nonAnalyzableCount = resources.filter((resource) =>
+    isNonAnalyzableResource(
+      resource,
+      accessibilityByResourceId.get(resource.id),
+    ),
+  ).length;
+  const warningCount = accessibilitySummary.warning;
+  const downloadableCount = resources.filter(
+    (resource) => resource.canDownload,
+  ).length;
+  const recommendations = buildPriorityRecommendations(
+    accessibility,
+    resources,
   );
-  const requiresSsoCount = useMemo(
-    () =>
-      resources.filter(
-        (resource) => getAccessLabel(resource) === 'REQUIERE SSO',
-      ).length,
-    [resources],
-  );
-  const requiresInteractionCount = useMemo(
-    () =>
-      resources.filter(
-        (resource) => getAccessLabel(resource) === 'REQUIERE INTERACCIÓN',
-      ).length,
-    [resources],
-  );
-  const downloadableCount = useMemo(
-    () => resources.filter((resource) => resource.canDownload).length,
-    [resources],
-  );
-  const accessibleDownloadableCount = useMemo(
-    () =>
-      resources.filter((resource) => resource.canAccess && resource.canDownload)
-        .length,
-    [resources],
-  );
-  const globalUnplacedCount = useMemo(
-    () =>
-      groups
-        .filter((group) => group.isGlobalUnplaced)
-        .reduce((total, group) => total + group.resources.length, 0),
-    [groups],
-  );
-  const displayedInaccessibleCount =
-    backendCounts.noAccessCount ?? inaccessibleCount;
-  const displayedGlobalUnplacedCount =
-    backendCounts.globalUnplacedCount ?? globalUnplacedCount;
-  const activeFilterCount = Object.values(filters).filter(Boolean).length;
-
-  const summaryItems = [
-    {
-      label: 'Accedidos',
-      value: `${accessedCount} de ${resources.length}`,
-      show: true,
-    },
-    {
-      label: 'Descargables',
-      value: `${downloadableCount} (${accessibleDownloadableCount} accesibles)`,
-      show: true,
-    },
-    {
-      label: 'No accesibles',
-      value: String(displayedInaccessibleCount),
-      show: true,
-    },
-    {
-      label: 'Requieren SSO',
-      value: String(requiresSsoCount),
-      show: requiresSsoCount > 0,
-    },
-    {
-      label: 'Requieren interacción',
-      value: String(requiresInteractionCount),
-      show: requiresInteractionCount > 0,
-    },
-    {
-      label: 'Recursos globales/no ubicados',
-      value: String(displayedGlobalUnplacedCount),
-      show: displayedGlobalUnplacedCount > 0,
-    },
-  ].filter((item) => item.show);
-  const accessibilitySummary = accessibility?.summary ?? {
-    htmlResourcesAnalyzed: 0,
-    pdfResourcesAnalyzed: 0,
-    wordResourcesAnalyzed: 0,
-    videoResourcesAnalyzed: 0,
-    pass: 0,
-    warning: 0,
-    fail: 0,
-    notApplicable: 0,
-    errors: 0,
-  };
-  const accessibilitySummaryItems = [
-    {
-      label: 'Recursos HTML analizados',
-      value: String(accessibilitySummary.htmlResourcesAnalyzed),
-      show: true,
-    },
-    {
-      label: 'Recursos PDF analizados',
-      value: String(accessibilitySummary.pdfResourcesAnalyzed),
-      show: true,
-    },
-    {
-      label: 'Recursos Word analizados',
-      value: String(accessibilitySummary.wordResourcesAnalyzed),
-      show: true,
-    },
-    {
-      label: 'Recursos de vídeo analizados',
-      value: String(accessibilitySummary.videoResourcesAnalyzed),
-      show: true,
-    },
-    {
-      label: 'Checks correctos',
-      value: String(accessibilitySummary.pass),
-      show: true,
-    },
-    {
-      label: 'Avisos',
-      value: String(accessibilitySummary.warning),
-      show: true,
-    },
-    {
-      label: 'Incumplimientos',
-      value: String(accessibilitySummary.fail),
-      show: true,
-    },
-    {
-      label: 'No aplicables',
-      value: String(accessibilitySummary.notApplicable),
-      show: true,
-    },
-    {
-      label: 'Errores de análisis',
-      value: String(accessibilitySummary.errors),
-      show: accessibilitySummary.errors > 0,
-    },
-  ].filter((item) => item.show);
 
   const togglePanel = (panelId: string) => {
     setExpandedPanels((current) => ({
       ...current,
       [panelId]: !current[panelId],
-    }));
-  };
-
-  const updateFilter = (name: keyof ResourceFilters, checked: boolean) => {
-    setFilters((current) => ({
-      ...current,
-      [name]: checked,
     }));
   };
 
@@ -1319,8 +898,9 @@ export function ResourcesPage() {
     <LayoutSimple
       backLabel="Volver"
       backTo={`/${appMode}${getModeSearch(appMode)}`}
-      description="Diagnóstico de acceso y descarga de los recursos detectados."
-      title="Acceso a recursos"
+      description="Una vista rápida de puntuación, prioridades y recomendaciones."
+      showTokenButton={false}
+      title="Análisis ejecutivo"
     >
       {error ? (
         <div
@@ -1334,212 +914,111 @@ export function ResourcesPage() {
 
       {isLoading ? (
         <section className="card-panel p-6 text-sm text-subtle">
-          Cargando recursos del curso…
+          Cargando resultados del análisis…
         </section>
       ) : (
         <div className="space-y-8">
           <section
             aria-live="polite"
-            className="rounded-3xl border border-line bg-white p-5 shadow-card sm:p-6"
+            className="grid gap-5 rounded-3xl border border-line bg-white p-6 shadow-card lg:grid-cols-[1.2fr_1fr]"
           >
-            <h2 className="text-lg font-semibold text-ink">
-              Resumen del acceso
-            </h2>
-            <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {summaryItems.map((item) => (
-                <div
-                  className="rounded-2xl border border-line bg-[#f8faf7] p-4"
-                  key={item.label}
-                >
-                  <dt className="text-sm font-medium text-subtle">
-                    {item.label}
-                  </dt>
-                  <dd className="mt-1 text-2xl font-semibold tracking-[-0.03em] text-ink">
-                    {item.value}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </section>
-
-          <section
-            aria-live="polite"
-            className="rounded-3xl border border-line bg-white p-5 shadow-card sm:p-6"
-          >
-            <h2 className="text-lg font-semibold text-ink">
-              Resumen de accesibilidad automática
-            </h2>
-            {accessibilityError ? (
-              <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-[#8a5a00]">
-                No se pudo cargar el análisis automático de accesibilidad:{' '}
-                {accessibilityError}
+            <div className="space-y-4">
+              <p className="text-sm font-semibold uppercase tracking-[0.12em] text-subtle">
+                Puntuación de accesibilidad analizada
               </p>
-            ) : null}
-            <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {accessibilitySummaryItems.map((item) => (
-                <div
-                  className="rounded-2xl border border-line bg-[#f8faf7] p-4"
-                  key={item.label}
-                >
-                  <dt className="text-sm font-medium text-subtle">
-                    {item.label}
-                  </dt>
-                  <dd className="mt-1 text-2xl font-semibold tracking-[-0.03em] text-ink">
-                    {item.value}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </section>
-
-          <section className="rounded-3xl border border-line bg-white p-5 shadow-card sm:p-6">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="space-y-1">
-                <h2 className="text-lg font-semibold text-ink">Filtros</h2>
-                <p className="text-sm leading-6 text-subtle">
-                  Usa estos controles para revisar incidencias y descargables
-                  sin perder contexto.
-                </p>
-              </div>
-
-              <button
-                className="button-secondary w-full sm:w-auto"
-                disabled={activeFilterCount === 0}
-                onClick={() => setFilters(EMPTY_FILTERS)}
-                type="button"
+              <p
+                className={classNames(
+                  'text-6xl font-semibold tracking-[-0.06em] sm:text-7xl',
+                  getScoreClass(globalScore),
+                )}
               >
-                Limpiar filtros
-              </button>
+                {formatScore(globalScore)}
+              </p>
+              <Badge tone={getPriorityTone(globalPriority)}>
+                {getPriorityLabel(globalPriority)}
+              </Badge>
             </div>
 
-            <fieldset className="mt-5">
-              <legend className="sr-only">Filtrar recursos</legend>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.onlyNoAccess}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('onlyNoAccess', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Mostrar solo NO ACCEDE</span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.onlyDownloadable}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('onlyDownloadable', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Mostrar solo descargables</span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.onlyFailures}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('onlyFailures', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Mostrar solo incumplimientos</span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.onlyWarnings}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('onlyWarnings', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Mostrar solo avisos</span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.onlyHtml}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('onlyHtml', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Mostrar solo recursos HTML</span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.onlyPdf}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('onlyPdf', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Mostrar solo recursos PDF</span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.onlyWord}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('onlyWord', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Mostrar solo recursos Word</span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.onlyVideo}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('onlyVideo', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Mostrar solo recursos de vídeo</span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[#f8faf7] p-4 text-sm font-semibold text-ink">
-                  <input
-                    checked={filters.hideGlobalUnplaced}
-                    className="mt-1 h-5 w-5 accent-[#0f766e]"
-                    onChange={(event) =>
-                      updateFilter('hideGlobalUnplaced', event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Ocultar recursos globales/no ubicados</span>
-                </label>
-              </div>
-            </fieldset>
+            <div className="flex flex-col justify-center space-y-3 text-base leading-7 text-subtle">
+              {accessibilityError ? (
+                <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-[#8a5a00]">
+                  No se pudo cargar el análisis automático de accesibilidad:{' '}
+                  {accessibilityError}
+                </p>
+              ) : null}
+              <p>
+                Se han analizado {analyzedResourceCount} recursos de{' '}
+                {resources.length} detectados.
+              </p>
+              <p>El detalle completo está disponible en el informe.</p>
+            </div>
+          </section>
+
+          <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+            <h2 className="sr-only">Resumen ejecutivo</h2>
+            <MetricCard
+              label="Recursos analizados"
+              value={`${analyzedResourceCount}/${resources.length}`}
+            />
+            <MetricCard label="Incidencias críticas" value={criticalCount} />
+            <MetricCard label="Avisos" value={warningCount} />
+            <MetricCard
+              label="Recursos no analizables"
+              value={nonAnalyzableCount}
+            />
+            <MetricCard label="Descargables" value={downloadableCount} />
+          </section>
+
+          <section className="rounded-3xl border border-line bg-white p-6 shadow-card">
+            <h2 className="text-xl font-semibold tracking-[-0.03em] text-ink">
+              Recomendaciones prioritarias
+            </h2>
+            <ol className="mt-5 space-y-3">
+              {recommendations.map((recommendation, index) => (
+                <li
+                  className="flex gap-4 rounded-2xl border border-line bg-[var(--color-surface-soft)] p-4"
+                  key={recommendation}
+                >
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--uoc-blue)] text-sm font-semibold text-white">
+                    {index + 1}
+                  </span>
+                  <span className="text-base leading-7 text-ink">
+                    {recommendation}
+                  </span>
+                </li>
+              ))}
+            </ol>
           </section>
 
           <section className="space-y-4">
             <div className="space-y-1">
-              <h2 className="text-xl font-semibold text-ink">
-                Recursos por módulo o sección
+              <h2 className="text-xl font-semibold tracking-[-0.03em] text-ink">
+                Módulos y recursos
               </h2>
               <p className="text-sm leading-6 text-subtle">
-                Las secciones se abren y cierran con teclado. Los recursos
-                detectados dentro de una página aparecen como hijos cuando el
-                inventario lo indica.
+                Abre cada módulo para ver una fila resumida por recurso. El
+                detalle técnico queda reservado para el informe.
               </p>
             </div>
 
-            {filteredGroups.length === 0 ? (
+            {groups.length === 0 ? (
               <div className="card-panel p-6 text-sm text-subtle">
-                No hay recursos que coincidan con los filtros actuales.
+                No hay recursos detectados para mostrar.
               </div>
             ) : (
               <div className="space-y-3">
-                {filteredGroups.map((group) => {
+                {groups.map((group) => {
                   const panelId = toPanelId('section', group.id);
                   const isExpanded = expandedPanels[panelId] ?? false;
                   const sectionDescriptionId = `${panelId}-description`;
+                  const moduleScore = averageScores(
+                    group.resources.map((resource) =>
+                      getResourceScore(
+                        accessibilityByResourceId.get(resource.id),
+                      ),
+                    ),
+                  );
+                  const modulePriority = getPriority(moduleScore);
 
                   return (
                     <div
@@ -1553,13 +1032,16 @@ export function ResourcesPage() {
                             group.description ? sectionDescriptionId : undefined
                           }
                           aria-expanded={isExpanded}
-                          aria-label={`${isExpanded ? 'Cerrar' : 'Abrir'} sección ${group.section}, ${group.resources.length} recursos`}
-                          className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
+                          className="flex w-full flex-col gap-3 px-5 py-4 text-left text-ink sm:px-6 lg:flex-row lg:items-center lg:justify-between"
                           onClick={() => togglePanel(panelId)}
                           type="button"
                         >
-                          <span>{group.section}</span>
-                          <span className="shrink-0 text-sm font-medium text-subtle">
+                          <span className="text-base font-semibold">
+                            {group.section} — {formatScore(moduleScore)} —{' '}
+                            {getPriorityLabel(modulePriority)}
+                          </span>
+                          <span className="text-sm font-medium text-subtle">
+                            {isExpanded ? 'Cerrar módulo' : 'Abrir módulo'} ·{' '}
                             {group.resources.length} recursos
                           </span>
                         </button>
@@ -1574,72 +1056,22 @@ export function ResourcesPage() {
                       ) : null}
 
                       <div
-                        className="border-t border-line bg-[#fbfcfa] p-4 sm:p-5"
+                        className="border-t border-line bg-[var(--color-surface-soft)] p-4 sm:p-5"
                         hidden={!isExpanded}
                         id={panelId}
                       >
-                        {group.directResources.length > 0 ? (
-                          <ResourceTreeList
-                            accessibilityByResourceId={
-                              accessibilityByResourceId
-                            }
-                            jobId={jobId}
-                            nodes={buildResourceTree(group.directResources)}
-                          />
-                        ) : null}
-
-                        {group.subsections.length > 0 ? (
-                          <div className="space-y-3">
-                            {group.subsections.map((subsection) => {
-                              const subsectionPanelId = toPanelId(
-                                'subsection',
-                                `${group.id}-${subsection.id}`,
-                              );
-                              const subsectionExpanded =
-                                expandedPanels[subsectionPanelId] ?? false;
-
-                              return (
-                                <div
-                                  className="overflow-hidden rounded-2xl border border-line bg-white"
-                                  key={subsection.id}
-                                >
-                                  <h4>
-                                    <button
-                                      aria-controls={subsectionPanelId}
-                                      aria-expanded={subsectionExpanded}
-                                      aria-label={`${subsectionExpanded ? 'Cerrar' : 'Abrir'} subapartado ${subsection.title}, ${subsection.resources.length} recursos`}
-                                      className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left text-sm font-semibold text-ink"
-                                      onClick={() =>
-                                        togglePanel(subsectionPanelId)
-                                      }
-                                      type="button"
-                                    >
-                                      <span>{subsection.title}</span>
-                                      <span className="shrink-0 text-xs font-medium uppercase tracking-[0.08em] text-subtle">
-                                        {subsection.resources.length} recursos
-                                      </span>
-                                    </button>
-                                  </h4>
-                                  <div
-                                    className="border-t border-line bg-[#fbfcfa] p-4"
-                                    hidden={!subsectionExpanded}
-                                    id={subsectionPanelId}
-                                  >
-                                    <ResourceTreeList
-                                      accessibilityByResourceId={
-                                        accessibilityByResourceId
-                                      }
-                                      jobId={jobId}
-                                      nodes={buildResourceTree(
-                                        subsection.resources,
-                                      )}
-                                    />
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : null}
+                        <ul className="space-y-3">
+                          {group.resources.map((resource) => (
+                            <ResourceRow
+                              accessibilityResult={accessibilityByResourceId.get(
+                                resource.id,
+                              )}
+                              jobId={jobId}
+                              key={resource.id}
+                              resource={resource}
+                            />
+                          ))}
+                        </ul>
                       </div>
                     </div>
                   );
@@ -1649,22 +1081,26 @@ export function ResourcesPage() {
           </section>
 
           <div className="flex flex-col gap-3 border-t border-line pt-6 sm:flex-row sm:flex-wrap">
-            <Link
+            <button
               className="button-secondary w-full sm:w-auto"
-              to={`/${appMode}${getModeSearch(appMode)}`}
+              onClick={() => navigate(`/${appMode}${getModeSearch(appMode)}`)}
+              type="button"
             >
               Volver
-            </Link>
+            </button>
             {jobId ? (
-              <Link
-                className="button-secondary w-full sm:w-auto"
-                to={`/report/${jobId}${getModeSearch(appMode)}`}
+              <button
+                className="button-primary w-full sm:w-auto"
+                onClick={() =>
+                  navigate(`/report/${jobId}${getModeSearch(appMode)}`)
+                }
+                type="button"
               >
-                Ver informe
-              </Link>
+                Obtener informe detallado
+              </button>
             ) : null}
             <button
-              className="button-primary w-full sm:w-auto"
+              className="button-secondary w-full sm:w-auto"
               disabled={isRetrying}
               onClick={() => {
                 void handleRetryAnalysis();

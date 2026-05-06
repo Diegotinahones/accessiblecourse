@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation, useParams, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import {
@@ -10,6 +10,7 @@ import {
 import type { AppMode, GeneratedReport } from '../lib/types';
 import { formatDate } from '../lib/types';
 import {
+  classNames,
   getModeSearch,
   isAppMode,
   loadRememberedAppMode,
@@ -26,6 +27,31 @@ function getLoadMessage(isGenerating: boolean) {
   return isGenerating ? 'Generando informe…' : 'Cargando informe…';
 }
 
+function getReportScore(report: GeneratedReport) {
+  if (report.resourceCount === 0) {
+    return 0;
+  }
+
+  const penalty = Math.min(
+    100,
+    Math.round((report.failedItemCount / report.resourceCount) * 10),
+  );
+
+  return Math.max(0, 100 - penalty);
+}
+
+function getScoreClass(score: number) {
+  if (score >= 80) {
+    return 'score-green';
+  }
+
+  if (score >= 60) {
+    return 'score-yellow';
+  }
+
+  return 'score-red';
+}
+
 export function ReportPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const location = useLocation();
@@ -36,7 +62,6 @@ export function ReportPage() {
   const [loading, setLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const [announcement, setAnnouncement] = useState(
     navigationState?.announcement ?? '',
   );
@@ -127,27 +152,13 @@ export function ReportPage() {
 
   const downloadUrls = jobId ? getDirectReportDownloadUrls(jobId) : null;
 
-  const sortedGroups = useMemo(() => {
-    if (!report) {
-      return [];
-    }
-
-    return [...report.groups].sort((left, right) => {
-      const failureDifference = right.failures.length - left.failures.length;
-      if (failureDifference !== 0) {
-        return failureDifference;
-      }
-
-      return left.resource.title.localeCompare(right.resource.title, 'es');
-    });
-  }, [report]);
-
   return (
     <LayoutSimple
       backLabel="Volver a recursos"
       backTo={jobId ? `/resources/${jobId}${getModeSearch(appMode)}` : '/'}
-      description="Este informe se ha generado a partir de una checklist revisada manualmente."
-      title="Informe"
+      description="Este informe recoge el diagnóstico completo de acceso y accesibilidad automática de los recursos analizados."
+      showTokenButton={false}
+      title="Informe detallado"
     >
       <p aria-live="polite" className="sr-only">
         {announcement}
@@ -180,7 +191,7 @@ export function ReportPage() {
 
       {!loading && report && downloadUrls ? (
         <div className="space-y-6">
-          <section className="card-panel space-y-5 p-6">
+          <section className="card-panel space-y-6 p-6">
             <div className="space-y-2">
               <p className="text-sm text-subtle">{courseName}</p>
               <p className="text-sm text-subtle">
@@ -188,8 +199,20 @@ export function ReportPage() {
               </p>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <article className="rounded-2xl border border-line bg-[#f9faf7] p-4">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <article className="rounded-2xl border border-line bg-[var(--color-surface-soft)] p-4">
+                <p className="text-sm text-subtle">Score global</p>
+                <p
+                  className={classNames(
+                    'mt-2 text-3xl font-semibold tracking-[-0.04em]',
+                    getScoreClass(getReportScore(report)),
+                  )}
+                >
+                  {getReportScore(report)}/100
+                </p>
+              </article>
+
+              <article className="rounded-2xl border border-line bg-[var(--color-surface-soft)] p-4">
                 <p className="text-sm text-subtle">Recursos analizados</p>
                 <p className="mt-2 text-3xl font-semibold text-ink">
                   {report.resourceCount}
@@ -197,12 +220,17 @@ export function ReportPage() {
               </article>
 
               <article className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
-                <p className="text-sm text-subtle">Ítems FAIL</p>
+                <p className="text-sm text-subtle">Incidencias principales</p>
                 <p className="mt-2 text-3xl font-semibold text-ink">
                   {report.failedItemCount}
                 </p>
               </article>
             </div>
+
+            <p className="text-sm leading-6 text-subtle">
+              Las descargas contienen el detalle técnico completo por recurso,
+              con evidencias y recomendaciones.
+            </p>
 
             <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
               <a className="button-primary" href={downloadUrls.pdf}>
@@ -214,68 +242,6 @@ export function ReportPage() {
               <a className="button-secondary" href={downloadUrls.json}>
                 Descargar JSON
               </a>
-            </div>
-          </section>
-
-          <section className="card-panel overflow-hidden">
-            <h2>
-              <button
-                aria-controls="report-detail-panel"
-                aria-expanded={detailsOpen}
-                className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left text-base font-semibold text-ink sm:px-6"
-                id="report-detail-button"
-                onClick={() => setDetailsOpen((current) => !current)}
-                type="button"
-              >
-                <span>{detailsOpen ? 'Ocultar detalle' : 'Ver detalle'}</span>
-                <span className="text-sm font-medium text-subtle">
-                  {sortedGroups.length}
-                </span>
-              </button>
-            </h2>
-
-            <div
-              aria-labelledby="report-detail-button"
-              className="border-t border-line"
-              hidden={!detailsOpen}
-              id="report-detail-panel"
-            >
-              {sortedGroups.length === 0 ? (
-                <div className="p-6 text-sm text-subtle">
-                  No hay incidencias FAIL registradas en este informe.
-                </div>
-              ) : (
-                <div className="space-y-4 p-4 sm:p-6">
-                  {sortedGroups.map((group) => (
-                    <article
-                      className="rounded-2xl border border-line p-4"
-                      key={group.resource.id}
-                    >
-                      <div className="space-y-1">
-                        <h3 className="text-base font-semibold text-ink">
-                          {group.resource.title}
-                        </h3>
-                      </div>
-
-                      <ul className="mt-4 space-y-3">
-                        {group.failures.map((failure) => (
-                          <li
-                            className="rounded-2xl border border-rose-200 bg-rose-50 p-4"
-                            key={`${group.resource.id}-${failure.itemId}`}
-                          >
-                            <p className="text-sm font-semibold text-ink">
-                              {failure.label}
-                            </p>
-                            <p className="mt-2 text-sm text-subtle">
-                              {failure.recommendation}
-                            </p>
-                          </li>
-                        ))}
-                      </ul>
-                    </article>
-                  ))}
-                </div>
-              )}
             </div>
           </section>
         </div>

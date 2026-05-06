@@ -65,8 +65,9 @@ export function UploadPage() {
       align="center"
       backLabel="Cambiar modo"
       backTo="/?mode=offline"
-      description="Se analizarán los recursos incluidos en el paquete y los enlaces detectados."
-      title="Sube tu paquete IMSCC"
+      description="Elige un archivo IMSCC o ZIP."
+      showTokenButton={false}
+      title="Selecciona tu archivo"
     >
       <form
         className="mx-auto max-w-xl space-y-6 rounded-3xl border border-line bg-white p-6 text-left shadow-card sm:p-8"
@@ -88,6 +89,7 @@ export function UploadPage() {
             type="file"
           />
           <p className="text-sm leading-6 text-subtle">
+            Analizaremos los recursos incluidos y los enlaces detectados.
             Formatos admitidos: .imscc y .zip.
           </p>
           <p aria-live="polite" className="min-h-6 text-sm text-subtle">
@@ -108,7 +110,7 @@ export function UploadPage() {
         ) : null}
 
         {isSubmitting ? (
-          <div className="space-y-3 rounded-2xl border border-line bg-[#f7faf7] px-4 py-4">
+          <div className="space-y-3 rounded-2xl border border-line bg-[var(--color-surface-soft)] px-4 py-4">
             <ProgressBar label="Progreso de la subida" value={uploadProgress} />
             <p aria-live="polite" className="text-sm text-subtle">
               {uploadProgress >= 100
@@ -123,7 +125,11 @@ export function UploadPage() {
           disabled={!selectedFile || isSubmitting}
           type="submit"
         >
-          {isSubmitting ? 'Subiendo curso…' : 'Analizar'}
+          {isSubmitting
+            ? 'Subiendo curso…'
+            : selectedFile
+              ? 'Analizar'
+              : 'Selecciona un archivo para analizar'}
         </button>
       </form>
     </LayoutSimple>

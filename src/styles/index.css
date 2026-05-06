@@ -5,6 +5,14 @@
 @layer base {
   :root {
     color-scheme: light;
+    --uoc-blue: #001f5b;
+    --uoc-cyan: #00a6c8;
+    --uoc-white: #ffffff;
+    --uoc-border: #d8e0e8;
+    --uoc-muted: #4b5c72;
+    --status-green: #057a55;
+    --status-yellow: #b7791f;
+    --status-red: #c53030;
     --color-uoc-blue: #001f5b;
     --color-uoc-blue-strong: #001640;
     --color-uoc-cyan: #00a6c8;
@@ -74,6 +82,22 @@
     border-color: var(--color-uoc-cyan);
   }
 
+  .button-on-blue {
+    @apply inline-flex min-h-11 items-center justify-center rounded-xl border border-white/40 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white hover:text-ink;
+  }
+
+  .score-green {
+    color: var(--status-green);
+  }
+
+  .score-yellow {
+    color: var(--status-yellow);
+  }
+
+  .score-red {
+    color: var(--status-red);
+  }
+
   .card-panel {
     @apply rounded-2xl border bg-white shadow-card;
     border-color: var(--color-border);
@@ -90,7 +114,7 @@
   }
 
   .field-input[type='file'] {
-    @apply p-2 file:mr-4 file:rounded-lg file:border-0 file:bg-[#eef4ef] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-ink hover:file:bg-[#dce8de];
+    @apply p-2 file:mr-4 file:rounded-lg file:border-0 file:bg-[var(--color-uoc-cyan-soft)] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-ink hover:file:bg-white;
   }
 
   .choice-panel {

@@ -47,6 +47,7 @@ export function TokenManagementPage({
       backLabel="Volver al inicio"
       backTo="/"
       description="AccessibleCourse puede consultar los cursos de Canvas a los que tienes acceso."
+      showTokenButton={false}
       title="Token de acceso configurado"
     >
       <section className="mx-auto max-w-3xl space-y-6 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8">

@@ -11,8 +11,10 @@ from uuid import uuid4
 from xml.sax.saxutils import escape as xml_escape
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt
+from docx.shared import Inches, Pt, RGBColor
 from fastapi import status
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -37,6 +39,7 @@ from app.models.entities import (
 from app.schemas import GeneratedReportResponse, ReportDownloads, ReportFailure, ReportGroup, ResourceResponse
 from app.services.catalog import SEVERITY_ORDER, get_item_severity
 from app.services.docx_accessibility import ensure_docx_accessibility_report
+from app.services.executive_summary import CRITICAL_FAIL_CHECKS, IMPORTANT_WARNING_CHECKS
 from app.services.html_accessibility import ensure_accessibility_report
 from app.services.pdf_accessibility import ensure_pdf_accessibility_report
 from app.services.resource_core import normalize_resource
@@ -73,9 +76,14 @@ MEDIA_TYPES = {
 
 AUTO_STATUS_ORDER = {"FAIL": 0, "WARNING": 1}
 AUTO_NOT_ANALYZABLE_EXPLANATION = (
-    "No se analizan automáticamente porque requieren una capa externa de autenticación, "
-    "interacción humana o un tipo de análisis todavía no implementado."
+    "No se analizan automáticamente porque requieren autenticación externa, interacción humana "
+    "o un tipo de análisis todavía no implementado."
 )
+REPORT_NAVY = "002B45"
+REPORT_CYAN = "00A6B2"
+REPORT_BORDER = "C9D7DF"
+REPORT_PRIORITY_ORDER = {"alta": 0, "media": 1, "baja": 2}
+REPORT_TECHNICAL_STATUSES = {"FAIL", "WARNING", "ERROR"}
 
 
 def _download_urls(job_id: str) -> dict[str, str]:
@@ -708,6 +716,82 @@ def _overall_automatic_status(checks: list[Any]) -> str:
     return "PASS"
 
 
+def _status_value(check: Any) -> str:
+    if isinstance(check, dict):
+        return str(check.get("status") or "")
+    return str(getattr(check, "status", "") or "")
+
+
+def _check_title_value(check: Any) -> str:
+    if isinstance(check, dict):
+        return str(check.get("checkTitle") or check.get("checkId") or "Check sin título")
+    return str(getattr(check, "checkTitle", None) or getattr(check, "checkId", None) or "Check sin título")
+
+
+def _check_id_value(check: Any) -> str:
+    if isinstance(check, dict):
+        return str(check.get("checkId") or "")
+    return str(getattr(check, "checkId", "") or "")
+
+
+def _check_counts(checks: list[Any]) -> Counter:
+    return Counter(_status_value(check) for check in checks)
+
+
+def _applicable_checks(checks: list[Any]) -> list[Any]:
+    return [check for check in checks if _status_value(check) in {"PASS", "FAIL", "WARNING", "ERROR"}]
+
+
+def _status_points(status: str) -> float:
+    if status == "PASS":
+        return 1.0
+    if status == "WARNING":
+        return 0.5
+    return 0.0
+
+
+def _score_from_checks(checks: list[Any]) -> int:
+    applicable = _applicable_checks(checks)
+    if not applicable:
+        return 100
+    obtained = sum(_status_points(_status_value(check)) for check in applicable)
+    return round((obtained / len(applicable)) * 100)
+
+
+def _priority_from_score(score: int, checks: list[Any] | None = None) -> str:
+    applicable = _applicable_checks(checks or [])
+    has_critical_fail = any(
+        _status_value(check) in {"FAIL", "ERROR"} and _check_id_value(check) in CRITICAL_FAIL_CHECKS
+        for check in applicable
+    )
+    has_important_warning = any(
+        _status_value(check) == "WARNING" and _check_id_value(check) in IMPORTANT_WARNING_CHECKS
+        for check in applicable
+    )
+    if score < 60 or has_critical_fail:
+        return "alta"
+    if score < 80 or has_important_warning:
+        return "media"
+    return "baja"
+
+
+def _main_issue_from_checks(checks: list[Any]) -> str | None:
+    for target_status in ("FAIL", "ERROR", "WARNING"):
+        for check in checks:
+            if _status_value(check) == target_status:
+                return f"{_check_title_value(check)} ({target_status})"
+    return None
+
+
+def _score_fields(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    score = _score_from_checks(checks)
+    return {
+        "score": score,
+        "priority": _priority_from_score(score, checks),
+        "mainIssue": _main_issue_from_checks(checks),
+    }
+
+
 def _build_html_resource_details(items_by_id: dict[str, Any], accessibility_report) -> list[dict[str, Any]]:
     details: list[dict[str, Any]] = []
     for module_title, resource in _flatten_accessibility_resources(accessibility_report):
@@ -732,6 +816,7 @@ def _build_html_resource_details(items_by_id: dict[str, Any], accessibility_repo
                 "accessStatus": resource.accessStatus,
                 "overallStatus": overall_status,
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
+                **_score_fields(checks),
                 "checks": checks,
             }
         )
@@ -762,6 +847,7 @@ def _build_pdf_resource_details(items_by_id: dict[str, Any], pdf_accessibility_r
                 "accessStatus": resource.accessStatus,
                 "overallStatus": overall_status,
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
+                **_score_fields(checks),
                 "checks": checks,
             }
         )
@@ -792,6 +878,7 @@ def _build_docx_resource_details(items_by_id: dict[str, Any], docx_accessibility
                 "accessStatus": resource.accessStatus,
                 "overallStatus": overall_status,
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
+                **_score_fields(checks),
                 "checks": checks,
             }
         )
@@ -824,6 +911,7 @@ def _build_video_resource_details(items_by_id: dict[str, Any], video_accessibili
                 "overallStatus": overall_status,
                 "provider": provider or "No identificado",
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
+                **_score_fields(checks),
                 "checks": checks,
             }
         )
@@ -875,6 +963,161 @@ def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str])
             }
         )
     return sorted(skipped, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
+
+
+def _resource_score_rows(
+    html_resources: list[dict[str, Any]],
+    pdf_resources: list[dict[str, Any]],
+    word_resources: list[dict[str, Any]],
+    video_resources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for resource_type, resources in (
+        ("HTML", html_resources),
+        ("PDF", pdf_resources),
+        ("WORD", word_resources),
+        ("VIDEO", video_resources),
+    ):
+        for resource in resources:
+            checks = resource.get("checks", [])
+            counts = _check_counts(checks)
+            rows.append(
+                {
+                    "resourceId": resource["resourceId"],
+                    "title": resource["title"],
+                    "type": resource_type,
+                    "typeLabel": _auto_resource_type_label(resource_type),
+                    "moduleTitle": resource.get("moduleTitle") or resource.get("coursePath") or "Raíz del curso",
+                    "coursePath": resource.get("coursePath") or resource.get("moduleTitle") or "Raíz del curso",
+                    "score": int(resource.get("score", _score_from_checks(checks))),
+                    "priority": str(resource.get("priority") or _priority_from_score(_score_from_checks(checks), checks)),
+                    "mainIssue": resource.get("mainIssue") or "Sin incidencias FAIL/WARNING",
+                    "failCount": counts["FAIL"],
+                    "warningCount": counts["WARNING"],
+                    "errorCount": counts["ERROR"],
+                }
+            )
+
+    return sorted(
+        rows,
+        key=lambda item: (
+            REPORT_PRIORITY_ORDER.get(str(item["priority"]), 9),
+            int(item["score"]),
+            str(item["moduleTitle"]).lower(),
+            str(item["title"]).lower(),
+        ),
+    )
+
+
+def _module_score_rows(resource_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in resource_scores:
+        grouped[str(row["moduleTitle"])].append(row)
+
+    module_rows: list[dict[str, Any]] = []
+    for module_title, rows in grouped.items():
+        score = round(sum(int(row["score"]) for row in rows) / len(rows)) if rows else 0
+        priority = _aggregate_priority(score, rows)
+        issues = [
+            str(row["mainIssue"])
+            for row in sorted(rows, key=lambda item: (int(item["score"]), str(item["title"]).lower()))
+            if row.get("mainIssue") and row["mainIssue"] != "Sin incidencias FAIL/WARNING"
+        ]
+        module_rows.append(
+            {
+                "moduleTitle": module_title,
+                "score": score,
+                "priority": priority,
+                "resourcesAnalyzed": len(rows),
+                "mainIssues": list(dict.fromkeys(issues))[:3] or ["Sin incidencias principales"],
+            }
+        )
+
+    return sorted(
+        module_rows,
+        key=lambda item: (
+            REPORT_PRIORITY_ORDER.get(str(item["priority"]), 9),
+            int(item["score"]),
+            str(item["moduleTitle"]).lower(),
+        ),
+    )
+
+
+def _aggregate_priority(score: int, resource_scores: list[dict[str, Any]]) -> str:
+    priorities = {str(row.get("priority")) for row in resource_scores}
+    if score < 60 or "alta" in priorities:
+        return "alta"
+    if score < 80 or "media" in priorities:
+        return "media"
+    return "baja"
+
+
+def _global_score(resource_scores: list[dict[str, Any]], access_summary: dict[str, int]) -> int:
+    detected = int(access_summary.get("resourcesDetected", 0))
+    if not resource_scores:
+        return 0 if detected else 100
+    return round(sum(int(row["score"]) for row in resource_scores) / len(resource_scores))
+
+
+def _build_main_problem_labels(issue_summary: list[dict[str, Any]]) -> list[str]:
+    labels = []
+    for issue in issue_summary[:5]:
+        labels.append(
+            f"{_auto_resource_type_label(issue['resourceType'])}: {issue['checkTitle']} "
+            f"({issue['status']}, {issue['resourceCount']} recurso(s))"
+        )
+    return labels or ["No se han detectado incidencias FAIL/WARNING en el análisis automático."]
+
+
+def _executive_recommendations(issue_summary: list[dict[str, Any]], skipped_count: int) -> list[str]:
+    recommendations = []
+    for issue in issue_summary:
+        recommendation = str(issue.get("recommendation") or "").strip()
+        if recommendation and recommendation not in recommendations:
+            recommendations.append(recommendation)
+        if len(recommendations) == 3:
+            return recommendations
+
+    defaults = [
+        "Corregir primero los checks FAIL que afectan a más recursos o a módulos completos.",
+        "Revisar manualmente los recursos no analizables y documentar la evidencia obtenida.",
+        "Regenerar el informe después de aplicar cambios para verificar la mejora de score.",
+    ]
+    if skipped_count == 0:
+        defaults[1] = "Mantener una revisión manual breve para validar calidad pedagógica y experiencia de uso."
+    for recommendation in defaults:
+        if recommendation not in recommendations:
+            recommendations.append(recommendation)
+        if len(recommendations) == 3:
+            break
+    return recommendations[:3]
+
+
+def _executive_narrative(main_problems: list[str]) -> str:
+    if not main_problems or main_problems[0].startswith("No se han detectado"):
+        return "No se han detectado barreras automáticas críticas; conviene completar la revisión manual y mantener evidencias."
+    compact = "; ".join(main_problems[:3])
+    return f"Las principales barreras detectadas están relacionadas con {compact}."
+
+
+def _build_executive_summary(
+    access_summary: dict[str, int],
+    resource_scores: list[dict[str, Any]],
+    issue_summary: list[dict[str, Any]],
+    skipped_resources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    score = _global_score(resource_scores, access_summary)
+    main_problems = _build_main_problem_labels(issue_summary)
+    return {
+        "score": score,
+        "priority": _aggregate_priority(score, resource_scores),
+        "resourcesDetected": int(access_summary.get("resourcesDetected", 0)),
+        "resourcesAnalyzed": len(resource_scores),
+        "notAutomaticallyAnalyzable": len(skipped_resources),
+        "mainProblems": main_problems,
+        "priorityRecommendations": _executive_recommendations(issue_summary, len(skipped_resources)),
+        "narrative": _executive_narrative(main_problems),
+    }
 
 
 def _build_manual_review_sections(
@@ -1041,6 +1284,8 @@ def _build_report_payload(
         resource["resourceId"] for resource in html_resources + pdf_resources + docx_resources + video_resources
     }
     skipped_resources = _build_skipped_resources(inventory_items, analyzed_ids)
+    resource_scores = _resource_score_rows(html_resources, pdf_resources, docx_resources, video_resources)
+    module_scores = _module_score_rows(resource_scores)
 
     routes, resource_sections, total_fails, total_pending = _build_manual_review_sections(
         session,
@@ -1083,6 +1328,9 @@ def _build_report_payload(
         "mode": mode,
         "accessSummary": access_summary,
         "automaticAccessibilitySummary": automatic_summary,
+        "executiveSummary": _build_executive_summary(access_summary, resource_scores, issue_summary, skipped_resources),
+        "moduleScores": module_scores,
+        "resourceScores": resource_scores,
         "htmlAccessibilitySummary": html_summary,
         "pdfAccessibilitySummary": pdf_summary,
         "wordAccessibilitySummary": docx_summary,
@@ -1120,29 +1368,52 @@ def _configure_docx_styles(document: Document) -> None:
         style = document.styles[style_name]
         style.font.name = "Calibri"
         style.font.size = Pt(size)
+        if style_name.startswith("Heading"):
+            style.font.color.rgb = RGBColor(0, 43, 69)
         style._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Calibri")
 
     for section in document.sections:
-        section.top_margin = Inches(1)
-        section.bottom_margin = Inches(1)
-        section.left_margin = Inches(1)
-        section.right_margin = Inches(1)
+        section.top_margin = Inches(0.8)
+        section.bottom_margin = Inches(0.8)
+        section.left_margin = Inches(0.8)
+        section.right_margin = Inches(0.8)
 
     set_style_font("Normal", 11)
     set_style_font("Heading 1", 16)
     set_style_font("Heading 2", 13)
 
 
-def _append_docx_summary_table(document: Document, rows: list[tuple[str, str]]) -> None:
-    table = document.add_table(rows=1, cols=2)
+def _docx_set_cell_shading(cell: Any, fill: str) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), fill)
+    tc_pr.append(shading)
+
+
+def _docx_style_header_cell(cell: Any) -> None:
+    _docx_set_cell_shading(cell, REPORT_NAVY)
+    for paragraph in cell.paragraphs:
+        for run in paragraph.runs:
+            run.font.bold = True
+            run.font.color.rgb = RGBColor(255, 255, 255)
+
+
+def _append_docx_table(document: Document, headers: list[str], rows: list[list[Any]]) -> None:
+    table = document.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
     header = table.rows[0].cells
-    header[0].text = "Indicador"
-    header[1].text = "Valor"
-    for label, value in rows:
+    for index, label in enumerate(headers):
+        header[index].text = str(label)
+        _docx_style_header_cell(header[index])
+
+    for values in rows:
         row = table.add_row().cells
-        row[0].text = label
-        row[1].text = value
+        for index, value in enumerate(values):
+            row[index].text = str(value if value is not None else "-")
+
+
+def _append_docx_summary_table(document: Document, rows: list[tuple[str, str]]) -> None:
+    _append_docx_table(document, ["Indicador", "Valor"], [[label, value] for label, value in rows])
 
 
 def _auto_resource_type_label(value: Any) -> str:
@@ -1156,22 +1427,119 @@ def _auto_resource_type_label(value: Any) -> str:
 
 def _compact_detail_recommendation(check: dict[str, Any]) -> str:
     if check.get("status") in {"FAIL", "WARNING"}:
-        return "Ver recomendación en el resumen agrupado de incidencias."
+        return "Ver recomendación en el resumen agrupado."
     return str(check.get("recommendation") or "")
+
+
+def _clip_text(value: Any, limit: int = 260) -> str:
+    text = " ".join(str(value if value is not None else "").split())
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _technical_checks(resource: dict[str, Any]) -> list[dict[str, Any]]:
+    return [check for check in resource.get("checks", []) if check.get("status") in REPORT_TECHNICAL_STATUSES]
+
+
+def _priority_label(value: Any) -> str:
+    normalized = str(value or "").lower()
+    return {"alta": "Alta", "media": "Media", "baja": "Baja"}.get(normalized, str(value or "-"))
+
+
+def _append_docx_technical_resources(
+    document: Document,
+    title: str,
+    resources: list[dict[str, Any]],
+    *,
+    intro: str | None = None,
+) -> None:
+    document.add_heading(title, level=1)
+    if intro:
+        document.add_paragraph(intro)
+    if not resources:
+        document.add_paragraph("No hay recursos de este tipo analizados automáticamente.")
+        return
+
+    for resource in resources:
+        checks = _technical_checks(resource)
+        document.add_heading(resource["title"], level=2)
+        metadata = (
+            f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
+            f"Score: {resource.get('score', 0)}/100 | Prioridad: {_priority_label(resource.get('priority'))} | "
+            f"Estado de acceso: {resource['accessStatus']}"
+        )
+        if resource.get("provider"):
+            metadata = f"{metadata} | Proveedor: {resource['provider']}"
+        document.add_paragraph(metadata)
+        if not checks:
+            document.add_paragraph("Sin incidencias FAIL/WARNING/ERROR. Los checks PASS y NOT_APPLICABLE se omiten para compactar.")
+            continue
+        _append_docx_table(
+            document,
+            ["Check", "Estado", "Evidencia", "Recomendación"],
+            [
+                [
+                    check["checkTitle"],
+                    check["status"],
+                    _clip_text(check["evidence"]),
+                    _compact_detail_recommendation(check),
+                ]
+                for check in checks
+            ],
+        )
 
 
 def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     document = Document()
     _configure_docx_styles(document)
+    executive = report["executiveSummary"]
 
-    document.add_heading(f"{brand_name} - Informe de accesibilidad", level=1)
-    document.add_paragraph(f"Curso / job: {report['meta']['courseTitle'] or report['meta']['jobId']}")
-    document.add_paragraph(f"Fecha: {_format_report_date(report['createdAt'])}")
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title.add_run("Informe de accesibilidad")
+    title_run.bold = True
+    title_run.font.size = Pt(26)
+    title_run.font.color.rgb = RGBColor(0, 43, 69)
+    subtitle = document.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle_run = subtitle.add_run(f"{brand_name} · {report['meta']['courseTitle'] or report['meta']['jobId']}")
+    subtitle_run.font.size = Pt(13)
+    subtitle_run.font.color.rgb = RGBColor(0, 166, 178)
     document.add_paragraph(f"Modo: {report['mode']['label']}")
-    document.add_paragraph(f"Job ID: {report['meta']['jobId']}")
+    document.add_paragraph(f"Fecha: {_format_report_date(report['createdAt'])}")
     document.add_paragraph(f"Versión AccessibleCourse: {report['meta']['systemVersion']}")
+    document.add_paragraph(f"Job ID: {report['meta']['jobId']}")
+    score_paragraph = document.add_paragraph()
+    score_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    score_run = score_paragraph.add_run(f"{executive['score']}/100")
+    score_run.bold = True
+    score_run.font.size = Pt(30)
+    score_run.font.color.rgb = RGBColor(0, 43, 69)
+    priority_paragraph = document.add_paragraph()
+    priority_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    priority_run = priority_paragraph.add_run(f"Prioridad global: {_priority_label(executive['priority'])}")
+    priority_run.bold = True
+    priority_run.font.color.rgb = RGBColor(0, 166, 178)
     document.add_page_break()
+
+    document.add_heading("Resumen ejecutivo", level=1)
+    document.add_paragraph(executive["narrative"])
+    _append_docx_summary_table(
+        document,
+        [
+            ("Puntuación de accesibilidad analizada", f"{executive['score']}/100"),
+            ("Prioridad global", _priority_label(executive["priority"])),
+            ("Recursos detectados", str(executive["resourcesDetected"])),
+            ("Recursos analizados", str(executive["resourcesAnalyzed"])),
+            ("Recursos no analizables", str(executive["notAutomaticallyAnalyzable"])),
+        ],
+    )
+    document.add_heading("Principales problemas", level=2)
+    for problem in executive["mainProblems"]:
+        document.add_paragraph(problem, style="List Bullet")
+    document.add_heading("3 recomendaciones prioritarias", level=2)
+    for recommendation in executive["priorityRecommendations"]:
+        document.add_paragraph(recommendation, style="List Bullet")
 
     document.add_heading("Resumen de acceso", level=1)
     _append_docx_summary_table(
@@ -1207,174 +1575,96 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
         ],
     )
 
+    document.add_heading("Puntuación por módulo", level=1)
+    if report["moduleScores"]:
+        _append_docx_table(
+            document,
+            ["Módulo/sección", "Score", "Prioridad", "Recursos analizados", "Incidencias principales"],
+            [
+                [
+                    row["moduleTitle"],
+                    f"{row['score']}/100",
+                    _priority_label(row["priority"]),
+                    row["resourcesAnalyzed"],
+                    _clip_text("; ".join(row["mainIssues"]), 180),
+                ]
+                for row in report["moduleScores"]
+            ],
+        )
+    else:
+        document.add_paragraph("No hay recursos analizados automáticamente para calcular score por módulo.")
+
+    document.add_heading("Puntuación por recurso", level=1)
+    if report["resourceScores"]:
+        _append_docx_table(
+            document,
+            ["Recurso", "Tipo", "Módulo", "Score", "Prioridad", "Incidencia principal"],
+            [
+                [
+                    row["title"],
+                    row["typeLabel"],
+                    row["moduleTitle"],
+                    f"{row['score']}/100",
+                    _priority_label(row["priority"]),
+                    _clip_text(row["mainIssue"], 160),
+                ]
+                for row in report["resourceScores"]
+            ],
+        )
+    else:
+        document.add_paragraph("No hay recursos analizados automáticamente para calcular score por recurso.")
+
     document.add_heading("Principales incidencias", level=1)
-    if not report["keyIssues"]:
+    if not report["issueSummary"]:
         document.add_paragraph("No se han detectado incidencias FAIL o WARNING en los checks automáticos.")
     else:
-        if report["issueSummary"]:
-            document.add_heading("Resumen agrupado", level=2)
-            summary_table = document.add_table(rows=1, cols=5)
-            summary_table.style = "Table Grid"
-            header = summary_table.rows[0].cells
-            header[0].text = "Tipo"
-            header[1].text = "Check"
-            header[2].text = "Estado"
-            header[3].text = "Recursos"
-            header[4].text = "Recomendación"
-            for issue_group in report["issueSummary"]:
-                row = summary_table.add_row().cells
-                row[0].text = _auto_resource_type_label(issue_group["resourceType"])
-                row[1].text = issue_group["checkTitle"]
-                row[2].text = issue_group["status"]
-                row[3].text = str(issue_group["resourceCount"])
-                row[4].text = issue_group["recommendation"]
-
-        current_group = None
-        for issue in report["keyIssues"]:
-            resource_type_label = _auto_resource_type_label(issue["resourceType"])
-            group_label = f"{issue['coursePath']} | {issue['resourceTitle']} ({resource_type_label})"
-            if group_label != current_group:
-                document.add_heading(group_label, level=2)
-                current_group = group_label
-            document.add_paragraph(
-                f"{resource_type_label} - {issue['checkTitle']} [{issue['status']}]",
-                style="List Bullet",
-            )
-            document.add_paragraph(f"Evidencia: {issue['evidence']}")
-            recommendation = (
-                "Ver recomendación en el resumen agrupado de incidencias."
-                if report["issueSummary"]
-                else issue["recommendation"]
-            )
-            document.add_paragraph(f"Recomendación: {recommendation}")
+        _append_docx_table(
+            document,
+            ["Tipo", "Check", "Estado", "Recursos afectados", "Recomendación"],
+            [
+                [
+                    _auto_resource_type_label(issue_group["resourceType"]),
+                    issue_group["checkTitle"],
+                    issue_group["status"],
+                    issue_group["resourceCount"],
+                    _clip_text(issue_group["recommendation"], 220),
+                ]
+                for issue_group in report["issueSummary"]
+            ],
+        )
 
     document.add_page_break()
-    document.add_heading("Detalle por recurso HTML", level=1)
-    if not report["htmlResources"]:
-        document.add_paragraph("No hay recursos HTML analizados automáticamente para este job.")
-    else:
-        for resource in report["htmlResources"]:
-            document.add_heading(resource["title"], level=2)
-            document.add_paragraph(
-                f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-                f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}"
-            )
-            if resource["summarized"]:
-                document.add_paragraph(
-                    "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE."
-                )
-                continue
-            table = document.add_table(rows=1, cols=4)
-            table.style = "Table Grid"
-            header = table.rows[0].cells
-            header[0].text = "Check"
-            header[1].text = "Estado"
-            header[2].text = "Evidencia"
-            header[3].text = "Recomendación"
-            for check in resource["checks"]:
-                row = table.add_row().cells
-                row[0].text = check["checkTitle"]
-                row[1].text = check["status"]
-                row[2].text = check["evidence"]
-                row[3].text = _compact_detail_recommendation(check)
-
-    document.add_heading("Detalle por recurso PDF", level=1)
-    if not report["pdfResources"]:
-        document.add_paragraph("No hay recursos PDF analizados automáticamente para este job.")
-    else:
-        for resource in report["pdfResources"]:
-            document.add_heading(resource["title"], level=2)
-            document.add_paragraph(
-                f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-                f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}"
-            )
-            if resource["summarized"]:
-                document.add_paragraph(
-                    "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE."
-                )
-                continue
-            table = document.add_table(rows=1, cols=4)
-            table.style = "Table Grid"
-            header = table.rows[0].cells
-            header[0].text = "Check"
-            header[1].text = "Estado"
-            header[2].text = "Evidencia"
-            header[3].text = "Recomendación"
-            for check in resource["checks"]:
-                row = table.add_row().cells
-                row[0].text = check["checkTitle"]
-                row[1].text = check["status"]
-                row[2].text = check["evidence"]
-                row[3].text = _compact_detail_recommendation(check)
-
-    document.add_heading("Detalle por recurso Word", level=1)
-    if not report["wordResources"]:
-        document.add_paragraph("No hay documentos Word analizados automáticamente para este job.")
-    else:
-        for resource in report["wordResources"]:
-            document.add_heading(resource["title"], level=2)
-            document.add_paragraph(
-                f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-                f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}"
-            )
-            if resource["summarized"]:
-                document.add_paragraph(
-                    "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE."
-                )
-                continue
-            table = document.add_table(rows=1, cols=4)
-            table.style = "Table Grid"
-            header = table.rows[0].cells
-            header[0].text = "Check"
-            header[1].text = "Estado"
-            header[2].text = "Evidencia"
-            header[3].text = "Recomendación"
-            for check in resource["checks"]:
-                row = table.add_row().cells
-                row[0].text = check["checkTitle"]
-                row[1].text = check["status"]
-                row[2].text = check["evidence"]
-                row[3].text = _compact_detail_recommendation(check)
-
-    document.add_heading("Detalle por recurso de vídeo", level=1)
-    document.add_paragraph(VIDEO_ANALYSIS_SCOPE_NOTE)
-    if not report["videoResources"]:
-        document.add_paragraph("No hay recursos de vídeo analizados automáticamente para este job.")
-    else:
-        for resource in report["videoResources"]:
-            document.add_heading(resource["title"], level=2)
-            document.add_paragraph(
-                f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-                f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']} | "
-                f"Proveedor: {resource['provider']}"
-            )
-            table = document.add_table(rows=1, cols=4)
-            table.style = "Table Grid"
-            header = table.rows[0].cells
-            header[0].text = "Check"
-            header[1].text = "Estado"
-            header[2].text = "Evidencia"
-            header[3].text = "Recomendación"
-            for check in resource["checks"]:
-                row = table.add_row().cells
-                row[0].text = check["checkTitle"]
-                row[1].text = check["status"]
-                row[2].text = check["evidence"]
-                row[3].text = _compact_detail_recommendation(check)
+    document.add_heading("Detalle técnico", level=1)
+    document.add_paragraph("Los checks PASS se omiten en esta sección para mantener el informe accionable.")
+    _append_docx_technical_resources(document, "Detalle por recurso HTML", report["htmlResources"])
+    _append_docx_technical_resources(document, "Detalle por recurso PDF", report["pdfResources"])
+    _append_docx_technical_resources(document, "Detalle por recurso Word", report["wordResources"])
+    _append_docx_technical_resources(
+        document,
+        "Detalle por recurso de vídeo",
+        report["videoResources"],
+        intro=VIDEO_ANALYSIS_SCOPE_NOTE,
+    )
 
     document.add_heading("Recursos no analizables automáticamente", level=1)
     if not report["notAutomaticallyAnalyzable"]:
         document.add_paragraph("No hay recursos pendientes de análisis automático por autenticación, interacción o cobertura.")
     else:
         document.add_paragraph(AUTO_NOT_ANALYZABLE_EXPLANATION)
-        for resource in report["notAutomaticallyAnalyzable"]:
-            document.add_paragraph(
-                f"{resource['title']} ({resource['type']}) - {resource['reason']} - "
-                f"{resource['moduleTitle'] or resource['coursePath']}",
-                style="List Bullet",
-            )
+        _append_docx_table(
+            document,
+            ["Recurso", "Tipo", "Motivo", "Módulo/sección"],
+            [
+                [
+                    resource["title"],
+                    resource["type"],
+                    resource["reason"],
+                    resource["moduleTitle"] or resource["coursePath"],
+                ]
+                for resource in report["notAutomaticallyAnalyzable"]
+            ],
+        )
 
-    document.add_page_break()
     document.add_heading("Revisión manual complementaria", level=1)
     if not report["routes"]:
         document.add_paragraph("No hay hallazgos FAIL o PENDING en la checklist manual.")
@@ -1393,6 +1683,8 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
                 header[2].text = "Descripción"
                 header[3].text = "Cómo arreglarlo"
                 header[4].text = "Notas"
+                for cell in header:
+                    _docx_style_header_cell(cell)
                 for issue in resource["fails"] + resource["pending"]:
                     row = table.add_row().cells
                     row[0].text = issue["status"]
@@ -1417,15 +1709,25 @@ def _pdf_paragraph(value: Any, style: ParagraphStyle) -> Paragraph:
     return Paragraph(_pdf_text(value), style)
 
 
-def _append_pdf_table(story: list[Any], rows: list[list[str]], *, widths: list[float]) -> None:
-    cell_style = getSampleStyleSheet()["BodyText"]
-    escaped_rows = [[Paragraph(_pdf_text(cell), cell_style) for cell in row] for row in rows]
-    table = Table(escaped_rows, colWidths=widths)
+def _append_pdf_table(story: list[Any], rows: list[list[Any]], *, widths: list[float]) -> None:
+    header_style = ParagraphStyle(
+        name="ReportTableHeader",
+        fontName="Helvetica-Bold",
+        fontSize=8.4,
+        leading=10,
+        textColor=colors.white,
+    )
+    cell_style = ParagraphStyle(name="ReportTableCell", fontSize=8.2, leading=10)
+    escaped_rows = [
+        [Paragraph(_pdf_text(cell), header_style if row_index == 0 else cell_style) for cell in row]
+        for row_index, row in enumerate(rows)
+    ]
+    table = Table(escaped_rows, colWidths=widths, repeatRows=1)
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(f"#{REPORT_NAVY}")),
+                ("GRID", (0, 0), (-1, -1), 0.45, colors.HexColor(f"#{REPORT_BORDER}")),
                 ("PADDING", (0, 0), (-1, -1), 5),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]
@@ -1434,23 +1736,139 @@ def _append_pdf_table(story: list[Any], rows: list[list[str]], *, widths: list[f
     story.extend([table, Spacer(1, 0.25 * cm)])
 
 
+def _append_pdf_bullets(story: list[Any], items: list[str], style: ParagraphStyle) -> None:
+    for item in items:
+        story.append(_pdf_paragraph(f"• {item}", style))
+
+
+def _append_pdf_technical_resources(
+    story: list[Any],
+    styles: dict[str, ParagraphStyle],
+    title: str,
+    resources: list[dict[str, Any]],
+    *,
+    intro: str | None = None,
+) -> None:
+    story.append(_pdf_paragraph(title, styles["Section"]))
+    if intro:
+        story.append(_pdf_paragraph(intro, styles["Normal"]))
+    if not resources:
+        story.append(_pdf_paragraph("No hay recursos de este tipo analizados automáticamente.", styles["Normal"]))
+        return
+
+    for resource in resources:
+        checks = _technical_checks(resource)
+        story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
+        metadata = (
+            f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
+            f"Score: {resource.get('score', 0)}/100 | Prioridad: {_priority_label(resource.get('priority'))} | "
+            f"Estado de acceso: {resource['accessStatus']}"
+        )
+        if resource.get("provider"):
+            metadata = f"{metadata} | Proveedor: {resource['provider']}"
+        story.append(_pdf_paragraph(metadata, styles["Normal"]))
+        if not checks:
+            story.append(
+                _pdf_paragraph(
+                    "Sin incidencias FAIL/WARNING/ERROR. Los checks PASS y NOT_APPLICABLE se omiten para compactar.",
+                    styles["Normal"],
+                )
+            )
+            continue
+        rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
+        for check in checks:
+            rows.append(
+                [
+                    check["checkTitle"],
+                    check["status"],
+                    _clip_text(check["evidence"]),
+                    _compact_detail_recommendation(check),
+                ]
+            )
+        _append_pdf_table(story, rows, widths=[3.4 * cm, 2.4 * cm, 5.3 * cm, 4.2 * cm])
+
+
 def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="Section", parent=styles["Heading1"], fontSize=15))
+    styles.add(
+        ParagraphStyle(
+            name="CoverTitle",
+            parent=styles["Title"],
+            fontSize=26,
+            leading=30,
+            textColor=colors.HexColor(f"#{REPORT_NAVY}"),
+            alignment=1,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="CoverSubtitle",
+            parent=styles["Normal"],
+            fontSize=12,
+            leading=15,
+            textColor=colors.HexColor(f"#{REPORT_CYAN}"),
+            alignment=1,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="Score",
+            parent=styles["Title"],
+            fontSize=28,
+            leading=32,
+            textColor=colors.HexColor(f"#{REPORT_NAVY}"),
+            alignment=1,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="Section",
+            parent=styles["Heading1"],
+            fontSize=15,
+            leading=18,
+            textColor=colors.HexColor(f"#{REPORT_NAVY}"),
+            spaceBefore=8,
+            spaceAfter=6,
+        )
+    )
+    styles["Heading2"].textColor = colors.HexColor(f"#{REPORT_NAVY}")
+    executive = report["executiveSummary"]
 
     story: list[Any] = [
-        _pdf_paragraph(f"{brand_name} - Informe de accesibilidad", styles["Title"]),
+        _pdf_paragraph("Informe de accesibilidad", styles["CoverTitle"]),
+        _pdf_paragraph(f"{brand_name} · {report['meta']['courseTitle'] or report['meta']['jobId']}", styles["CoverSubtitle"]),
         Spacer(1, 0.4 * cm),
-        _pdf_paragraph(f"Curso / job: {report['meta']['courseTitle'] or report['meta']['jobId']}", styles["Normal"]),
-        _pdf_paragraph(f"Fecha: {_format_report_date(report['createdAt'])}", styles["Normal"]),
+        _pdf_paragraph(f"{executive['score']}/100", styles["Score"]),
+        _pdf_paragraph(f"Prioridad global: {_priority_label(executive['priority'])}", styles["CoverSubtitle"]),
+        Spacer(1, 0.5 * cm),
         _pdf_paragraph(f"Modo: {report['mode']['label']}", styles["Normal"]),
-        _pdf_paragraph(f"Job ID: {report['meta']['jobId']}", styles["Normal"]),
+        _pdf_paragraph(f"Fecha: {_format_report_date(report['createdAt'])}", styles["Normal"]),
         _pdf_paragraph(f"Versión AccessibleCourse: {report['meta']['systemVersion']}", styles["Normal"]),
+        _pdf_paragraph(f"Job ID: {report['meta']['jobId']}", styles["Normal"]),
         PageBreak(),
-        _pdf_paragraph("Resumen de acceso", styles["Section"]),
+        _pdf_paragraph("Resumen ejecutivo", styles["Section"]),
     ]
 
+    story.append(_pdf_paragraph(executive["narrative"], styles["Normal"]))
+    _append_pdf_table(
+        story,
+        [
+            ["Indicador", "Valor"],
+            ["Puntuación de accesibilidad analizada", f"{executive['score']}/100"],
+            ["Prioridad global", _priority_label(executive["priority"])],
+            ["Recursos detectados", str(executive["resourcesDetected"])],
+            ["Recursos analizados", str(executive["resourcesAnalyzed"])],
+            ["Recursos no analizables", str(executive["notAutomaticallyAnalyzable"])],
+        ],
+        widths=[9 * cm, 4.5 * cm],
+    )
+    story.append(_pdf_paragraph("Principales problemas", styles["Heading2"]))
+    _append_pdf_bullets(story, executive["mainProblems"], styles["Normal"])
+    story.append(_pdf_paragraph("3 recomendaciones prioritarias", styles["Heading2"]))
+    _append_pdf_bullets(story, executive["priorityRecommendations"], styles["Normal"])
+
+    story.append(_pdf_paragraph("Resumen de acceso", styles["Section"]))
     _append_pdf_table(
         story,
         [
@@ -1488,166 +1906,70 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
         widths=[9 * cm, 4.2 * cm],
     )
 
+    story.append(_pdf_paragraph("Puntuación por módulo", styles["Section"]))
+    if report["moduleScores"]:
+        rows = [["Módulo/sección", "Score", "Prioridad", "Recursos", "Incidencias principales"]]
+        for row in report["moduleScores"]:
+            rows.append(
+                [
+                    row["moduleTitle"],
+                    f"{row['score']}/100",
+                    _priority_label(row["priority"]),
+                    str(row["resourcesAnalyzed"]),
+                    _clip_text("; ".join(row["mainIssues"]), 180),
+                ]
+            )
+        _append_pdf_table(story, rows, widths=[4.4 * cm, 2 * cm, 2.2 * cm, 2 * cm, 5 * cm])
+    else:
+        story.append(_pdf_paragraph("No hay recursos analizados automáticamente para calcular score por módulo.", styles["Normal"]))
+
+    story.append(_pdf_paragraph("Puntuación por recurso", styles["Section"]))
+    if report["resourceScores"]:
+        rows = [["Recurso", "Tipo", "Módulo", "Score", "Prioridad", "Incidencia principal"]]
+        for row in report["resourceScores"]:
+            rows.append(
+                [
+                    row["title"],
+                    row["typeLabel"],
+                    row["moduleTitle"],
+                    f"{row['score']}/100",
+                    _priority_label(row["priority"]),
+                    _clip_text(row["mainIssue"], 140),
+                ]
+            )
+        _append_pdf_table(story, rows, widths=[3.6 * cm, 1.5 * cm, 3.1 * cm, 1.7 * cm, 1.9 * cm, 3.8 * cm])
+    else:
+        story.append(_pdf_paragraph("No hay recursos analizados automáticamente para calcular score por recurso.", styles["Normal"]))
+
     story.append(_pdf_paragraph("Principales incidencias", styles["Section"]))
-    if not report["keyIssues"]:
+    if not report["issueSummary"]:
         story.append(_pdf_paragraph("No se han detectado incidencias FAIL o WARNING en los checks automáticos.", styles["Normal"]))
     else:
-        if report["issueSummary"]:
-            story.append(_pdf_paragraph("Resumen agrupado", styles["Heading2"]))
-            rows = [["Tipo", "Check", "Estado", "Recursos", "Recomendación"]]
-            for issue_group in report["issueSummary"]:
-                rows.append(
-                    [
-                        _auto_resource_type_label(issue_group["resourceType"]),
-                        issue_group["checkTitle"],
-                        issue_group["status"],
-                        str(issue_group["resourceCount"]),
-                        issue_group["recommendation"],
-                    ]
-                )
-            _append_pdf_table(story, rows, widths=[1.6 * cm, 3.2 * cm, 2.1 * cm, 2 * cm, 6.2 * cm])
-
-        current_group = None
-        for issue in report["keyIssues"]:
-            resource_type_label = _auto_resource_type_label(issue["resourceType"])
-            group_label = f"{issue['coursePath']} | {issue['resourceTitle']} ({resource_type_label})"
-            if group_label != current_group:
-                story.append(_pdf_paragraph(group_label, styles["Heading2"]))
-                current_group = group_label
-            story.append(_pdf_paragraph(f"- {resource_type_label} - {issue['checkTitle']} [{issue['status']}]", styles["Normal"]))
-            story.append(_pdf_paragraph(f"Evidencia: {issue['evidence']}", styles["Normal"]))
-            recommendation = (
-                "Ver recomendación en el resumen agrupado de incidencias."
-                if report["issueSummary"]
-                else issue["recommendation"]
+        rows = [["Tipo", "Check", "Estado", "Nº recursos", "Recomendación"]]
+        for issue_group in report["issueSummary"]:
+            rows.append(
+                [
+                    _auto_resource_type_label(issue_group["resourceType"]),
+                    issue_group["checkTitle"],
+                    issue_group["status"],
+                    str(issue_group["resourceCount"]),
+                    _clip_text(issue_group["recommendation"], 220),
+                ]
             )
-            story.append(_pdf_paragraph(f"Recomendación: {recommendation}", styles["Normal"]))
+        _append_pdf_table(story, rows, widths=[1.8 * cm, 3.3 * cm, 2.2 * cm, 2 * cm, 6.2 * cm])
 
-    story.extend([PageBreak(), _pdf_paragraph("Detalle por recurso HTML", styles["Section"])])
-    if not report["htmlResources"]:
-        story.append(_pdf_paragraph("No hay recursos HTML analizados automáticamente para este job.", styles["Normal"]))
-    else:
-        for resource in report["htmlResources"]:
-            story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
-            story.append(
-                _pdf_paragraph(
-                    f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-                    f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}",
-                    styles["Normal"],
-                )
-            )
-            if resource["summarized"]:
-                story.append(
-                    _pdf_paragraph(
-                        "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE.",
-                        styles["Normal"],
-                    )
-                )
-                continue
-            rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
-            for check in resource["checks"]:
-                rows.append(
-                    [
-                        check["checkTitle"],
-                        check["status"],
-                        check["evidence"],
-                        _compact_detail_recommendation(check),
-                    ]
-                )
-            _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
-
-    story.append(_pdf_paragraph("Detalle por recurso PDF", styles["Section"]))
-    if not report["pdfResources"]:
-        story.append(_pdf_paragraph("No hay recursos PDF analizados automáticamente para este job.", styles["Normal"]))
-    else:
-        for resource in report["pdfResources"]:
-            story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
-            story.append(
-                _pdf_paragraph(
-                    f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-                    f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}",
-                    styles["Normal"],
-                )
-            )
-            if resource["summarized"]:
-                story.append(
-                    _pdf_paragraph(
-                        "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE.",
-                        styles["Normal"],
-                    )
-                )
-                continue
-            rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
-            for check in resource["checks"]:
-                rows.append(
-                    [
-                        check["checkTitle"],
-                        check["status"],
-                        check["evidence"],
-                        _compact_detail_recommendation(check),
-                    ]
-                )
-            _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
-
-    story.append(_pdf_paragraph("Detalle por recurso Word", styles["Section"]))
-    if not report["wordResources"]:
-        story.append(_pdf_paragraph("No hay documentos Word analizados automáticamente para este job.", styles["Normal"]))
-    else:
-        for resource in report["wordResources"]:
-            story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
-            story.append(
-                _pdf_paragraph(
-                    f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-                    f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']}",
-                    styles["Normal"],
-                )
-            )
-            if resource["summarized"]:
-                story.append(
-                    _pdf_paragraph(
-                        "Todos los checks automáticos de este recurso están en PASS o NOT_APPLICABLE.",
-                        styles["Normal"],
-                    )
-                )
-                continue
-            rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
-            for check in resource["checks"]:
-                rows.append(
-                    [
-                        check["checkTitle"],
-                        check["status"],
-                        check["evidence"],
-                        _compact_detail_recommendation(check),
-                    ]
-                )
-            _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
-
-    story.append(_pdf_paragraph("Detalle por recurso de vídeo", styles["Section"]))
-    story.append(_pdf_paragraph(VIDEO_ANALYSIS_SCOPE_NOTE, styles["Normal"]))
-    if not report["videoResources"]:
-        story.append(_pdf_paragraph("No hay recursos de vídeo analizados automáticamente para este job.", styles["Normal"]))
-    else:
-        for resource in report["videoResources"]:
-            story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
-            story.append(
-                _pdf_paragraph(
-                    f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-                    f"Estado general: {resource['overallStatus']} | Estado de acceso: {resource['accessStatus']} | "
-                    f"Proveedor: {resource['provider']}",
-                    styles["Normal"],
-                )
-            )
-            rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
-            for check in resource["checks"]:
-                rows.append(
-                    [
-                        check["checkTitle"],
-                        check["status"],
-                        check["evidence"],
-                        _compact_detail_recommendation(check),
-                    ]
-                )
-            _append_pdf_table(story, rows, widths=[3.5 * cm, 2.2 * cm, 5.2 * cm, 4.1 * cm])
+    story.extend([PageBreak(), _pdf_paragraph("Detalle técnico", styles["Section"])])
+    story.append(_pdf_paragraph("Los checks PASS se omiten en esta sección para mantener el informe accionable.", styles["Normal"]))
+    _append_pdf_technical_resources(story, styles, "Detalle por recurso HTML", report["htmlResources"])
+    _append_pdf_technical_resources(story, styles, "Detalle por recurso PDF", report["pdfResources"])
+    _append_pdf_technical_resources(story, styles, "Detalle por recurso Word", report["wordResources"])
+    _append_pdf_technical_resources(
+        story,
+        styles,
+        "Detalle por recurso de vídeo",
+        report["videoResources"],
+        intro=VIDEO_ANALYSIS_SCOPE_NOTE,
+    )
 
     story.append(_pdf_paragraph("Recursos no analizables automáticamente", styles["Section"]))
     if not report["notAutomaticallyAnalyzable"]:
@@ -1659,16 +1981,19 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
         )
     else:
         story.append(_pdf_paragraph(AUTO_NOT_ANALYZABLE_EXPLANATION, styles["Normal"]))
+        rows = [["Recurso", "Tipo", "Motivo", "Módulo/sección"]]
         for resource in report["notAutomaticallyAnalyzable"]:
-            story.append(
-                _pdf_paragraph(
-                    f"- {resource['title']} ({resource['type']}) - {resource['reason']} - "
-                    f"{resource['moduleTitle'] or resource['coursePath']}",
-                    styles["Normal"],
-                )
+            rows.append(
+                [
+                    resource["title"],
+                    resource["type"],
+                    resource["reason"],
+                    resource["moduleTitle"] or resource["coursePath"],
+                ]
             )
+        _append_pdf_table(story, rows, widths=[5 * cm, 2.2 * cm, 3.3 * cm, 5 * cm])
 
-    story.extend([PageBreak(), _pdf_paragraph("Revisión manual complementaria", styles["Section"])])
+    story.append(_pdf_paragraph("Revisión manual complementaria", styles["Section"]))
     if not report["routes"]:
         story.append(_pdf_paragraph("No hay hallazgos FAIL o PENDING en la checklist manual.", styles["Normal"]))
     else:
@@ -1700,7 +2025,14 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
     story.append(_pdf_paragraph(f"Fecha: {_format_report_date(report['appendix']['createdAt'])}", styles["Normal"]))
     story.append(_pdf_paragraph(f"Versión del sistema: {report['appendix']['systemVersion']}", styles["Normal"]))
 
-    document = SimpleDocTemplate(str(destination), pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm)
+    document = SimpleDocTemplate(
+        str(destination),
+        pagesize=A4,
+        leftMargin=1.6 * cm,
+        rightMargin=1.6 * cm,
+        topMargin=1.4 * cm,
+        bottomMargin=1.4 * cm,
+    )
     document.build(story)
 
 
@@ -1823,6 +2155,35 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
         normalized.pop("docxResources", None)
     normalized.setdefault("videoAccessibilitySummary", _empty_auto_summary())
     normalized.setdefault("videoResources", [])
+
+    for collection_name in ("htmlResources", "pdfResources", "wordResources", "videoResources"):
+        for resource in normalized.get(collection_name, []):
+            if not isinstance(resource, dict):
+                continue
+            score_fields = _score_fields(resource.get("checks", []))
+            resource.setdefault("score", score_fields["score"])
+            resource.setdefault("priority", score_fields["priority"])
+            resource.setdefault("mainIssue", score_fields["mainIssue"])
+
+    normalized.setdefault(
+        "resourceScores",
+        _resource_score_rows(
+            normalized.get("htmlResources", []),
+            normalized.get("pdfResources", []),
+            normalized.get("wordResources", []),
+            normalized.get("videoResources", []),
+        ),
+    )
+    normalized.setdefault("moduleScores", _module_score_rows(normalized["resourceScores"]))
+    normalized.setdefault(
+        "executiveSummary",
+        _build_executive_summary(
+            normalized.get("accessSummary", {}),
+            normalized["resourceScores"],
+            normalized.get("issueSummary", []),
+            normalized.get("notAutomaticallyAnalyzable", []),
+        ),
+    )
 
     for collection_name in ("issueSummary", "keyIssues"):
         for item in normalized.get(collection_name, []):

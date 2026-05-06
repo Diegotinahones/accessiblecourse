@@ -399,6 +399,63 @@ class AccessibilityReportRead(StrictModel):
     resources: list[AccessibilityResourceRead] = Field(default_factory=list)
 
 
+ExecutivePriority = Literal["HIGH", "MEDIUM", "LOW", "NOT_SCORED"]
+
+
+class ExecutiveTopIssueRead(StrictModel):
+    type: str
+    checkTitle: str
+    count: int
+    recommendation: str
+
+
+class ExecutiveSummaryStatsRead(StrictModel):
+    resourcesDetected: int = 0
+    resourcesAccessed: int = 0
+    resourcesAnalyzed: int = 0
+    downloadableResources: int = 0
+    highPriorityResources: int = 0
+    mediumPriorityResources: int = 0
+    lowPriorityResources: int = 0
+    notScoredResources: int = 0
+
+
+class ExecutiveResourceRead(StrictModel):
+    resourceId: str
+    title: str
+    type: str
+    score: int | None = None
+    priority: ExecutivePriority
+    accessStatus: str
+    downloadable: bool
+    mainIssue: str | None = None
+    reportAnchorId: str
+
+
+class ExecutiveModuleRead(StrictModel):
+    title: str
+    score: int | None = None
+    priority: ExecutivePriority
+    resourceCount: int = 0
+    analyzedCount: int = 0
+    highPriorityCount: int = 0
+    mediumPriorityCount: int = 0
+    lowPriorityCount: int = 0
+    resources: list[ExecutiveResourceRead] = Field(default_factory=list)
+
+
+class ExecutiveSummaryRead(StrictModel):
+    jobId: str
+    mode: str
+    courseTitle: str
+    accessibilityScore: int | None = None
+    priority: ExecutivePriority
+    summary: ExecutiveSummaryStatsRead
+    topIssues: list[ExecutiveTopIssueRead] = Field(default_factory=list)
+    topRecommendations: list[str] = Field(default_factory=list)
+    modules: list[ExecutiveModuleRead] = Field(default_factory=list)
+
+
 class AuxiliaryResourceRead(StrictModel):
     id: str
     title: str
@@ -635,6 +692,40 @@ class ReportAutomaticAccessibilitySummaryRead(StrictModel):
     errorCount: int
 
 
+class ReportExecutiveSummaryRead(StrictModel):
+    score: int
+    priority: str
+    resourcesDetected: int
+    resourcesAnalyzed: int
+    notAutomaticallyAnalyzable: int
+    mainProblems: list[str]
+    priorityRecommendations: list[str]
+    narrative: str
+
+
+class ReportModuleScoreRead(StrictModel):
+    moduleTitle: str
+    score: int
+    priority: str
+    resourcesAnalyzed: int
+    mainIssues: list[str]
+
+
+class ReportResourceScoreRead(StrictModel):
+    resourceId: str
+    title: str
+    type: str
+    typeLabel: str
+    moduleTitle: str
+    coursePath: str
+    score: int
+    priority: str
+    mainIssue: str
+    failCount: int
+    warningCount: int
+    errorCount: int
+
+
 class ReportIssueSummaryRead(StrictModel):
     resourceType: Literal["HTML", "PDF", "WORD", "VIDEO"]
     checkId: str
@@ -673,6 +764,9 @@ class ReportHtmlResourceRead(StrictModel):
     moduleTitle: str | None = None
     accessStatus: str
     overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
+    score: int | None = None
+    priority: str | None = None
+    mainIssue: str | None = None
     summarized: bool = False
     checks: list[ReportHtmlCheckRead]
 
@@ -688,6 +782,9 @@ class ReportPdfResourceRead(StrictModel):
     moduleTitle: str | None = None
     accessStatus: str
     overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
+    score: int | None = None
+    priority: str | None = None
+    mainIssue: str | None = None
     summarized: bool = False
     checks: list[ReportPdfCheckRead]
 
@@ -703,6 +800,9 @@ class ReportWordResourceRead(StrictModel):
     moduleTitle: str | None = None
     accessStatus: str
     overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
+    score: int | None = None
+    priority: str | None = None
+    mainIssue: str | None = None
     summarized: bool = False
     checks: list[ReportWordCheckRead]
 
@@ -719,6 +819,9 @@ class ReportVideoResourceRead(StrictModel):
     accessStatus: str
     overallStatus: Literal["PASS", "FAIL", "WARNING", "ERROR"]
     provider: str
+    score: int | None = None
+    priority: str | None = None
+    mainIssue: str | None = None
     summarized: bool = False
     checks: list[ReportVideoCheckRead]
 
@@ -794,6 +897,9 @@ class JobReportRead(StrictModel):
     mode: ReportModeRead
     accessSummary: ReportAccessSummaryRead
     automaticAccessibilitySummary: ReportAutomaticAccessibilitySummaryRead
+    executiveSummary: ReportExecutiveSummaryRead
+    moduleScores: list[ReportModuleScoreRead]
+    resourceScores: list[ReportResourceScoreRead]
     htmlAccessibilitySummary: ReportHtmlAccessibilitySummaryRead
     pdfAccessibilitySummary: ReportPdfAccessibilitySummaryRead
     wordAccessibilitySummary: ReportWordAccessibilitySummaryRead

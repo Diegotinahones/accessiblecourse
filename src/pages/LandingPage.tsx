@@ -32,6 +32,7 @@ export function LandingPage({
       description="Elige cómo quieres empezar."
       showTokenButton={tokenConfigured}
       title="Haz tu curso accesible"
+      useMainLandmark={false}
     >
       <div className="mx-auto max-w-4xl space-y-6">
         {tokenStatusError ? (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Request, UploadFile, status
@@ -37,7 +38,7 @@ from app.schemas import (
     ReviewSummaryPayload,
 )
 from app.services.access_analysis import build_access_summary
-from app.services.canvas_client import CanvasClient, CanvasCredentials
+from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContext
 from app.services.course_structure import (
     augment_course_structure,
     build_fallback_course_structure,
@@ -56,13 +57,14 @@ from app.services.jobs import (
     rerun_access_analysis,
     serialize_job,
 )
+from app.services.notebook_accessibility import ensure_notebook_accessibility_report
 from app.services.pdf_accessibility import ensure_pdf_accessibility_report
 from app.services.jobs import (
     get_job_or_404 as get_processing_job_or_404,
 )
 from app.services.reports import generate_job_report, get_report_file_info, load_job_report
 from app.services.resource_core import ResourceContentResult, get_resource_content, normalize_resource
-from app.services.token_session import get_active_canvas_token, require_active_canvas_token
+from app.services.token_session import get_active_canvas_token, get_canvas_token_session_status, require_active_canvas_token
 from app.services.video_accessibility import ensure_video_accessibility_report
 from app.services.review_service import (
     build_summary_payload,
@@ -136,19 +138,20 @@ def _load_online_context(
     context_store = getattr(request.app.state, "online_job_contexts", None)
     context = context_store.get(job_id) if context_store is not None else None
     active_token = get_active_canvas_token(request, settings)
-    if context is None and active_token is None:
+    if context is None:
         return None, None, None
-    if context is not None and getattr(context, "auth_source", "header") == "demo" and active_token is None:
+    if active_token is None or context.credentials.token != active_token:
         return None, None, None
-    canvas_client = _canvas_client_factory(context.credentials, settings) if context is not None else None
-    canvas_credentials = context.credentials if context is not None else None
-    course_id = context.course_id if context is not None else None
+    canvas_client = _canvas_client_factory(context.credentials, settings)
+    canvas_credentials = context.credentials
+    course_id = context.course_id
     return canvas_client, canvas_credentials, course_id
 
 
 def _settings_for_request_canvas_token(request: Request, settings: Settings) -> Settings:
-    if get_active_canvas_token(request, settings) is not None:
-        return settings
+    active_token = get_active_canvas_token(request, settings)
+    if active_token is not None:
+        return settings.model_copy(update={"canvas_token": active_token})
     return settings.model_copy(update={"canvas_token": None})
 
 
@@ -160,8 +163,10 @@ def _accessibility_resource_payload(resource, analysis_type: str) -> dict:
 
 def _resource_analysis_type(resource) -> str:
     analysis_type = getattr(resource, "analysisType", None)
-    if analysis_type in {"HTML", "PDF", "DOCX", "VIDEO"}:
+    if analysis_type in {"HTML", "PDF", "DOCX", "VIDEO", "NOTEBOOK"}:
         return analysis_type
+    if getattr(resource, "type", None) == "NOTEBOOK":
+        return "NOTEBOOK"
     if getattr(resource, "type", None) == "VIDEO":
         return "VIDEO"
     if getattr(resource, "type", None) == "DOCX":
@@ -766,6 +771,14 @@ def get_job_accessibility(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
+    report = ensure_notebook_accessibility_report(
+        settings=report_settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
     return _accessibility_report_read(report)
 
 
@@ -817,6 +830,14 @@ def get_job_executive_summary(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
+    report = ensure_notebook_accessibility_report(
+        settings=report_settings,
+        job_id=job_id,
+        resources=inventory,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
     return build_executive_summary(
         job_id=job_id,
         mode=_job_mode(report_settings, job_id),
@@ -840,7 +861,20 @@ def retry_access_analysis(
     engine=Depends(get_engine),
 ) -> JobStatusResponse:
     if not get_extracted_dir(settings, job_id).exists():
-        require_active_canvas_token(request, settings)
+        active_token = require_active_canvas_token(request, settings)
+        course_id = _course_id_from_inventory(
+            [item.model_dump(mode="python") for item in load_inventory_file(settings, job_id)]
+        )
+        if course_id and settings.canvas_base_url:
+            credentials = CanvasCredentials.create(base_url=settings.canvas_base_url, token=active_token)
+            request.app.state.online_job_contexts.put(
+                job_id,
+                OnlineJobContext(
+                    credentials=credentials,
+                    course_id=course_id,
+                    auth_source=get_canvas_token_session_status(request, settings).mode,
+                ),
+            )
     response = prepare_access_analysis_retry(session, settings, job_id)
     background_tasks.add_task(
         rerun_access_analysis,
@@ -852,6 +886,44 @@ def retry_access_analysis(
         _url_check_factory,
     )
     return response
+
+
+def _course_id_from_inventory(resources: list[dict]) -> str | None:
+    for resource in resources:
+        direct = _string_from_mapping(resource, "courseId", "course_id")
+        if direct:
+            return direct
+        details = resource.get("details")
+        if isinstance(details, dict):
+            direct = _string_from_mapping(details, "courseId", "course_id")
+            if direct:
+                return direct
+        for key in ("sourceUrl", "source_url", "finalUrl", "final_url", "url", "downloadUrl", "download_url"):
+            course_id = _course_id_from_url(_string_from_mapping(resource, key))
+            if course_id:
+                return course_id
+    return None
+
+
+def _course_id_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parts = [unquote(part) for part in urlparse(url).path.split("/") if part]
+    if "courses" not in parts:
+        return None
+    index = parts.index("courses")
+    return parts[index + 1] if index + 1 < len(parts) else None
+
+
+def _string_from_mapping(payload: dict, *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        cleaned = str(value).strip()
+        if cleaned:
+            return cleaned
+    return None
 
 
 @router.get("/{job_id}/resources/{resource_id}/download")

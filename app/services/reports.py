@@ -41,6 +41,10 @@ from app.services.catalog import SEVERITY_ORDER, get_item_severity
 from app.services.docx_accessibility import ensure_docx_accessibility_report
 from app.services.executive_summary import CRITICAL_FAIL_CHECKS, IMPORTANT_WARNING_CHECKS
 from app.services.html_accessibility import ensure_accessibility_report
+from app.services.notebook_accessibility import (
+    NOTEBOOK_ANALYSIS_SCOPE_NOTE,
+    ensure_notebook_accessibility_report,
+)
 from app.services.pdf_accessibility import ensure_pdf_accessibility_report
 from app.services.resource_core import normalize_resource
 from app.services.review_service import ensure_job_inventory, ensure_review_rollups, get_templates_by_type, load_inventory_file
@@ -358,6 +362,19 @@ def _is_video_candidate(item: Any) -> bool:
     return True
 
 
+def _is_notebook_candidate(item: Any) -> bool:
+    if not _is_main_item(item):
+        return False
+    core = normalize_resource(item)
+    if core.type != "NOTEBOOK":
+        return False
+    if core.origin in {"EXTERNAL_URL", "RALTI", "LTI"}:
+        return False
+    if core.accessStatus in {"REQUIERE_SSO", "REQUIERE_INTERACCION", "NO_ANALIZABLE", "NO_ACCEDE"}:
+        return False
+    return bool(core.contentAvailable or core.localPath or core.downloadable)
+
+
 def _build_access_summary_data(inventory_items: list[Any]) -> dict[str, int]:
     main_items = [item for item in inventory_items if _is_main_item(item)]
     relevant_items = [item for item in inventory_items if getattr(item, "analysis_category", "") != "TECHNICAL_IGNORED"]
@@ -458,6 +475,26 @@ def _ensure_video_accessibility_data(
     )
 
 
+def _ensure_notebook_accessibility_data(
+    settings: Settings,
+    job_id: str,
+    inventory_items: list[Any],
+    *,
+    canvas_client: Any | None = None,
+    canvas_credentials: Any | None = None,
+    course_id: str | None = None,
+):
+    payload = [item.model_dump(mode="python") for item in inventory_items]
+    return ensure_notebook_accessibility_report(
+        settings=settings,
+        job_id=job_id,
+        resources=payload,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
+
+
 def _flatten_accessibility_resources(accessibility_report) -> list[tuple[str, Any]]:
     flattened: list[tuple[str, Any]] = []
     for module in accessibility_report.modules:
@@ -490,6 +527,15 @@ def _flatten_video_accessibility_resources(video_accessibility_report) -> list[t
     for module in video_accessibility_report.modules:
         for resource in module.resources:
             if getattr(resource, "analysisType", None) == "VIDEO":
+                flattened.append((module.title, resource))
+    return flattened
+
+
+def _flatten_notebook_accessibility_resources(notebook_accessibility_report) -> list[tuple[str, Any]]:
+    flattened: list[tuple[str, Any]] = []
+    for module in notebook_accessibility_report.modules:
+        for resource in module.resources:
+            if getattr(resource, "analysisType", None) == "NOTEBOOK":
                 flattened.append((module.title, resource))
     return flattened
 
@@ -550,11 +596,25 @@ def _build_video_summary_data(inventory_items: list[Any], video_accessibility_re
     }
 
 
+def _build_notebook_summary_data(inventory_items: list[Any], notebook_accessibility_report) -> dict[str, int]:
+    type_summary = notebook_accessibility_report.summary.byType.get("NOTEBOOK")
+    return {
+        "resourcesDetected": sum(1 for item in inventory_items if _is_notebook_candidate(item)),
+        "resourcesAnalyzed": notebook_accessibility_report.summary.notebookResourcesAnalyzed,
+        "passCount": type_summary.passCount if type_summary else 0,
+        "failCount": type_summary.failCount if type_summary else 0,
+        "warningCount": type_summary.warningCount if type_summary else 0,
+        "notApplicableCount": type_summary.notApplicableCount if type_summary else 0,
+        "errorCount": type_summary.errorCount if type_summary else 0,
+    }
+
+
 def _build_automatic_summary_data(
     html_summary: dict[str, int],
     pdf_summary: dict[str, int],
     docx_summary: dict[str, int],
     video_summary: dict[str, int],
+    notebook_summary: dict[str, int],
 ) -> dict[str, int]:
     return {
         "htmlResourcesDetected": html_summary["resourcesDetected"],
@@ -565,26 +625,42 @@ def _build_automatic_summary_data(
         "wordResourcesAnalyzed": docx_summary["resourcesAnalyzed"],
         "videoResourcesDetected": video_summary["resourcesDetected"],
         "videoResourcesAnalyzed": video_summary["resourcesAnalyzed"],
+        "notebookResourcesDetected": notebook_summary["resourcesDetected"],
+        "notebookResourcesAnalyzed": notebook_summary["resourcesAnalyzed"],
         "passCount": (
-            html_summary["passCount"] + pdf_summary["passCount"] + docx_summary["passCount"] + video_summary["passCount"]
+            html_summary["passCount"]
+            + pdf_summary["passCount"]
+            + docx_summary["passCount"]
+            + video_summary["passCount"]
+            + notebook_summary["passCount"]
         ),
         "failCount": (
-            html_summary["failCount"] + pdf_summary["failCount"] + docx_summary["failCount"] + video_summary["failCount"]
+            html_summary["failCount"]
+            + pdf_summary["failCount"]
+            + docx_summary["failCount"]
+            + video_summary["failCount"]
+            + notebook_summary["failCount"]
         ),
         "warningCount": (
             html_summary["warningCount"]
             + pdf_summary["warningCount"]
             + docx_summary["warningCount"]
             + video_summary["warningCount"]
+            + notebook_summary["warningCount"]
         ),
         "notApplicableCount": (
             html_summary["notApplicableCount"]
             + pdf_summary["notApplicableCount"]
             + docx_summary["notApplicableCount"]
             + video_summary["notApplicableCount"]
+            + notebook_summary["notApplicableCount"]
         ),
         "errorCount": (
-            html_summary["errorCount"] + pdf_summary["errorCount"] + docx_summary["errorCount"] + video_summary["errorCount"]
+            html_summary["errorCount"]
+            + pdf_summary["errorCount"]
+            + docx_summary["errorCount"]
+            + video_summary["errorCount"]
+            + notebook_summary["errorCount"]
         ),
     }
 
@@ -595,6 +671,7 @@ def _build_key_issues(
     pdf_accessibility_report,
     docx_accessibility_report,
     video_accessibility_report,
+    notebook_accessibility_report,
 ) -> list[dict[str, str | None]]:
     issues: list[dict[str, str | None]] = []
     for resource_type, resource_groups in (
@@ -602,6 +679,7 @@ def _build_key_issues(
         ("PDF", _flatten_pdf_accessibility_resources(pdf_accessibility_report)),
         ("WORD", _flatten_docx_accessibility_resources(docx_accessibility_report)),
         ("VIDEO", _flatten_video_accessibility_resources(video_accessibility_report)),
+        ("NOTEBOOK", _flatten_notebook_accessibility_resources(notebook_accessibility_report)),
     ):
         for module_title, resource in resource_groups:
             item = items_by_id.get(resource.resourceId)
@@ -918,6 +996,37 @@ def _build_video_resource_details(items_by_id: dict[str, Any], video_accessibili
     return sorted(details, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
 
 
+def _build_notebook_resource_details(items_by_id: dict[str, Any], notebook_accessibility_report) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for module_title, resource in _flatten_notebook_accessibility_resources(notebook_accessibility_report):
+        item = items_by_id.get(resource.resourceId)
+        overall_status = _overall_automatic_status(resource.checks)
+        checks = [
+            {
+                "checkId": check.checkId,
+                "checkTitle": check.checkTitle,
+                "status": check.status,
+                "evidence": check.evidence,
+                "recommendation": check.recommendation,
+            }
+            for check in resource.checks
+        ]
+        details.append(
+            {
+                "resourceId": resource.resourceId,
+                "title": resource.title,
+                "coursePath": _item_course_path(item) if item is not None else module_title,
+                "moduleTitle": _item_module_title(item) if item is not None else module_title,
+                "accessStatus": resource.accessStatus,
+                "overallStatus": overall_status,
+                "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
+                **_score_fields(checks),
+                "checks": checks,
+            }
+        )
+    return sorted(details, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
+
+
 def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str]) -> list[dict[str, str | None]]:
     skipped: list[dict[str, str | None]] = []
     seen_ids: set[str] = set()
@@ -942,7 +1051,9 @@ def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str])
             reason = "WORD_NO_ANALIZADO"
         elif _is_video_candidate(item) and item_id not in analyzed_ids:
             reason = "VIDEO_NO_ANALIZADO"
-        elif _is_main_item(item) and core.type not in {"WEB", "PDF", "DOCX", "VIDEO"}:
+        elif _is_notebook_candidate(item) and item_id not in analyzed_ids:
+            reason = "NOTEBOOK_NO_ANALIZADO"
+        elif _is_main_item(item) and core.type not in {"WEB", "PDF", "DOCX", "VIDEO", "NOTEBOOK"}:
             reason = "TIPO_NO_CUBIERTO_PENDIENTE"
 
         if reason is None:
@@ -970,6 +1081,7 @@ def _resource_score_rows(
     pdf_resources: list[dict[str, Any]],
     word_resources: list[dict[str, Any]],
     video_resources: list[dict[str, Any]],
+    notebook_resources: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for resource_type, resources in (
@@ -977,6 +1089,7 @@ def _resource_score_rows(
         ("PDF", pdf_resources),
         ("WORD", word_resources),
         ("VIDEO", video_resources),
+        ("NOTEBOOK", notebook_resources),
     ):
         for resource in resources:
             checks = resource.get("checks", [])
@@ -1255,6 +1368,14 @@ def _build_report_payload(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
+    notebook_accessibility_report = _ensure_notebook_accessibility_data(
+        settings,
+        job_id,
+        inventory_items,
+        canvas_client=canvas_client,
+        canvas_credentials=canvas_credentials,
+        course_id=course_id,
+    )
     items_by_id = {str(item.id): item for item in inventory_items}
 
     created_at = utcnow()
@@ -1267,24 +1388,40 @@ def _build_report_payload(
     pdf_summary = _build_pdf_summary_data(inventory_items, pdf_accessibility_report)
     docx_summary = _build_docx_summary_data(inventory_items, docx_accessibility_report)
     video_summary = _build_video_summary_data(inventory_items, video_accessibility_report)
-    automatic_summary = _build_automatic_summary_data(html_summary, pdf_summary, docx_summary, video_summary)
+    notebook_summary = _build_notebook_summary_data(inventory_items, notebook_accessibility_report)
+    automatic_summary = _build_automatic_summary_data(
+        html_summary,
+        pdf_summary,
+        docx_summary,
+        video_summary,
+        notebook_summary,
+    )
     key_issues = _build_key_issues(
         items_by_id,
         accessibility_report,
         pdf_accessibility_report,
         docx_accessibility_report,
         video_accessibility_report,
+        notebook_accessibility_report,
     )
     issue_summary = _build_issue_summary(key_issues)
     html_resources = _build_html_resource_details(items_by_id, accessibility_report)
     pdf_resources = _build_pdf_resource_details(items_by_id, pdf_accessibility_report)
     docx_resources = _build_docx_resource_details(items_by_id, docx_accessibility_report)
     video_resources = _build_video_resource_details(items_by_id, video_accessibility_report)
+    notebook_resources = _build_notebook_resource_details(items_by_id, notebook_accessibility_report)
     analyzed_ids = {
-        resource["resourceId"] for resource in html_resources + pdf_resources + docx_resources + video_resources
+        resource["resourceId"]
+        for resource in html_resources + pdf_resources + docx_resources + video_resources + notebook_resources
     }
     skipped_resources = _build_skipped_resources(inventory_items, analyzed_ids)
-    resource_scores = _resource_score_rows(html_resources, pdf_resources, docx_resources, video_resources)
+    resource_scores = _resource_score_rows(
+        html_resources,
+        pdf_resources,
+        docx_resources,
+        video_resources,
+        notebook_resources,
+    )
     module_scores = _module_score_rows(resource_scores)
 
     routes, resource_sections, total_fails, total_pending = _build_manual_review_sections(
@@ -1335,12 +1472,14 @@ def _build_report_payload(
         "pdfAccessibilitySummary": pdf_summary,
         "wordAccessibilitySummary": docx_summary,
         "videoAccessibilitySummary": video_summary,
+        "notebookAccessibilitySummary": notebook_summary,
         "issueSummary": issue_summary,
         "keyIssues": key_issues,
         "htmlResources": html_resources,
         "pdfResources": pdf_resources,
         "wordResources": docx_resources,
         "videoResources": video_resources,
+        "notebookResources": notebook_resources,
         "notAutomaticallyAnalyzable": skipped_resources,
         "summary": {
             "resources": len(session.exec(select(Resource).where(Resource.job_id == job_id)).all()),
@@ -1422,6 +1561,8 @@ def _auto_resource_type_label(value: Any) -> str:
         return "Word"
     if normalized == "VIDEO":
         return "Vídeo"
+    if normalized == "NOTEBOOK":
+        return "Notebook"
     return normalized
 
 
@@ -1567,6 +1708,8 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
             ("Recursos Word analizados", str(report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"])),
             ("Recursos de vídeo detectados", str(report["automaticAccessibilitySummary"]["videoResourcesDetected"])),
             ("Recursos de vídeo analizados", str(report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"])),
+            ("Recursos Notebook detectados", str(report["automaticAccessibilitySummary"]["notebookResourcesDetected"])),
+            ("Recursos Notebook analizados", str(report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"])),
             ("Total PASS", str(report["automaticAccessibilitySummary"]["passCount"])),
             ("Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])),
             ("Total WARNING", str(report["automaticAccessibilitySummary"]["warningCount"])),
@@ -1644,6 +1787,12 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
         "Detalle por recurso de vídeo",
         report["videoResources"],
         intro=VIDEO_ANALYSIS_SCOPE_NOTE,
+    )
+    _append_docx_technical_resources(
+        document,
+        "Detalle por recurso Notebook",
+        report["notebookResources"],
+        intro=NOTEBOOK_ANALYSIS_SCOPE_NOTE,
     )
 
     document.add_heading("Recursos no analizables automáticamente", level=1)
@@ -1897,6 +2046,8 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
             ["Recursos Word analizados", str(report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"])],
             ["Recursos de vídeo detectados", str(report["automaticAccessibilitySummary"]["videoResourcesDetected"])],
             ["Recursos de vídeo analizados", str(report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"])],
+            ["Recursos Notebook detectados", str(report["automaticAccessibilitySummary"]["notebookResourcesDetected"])],
+            ["Recursos Notebook analizados", str(report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"])],
             ["Total PASS", str(report["automaticAccessibilitySummary"]["passCount"])],
             ["Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])],
             ["Total WARNING", str(report["automaticAccessibilitySummary"]["warningCount"])],
@@ -1969,6 +2120,13 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
         "Detalle por recurso de vídeo",
         report["videoResources"],
         intro=VIDEO_ANALYSIS_SCOPE_NOTE,
+    )
+    _append_pdf_technical_resources(
+        story,
+        styles,
+        "Detalle por recurso Notebook",
+        report["notebookResources"],
+        intro=NOTEBOOK_ANALYSIS_SCOPE_NOTE,
     )
 
     story.append(_pdf_paragraph("Recursos no analizables automáticamente", styles["Section"]))
@@ -2144,6 +2302,8 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
             automatic_summary.pop("docxResourcesAnalyzed", None)
         automatic_summary.setdefault("videoResourcesDetected", 0)
         automatic_summary.setdefault("videoResourcesAnalyzed", 0)
+        automatic_summary.setdefault("notebookResourcesDetected", 0)
+        automatic_summary.setdefault("notebookResourcesAnalyzed", 0)
 
     if "wordAccessibilitySummary" not in normalized:
         normalized["wordAccessibilitySummary"] = normalized.pop("docxAccessibilitySummary", _empty_auto_summary())
@@ -2155,8 +2315,10 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
         normalized.pop("docxResources", None)
     normalized.setdefault("videoAccessibilitySummary", _empty_auto_summary())
     normalized.setdefault("videoResources", [])
+    normalized.setdefault("notebookAccessibilitySummary", _empty_auto_summary())
+    normalized.setdefault("notebookResources", [])
 
-    for collection_name in ("htmlResources", "pdfResources", "wordResources", "videoResources"):
+    for collection_name in ("htmlResources", "pdfResources", "wordResources", "videoResources", "notebookResources"):
         for resource in normalized.get(collection_name, []):
             if not isinstance(resource, dict):
                 continue
@@ -2172,6 +2334,7 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
             normalized.get("pdfResources", []),
             normalized.get("wordResources", []),
             normalized.get("videoResources", []),
+            normalized.get("notebookResources", []),
         ),
     )
     normalized.setdefault("moduleScores", _module_score_rows(normalized["resourceScores"]))

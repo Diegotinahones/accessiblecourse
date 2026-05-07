@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.services.canvas_api import CanvasAPIClient, CanvasAPIError
@@ -18,6 +20,11 @@ def canvas_settings() -> Settings:
         canvas_per_page=2,
         canvas_timeout_seconds=3,
     )
+
+
+def configure_token_encryption(client) -> None:
+    client.app.state.settings.token_encryption_key = Fernet.generate_key().decode("ascii")
+    client.app.state.settings.session_secret = "test-session-secret"
 
 
 def test_canvas_api_client_builds_url_and_sends_bearer_token() -> None:
@@ -99,14 +106,14 @@ def test_canvas_routes_profile_courses_and_health(client, monkeypatch) -> None:
 
     activate_response = client.post("/api/token/activate-demo")
     assert activate_response.status_code == 200, activate_response.text
-    assert activate_response.json() == {"ok": True, "tokenActive": True}
+    assert activate_response.json() == {"ok": True, "tokenConfigured": True, "mode": "demo"}
 
     health_response = client.get("/api/canvas/health")
     assert health_response.status_code == 200, health_response.text
     assert health_response.json() == {
         "ok": True,
+        "tokenConfigured": True,
         "demoTokenAvailable": True,
-        "tokenActive": True,
         "mode": "demo",
     }
 
@@ -131,15 +138,15 @@ def test_canvas_courses_requires_active_demo_token(client, monkeypatch) -> None:
     client.app.state.settings.canvas_token = "secret-token"
 
     def fail_if_called(settings):
-        raise AssertionError("CanvasAPIClient should not be built while tokenActive=false.")
+        raise AssertionError("CanvasAPIClient should not be built without an active token.")
 
     monkeypatch.setattr("app.api.routes.canvas.CanvasAPIClient", fail_if_called)
 
     status_response = client.get("/api/token/status")
     assert status_response.status_code == 200, status_response.text
     assert status_response.json() == {
+        "tokenConfigured": False,
         "demoTokenAvailable": True,
-        "tokenActive": False,
         "mode": "none",
     }
 
@@ -150,8 +157,75 @@ def test_canvas_courses_requires_active_demo_token(client, monkeypatch) -> None:
     assert payload["code"] == "canvas_token_required"
     assert payload["message"] == "Configura tu token de acceso para consultar tus cursos de Canvas."
     assert payload["demoTokenAvailable"] is True
-    assert payload["tokenActive"] is False
+    assert payload["tokenConfigured"] is False
     assert payload["mode"] == "none"
+
+
+def test_user_token_can_be_configured_and_used_without_exposure(client, monkeypatch) -> None:
+    client.app.state.settings.canvas_base_url = "https://canvas.example.edu"
+    client.app.state.settings.canvas_token = "demo-token"
+    configure_token_encryption(client)
+    seen_tokens: list[str | None] = []
+
+    class FakeCanvasAPIClient:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def get_json(self, path):
+            assert path == "/users/self/profile"
+            seen_tokens.append(self.settings.canvas_token)
+            return {"id": 99}
+
+        def get_paginated_json(self, path, *, params, max_pages):
+            seen_tokens.append(self.settings.canvas_token)
+            return [{"id": 77, "name": "Curso usuario", "course_code": "USER", "workflow_state": "available"}]
+
+    monkeypatch.setattr("app.api.routes.token.CanvasAPIClient", FakeCanvasAPIClient)
+    monkeypatch.setattr("app.api.routes.canvas.CanvasAPIClient", FakeCanvasAPIClient)
+
+    configure_response = client.post("/api/token/configure", json={"token": "user-secret-token"})
+    assert configure_response.status_code == 200, configure_response.text
+    assert configure_response.json() == {"ok": True, "tokenConfigured": True, "mode": "user"}
+    assert "user-secret-token" not in configure_response.text
+
+    status_response = client.get("/api/token/status")
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json() == {
+        "tokenConfigured": True,
+        "demoTokenAvailable": True,
+        "mode": "user",
+    }
+
+    courses_response = client.get("/api/canvas/courses")
+    assert courses_response.status_code == 200, courses_response.text
+    assert courses_response.json()[0]["id"] == 77
+    assert seen_tokens == ["user-secret-token", "user-secret-token"]
+
+    session_files = list((client.app.state.settings.storage_root / "sessions").glob("*.json"))
+    assert len(session_files) == 1
+    assert "user-secret-token" not in session_files[0].read_text(encoding="utf-8")
+
+
+def test_configure_token_rejects_invalid_canvas_token(client, monkeypatch) -> None:
+    client.app.state.settings.canvas_base_url = "https://canvas.example.edu"
+    configure_token_encryption(client)
+
+    class FakeCanvasAPIClient:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def get_json(self, path):
+            raise CanvasAPIError("invalid", status=401, detail="invalid")
+
+    monkeypatch.setattr("app.api.routes.token.CanvasAPIClient", FakeCanvasAPIClient)
+
+    response = client.post("/api/token/configure", json={"token": "bad-token"})
+
+    assert response.status_code == 401, response.text
+    payload = response.json()
+    assert payload["code"] == "invalid_canvas_token"
+    assert payload["message"] == "No hemos podido validar el token con Canvas/UOC."
+    assert "bad-token" not in response.text
 
 
 def test_demo_token_can_be_activated_and_deactivated_for_session(client, monkeypatch) -> None:
@@ -170,7 +244,7 @@ def test_demo_token_can_be_activated_and_deactivated_for_session(client, monkeyp
 
     activate_response = client.post("/api/token/activate-demo")
     assert activate_response.status_code == 200, activate_response.text
-    assert activate_response.json() == {"ok": True, "tokenActive": True}
+    assert activate_response.json() == {"ok": True, "tokenConfigured": True, "mode": "demo"}
 
     courses_response = client.get("/api/canvas/courses")
     assert courses_response.status_code == 200, courses_response.text
@@ -178,11 +252,40 @@ def test_demo_token_can_be_activated_and_deactivated_for_session(client, monkeyp
 
     deactivate_response = client.post("/api/token/deactivate")
     assert deactivate_response.status_code == 200, deactivate_response.text
-    assert deactivate_response.json() == {"ok": True, "tokenActive": False}
+    assert deactivate_response.json() == {"ok": True, "tokenConfigured": False, "mode": "none"}
 
     blocked_response = client.get("/api/canvas/courses")
     assert blocked_response.status_code == 428, blocked_response.text
     assert blocked_response.json()["code"] == "canvas_token_required"
+
+
+def test_user_tokens_are_isolated_between_sessions(client, monkeypatch) -> None:
+    client.app.state.settings.canvas_base_url = "https://canvas.example.edu"
+    configure_token_encryption(client)
+    seen_tokens: list[str | None] = []
+
+    class FakeCanvasAPIClient:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def get_json(self, path):
+            return {"id": 1}
+
+        def get_paginated_json(self, path, *, params, max_pages):
+            seen_tokens.append(self.settings.canvas_token)
+            return []
+
+    monkeypatch.setattr("app.api.routes.token.CanvasAPIClient", FakeCanvasAPIClient)
+    monkeypatch.setattr("app.api.routes.canvas.CanvasAPIClient", FakeCanvasAPIClient)
+
+    second_client = TestClient(client.app)
+
+    assert client.post("/api/token/configure", json={"token": "token-user-a"}).status_code == 200
+    assert second_client.post("/api/token/configure", json={"token": "token-user-b"}).status_code == 200
+
+    assert client.get("/api/canvas/courses").status_code == 200
+    assert second_client.get("/api/canvas/courses").status_code == 200
+    assert seen_tokens == ["token-user-a", "token-user-b"]
 
 
 def test_activate_demo_token_requires_backend_canvas_token(client) -> None:
@@ -294,7 +397,7 @@ def test_canvas_health_returns_false_when_env_is_missing(client) -> None:
     payload = response.json()
     assert payload["ok"] is False
     assert payload["demoTokenAvailable"] is False
-    assert payload["tokenActive"] is False
+    assert payload["tokenConfigured"] is False
     assert payload["mode"] == "none"
     assert payload["status"] is None
     assert "token de acceso" in payload["detail"]
@@ -306,7 +409,7 @@ def test_offline_upload_does_not_require_active_canvas_token(client) -> None:
 
     token_status_response = client.get("/api/token/status")
     assert token_status_response.status_code == 200, token_status_response.text
-    assert token_status_response.json()["tokenActive"] is False
+    assert token_status_response.json()["tokenConfigured"] is False
 
     create_response = client.post(
         "/api/jobs",

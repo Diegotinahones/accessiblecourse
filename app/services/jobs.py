@@ -33,7 +33,7 @@ from app.schemas import (
     ResourceResponse,
 )
 from app.services.access_analysis import OfflineAccessAdapter, OnlineAccessAdapter, analyze_access
-from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContextStore
+from app.services.canvas_client import CanvasClient, OnlineJobContextStore
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
 from app.services.course_structure import build_fallback_course_structure, build_section_key, section_key_from_path
@@ -41,6 +41,7 @@ from app.services.docx_accessibility import run_docx_accessibility_scan
 from app.services.html_accessibility import run_html_accessibility_scan
 from app.services.imscc import build_resources_from_extracted
 from app.services.imscc_parser import HTML_RESOURCE_EXTENSIONS, IMSCCParser, ParserError
+from app.services.notebook_accessibility import run_notebook_accessibility_scan
 from app.services.pdf_accessibility import run_pdf_accessibility_scan
 from app.services.resource_core import normalize_resource
 from app.services.review_service import load_inventory_file, sync_job_inventory_from_payload
@@ -1599,6 +1600,29 @@ def process_job(engine, settings: Settings, job_id: str) -> None:
                 progress=99,
                 details=video_accessibility_report.summary.model_dump(mode="json"),
             )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=5,
+                progress=99,
+                message="Procesando accesibilidad de los notebooks",
+                phase=JobPhase.NOTEBOOK_ACCESSIBILITY_SCAN,
+            )
+            notebook_accessibility_report = run_notebook_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="notebook_accessibility_scan_finished",
+                message="Accesibilidad Notebook procesada.",
+                progress=99,
+                details=notebook_accessibility_report.summary.model_dump(mode="json"),
+            )
             session.commit()
 
             _update_job(
@@ -1945,6 +1969,32 @@ def process_online_job(
                 progress=99,
                 details=video_accessibility_report.summary.model_dump(mode="json"),
             )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=6,
+                progress=99,
+                message="Procesando accesibilidad de los notebooks",
+                phase=JobPhase.NOTEBOOK_ACCESSIBILITY_SCAN,
+            )
+            notebook_accessibility_report = run_notebook_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+                canvas_client=client,
+                canvas_credentials=context.credentials,
+                course_id=course.id,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="notebook_accessibility_scan_finished",
+                message="Accesibilidad Notebook procesada.",
+                progress=99,
+                details=notebook_accessibility_report.summary.model_dump(mode="json"),
+            )
             session.commit()
 
             _update_job(
@@ -2140,14 +2190,6 @@ def rerun_access_analysis(
                 html_canvas_credentials = context.credentials
                 html_course_id = context.course_id
                 html_canvas_client = canvas_client_factory(context.credentials, settings)
-            else:
-                html_course_id = _course_id_from_resources(inventory)
-                if html_course_id and settings.canvas_base_url and settings.canvas_token:
-                    html_canvas_credentials = CanvasCredentials.create(
-                        base_url=settings.canvas_base_url,
-                        token=settings.canvas_token,
-                    )
-                    html_canvas_client = canvas_client_factory(html_canvas_credentials, settings)
 
             _update_job_progress(
                 session,
@@ -2257,6 +2299,33 @@ def rerun_access_analysis(
                 progress=99,
                 details=video_accessibility_report.summary.model_dump(mode="json"),
             )
+            _update_job_progress(
+                session,
+                settings,
+                job,
+                current_step=job.total_steps,
+                progress=99,
+                message="Procesando accesibilidad de los notebooks",
+                phase=JobPhase.NOTEBOOK_ACCESSIBILITY_SCAN,
+                event="notebook_accessibility_retry_started",
+            )
+            notebook_accessibility_report = run_notebook_accessibility_scan(
+                settings=settings,
+                job_id=job_id,
+                resources=inventory,
+                canvas_client=html_canvas_client,
+                canvas_credentials=html_canvas_credentials,
+                course_id=html_course_id,
+            )
+            record_job_event(
+                session,
+                settings,
+                job_id=job_id,
+                event="notebook_accessibility_scan_finished",
+                message="Accesibilidad Notebook procesada.",
+                progress=99,
+                details=notebook_accessibility_report.summary.model_dump(mode="json"),
+            )
             session.commit()
             _update_job(
                 session,
@@ -2353,19 +2422,6 @@ def _build_retry_access_adapter(
             max_discovered=settings.canvas_max_discovered,
         )
 
-    course_id = _course_id_from_resources(resources)
-    if course_id and settings.canvas_base_url and settings.canvas_token:
-        credentials = CanvasCredentials.create(base_url=settings.canvas_base_url, token=settings.canvas_token)
-        return OnlineAccessAdapter(
-            client=canvas_client_factory(credentials, settings),
-            credentials=credentials,
-            course_id=course_id,
-            url_checker=url_check_factory(settings),
-            max_depth=settings.canvas_crawl_depth if settings.online_deep_scan_enabled else 0,
-            max_pages=settings.online_deep_scan_max_pages,
-            max_discovered=settings.canvas_max_discovered,
-        )
-
     if get_extracted_dir(settings, job_id).exists():
         return OfflineAccessAdapter(settings=settings, job_id=job_id, url_checker=url_check_factory(settings))
 
@@ -2375,14 +2431,6 @@ def _build_retry_access_adapter(
         status_code=409,
         job_id=job_id,
     )
-
-
-def _course_id_from_resources(resources: list[dict[str, Any]]) -> str | None:
-    for resource in resources:
-        value = resource.get("courseId")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
 
 
 def prepare_retry_job(session: Session, settings: Settings, job_id: str) -> JobStatusResponse:

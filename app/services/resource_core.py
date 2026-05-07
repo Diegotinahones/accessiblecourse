@@ -696,6 +696,8 @@ def _normalize_resource_type(
 ) -> CoreResourceType:
     raw_type = (_string(source, "type") or _string(fallback, "type") or "OTHER").upper()
     normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_content_type == "application/x-ipynb+json":
+        return "NOTEBOOK"
     if normalized_content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         return "DOCX"
     reference = source_url or local_path or ""

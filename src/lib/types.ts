@@ -15,6 +15,7 @@ export type JobPhase =
   | 'PDF_ACCESSIBILITY_SCAN'
   | 'DOCX_ACCESSIBILITY_SCAN'
   | 'VIDEO_ACCESSIBILITY_SCAN'
+  | 'NOTEBOOK_ACCESSIBILITY_SCAN'
   | 'DONE'
   | 'ERROR';
 export type ChecklistDecision = 'pending' | 'pass' | 'fail';
@@ -47,12 +48,6 @@ export interface JobStatus {
   totalSteps: number;
 }
 
-export interface CanvasAuth {
-  baseUrl: string;
-  token: string;
-  authMode?: 'token';
-}
-
 export interface OnlineCourse {
   id: string;
   name: string;
@@ -65,6 +60,9 @@ export interface OnlineCourse {
 
 export interface TokenStatus {
   tokenActive: boolean;
+  tokenConfigured: boolean;
+  demoTokenAvailable: boolean;
+  mode: 'none' | 'user' | 'demo';
 }
 
 export interface ReportFailure {
@@ -263,6 +261,7 @@ export type AccessibilityResourceKind =
   | 'PDF'
   | 'WORD'
   | 'VIDEO'
+  | 'NOTEBOOK'
   | 'OTHER';
 
 export type AccessibilityCheckStatus =
@@ -293,6 +292,7 @@ export interface AccessibilitySummary {
   pdfResourcesAnalyzed: number;
   wordResourcesAnalyzed: number;
   videoResourcesAnalyzed: number;
+  notebookResourcesAnalyzed: number;
   pass: number;
   warning: number;
   fail: number;

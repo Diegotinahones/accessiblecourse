@@ -5,11 +5,13 @@ import { getModeRoute, rememberAppMode } from '../lib/utils';
 
 interface LandingPageProps {
   tokenActive: boolean;
+  tokenConfigured: boolean;
   tokenStatusError: string | null;
 }
 
 export function LandingPage({
   tokenActive,
+  tokenConfigured,
   tokenStatusError,
 }: LandingPageProps) {
   const navigate = useNavigate();
@@ -28,6 +30,7 @@ export function LandingPage({
     <LayoutSimple
       align="center"
       description="Elige cómo quieres empezar."
+      showTokenButton={tokenConfigured}
       title="Haz tu curso accesible"
     >
       <div className="mx-auto max-w-4xl space-y-6">

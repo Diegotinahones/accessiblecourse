@@ -21,6 +21,13 @@ IMPORTANT_WARNING_CHECKS = {
     "video.captions",
     "video.transcript",
     "video.controls",
+    "notebook.intro_markdown",
+    "notebook.title",
+    "notebook.heading_hierarchy",
+    "notebook.markdown_explanation",
+    "notebook.visual_outputs",
+    "notebook.execution_order",
+    "notebook.markdown_tables",
 }
 CRITICAL_FAIL_CHECKS = {
     "html.lang",
@@ -35,6 +42,11 @@ CRITICAL_FAIL_CHECKS = {
     "video.accessible",
     "video.captions",
     "video.controls",
+    "notebook.readable",
+    "notebook.markdown_explanation",
+    "notebook.image_alt",
+    "notebook.links",
+    "notebook.execution_errors",
 }
 
 

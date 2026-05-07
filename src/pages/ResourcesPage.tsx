@@ -38,6 +38,19 @@ interface ResourceGroup {
   resources: ResourceListItem[];
 }
 
+interface ResourceFilters {
+  onlyNoAccess: boolean;
+  onlyDownloadable: boolean;
+  onlyFailures: boolean;
+  onlyWarnings: boolean;
+  onlyHtml: boolean;
+  onlyPdf: boolean;
+  onlyWord: boolean;
+  onlyVideo: boolean;
+  onlyNotebook: boolean;
+  hideGlobalUnplaced: boolean;
+}
+
 const GLOBAL_UNPLACED_SECTION_LABEL =
   'Recursos globales o no ubicados en la estructura del curso';
 const GLOBAL_UNPLACED_SECTION_DESCRIPTION =
@@ -48,11 +61,25 @@ const EMPTY_ACCESSIBILITY_SUMMARY: AccessibilitySummary = {
   pdfResourcesAnalyzed: 0,
   wordResourcesAnalyzed: 0,
   videoResourcesAnalyzed: 0,
+  notebookResourcesAnalyzed: 0,
   pass: 0,
   warning: 0,
   fail: 0,
   notApplicable: 0,
   errors: 0,
+};
+
+const EMPTY_FILTERS: ResourceFilters = {
+  onlyNoAccess: false,
+  onlyDownloadable: false,
+  onlyFailures: false,
+  onlyWarnings: false,
+  onlyHtml: false,
+  onlyPdf: false,
+  onlyWord: false,
+  onlyVideo: false,
+  onlyNotebook: false,
+  hideGlobalUnplaced: false,
 };
 
 function normalizeComparableText(value: string | null | undefined) {
@@ -295,6 +322,17 @@ function getKindFromValue(
   }
 
   if (
+    normalizedValue === 'NOTEBOOK' ||
+    normalizedValue === 'IPYNB' ||
+    normalizedValue.includes('JUPYTER') ||
+    normalizedValue.includes('NOTEBOOK') ||
+    normalizedValue.includes('IPYNB') ||
+    normalizedValue.endsWith('.IPYNB')
+  ) {
+    return 'NOTEBOOK';
+  }
+
+  if (
     normalizedValue === 'VIDEO' ||
     normalizedValue.includes('VIDEO') ||
     normalizedValue.includes('YOUTUBE') ||
@@ -326,7 +364,7 @@ function getResourceAccessibilityKind(
   resource: ResourceListItem,
   accessibilityResult: AccessibilityResource | undefined,
 ) {
-  const documentKind = [
+  const fileKind = [
     resource.type,
     resource.core.type,
     resource.resourceType,
@@ -342,10 +380,10 @@ function getResourceAccessibilityKind(
     resource.url,
   ]
     .map(getKindFromValue)
-    .find((kind) => kind === 'PDF' || kind === 'WORD');
+    .find((kind) => kind === 'PDF' || kind === 'WORD' || kind === 'NOTEBOOK');
 
-  if (documentKind === 'PDF' || documentKind === 'WORD') {
-    return documentKind;
+  if (fileKind === 'PDF' || fileKind === 'WORD' || fileKind === 'NOTEBOOK') {
+    return fileKind;
   }
 
   const hasVideoIndicator = Boolean(
@@ -560,6 +598,57 @@ function formatScore(score: number | null) {
   return score === null ? 'Sin puntuación' : `${score}/100`;
 }
 
+function getAccessibilityKindLabel(kind: AccessibilityResourceKind) {
+  if (kind === 'HTML') {
+    return 'HTML';
+  }
+
+  if (kind === 'PDF') {
+    return 'PDF';
+  }
+
+  if (kind === 'WORD') {
+    return 'Word';
+  }
+
+  if (kind === 'VIDEO') {
+    return 'Vídeo';
+  }
+
+  if (kind === 'NOTEBOOK') {
+    return 'Notebook';
+  }
+
+  return 'accesibilidad';
+}
+
+function getDisplayResourceTypeLabel(
+  resource: ResourceListItem,
+  kind: AccessibilityResourceKind,
+) {
+  if (kind === 'HTML') {
+    return 'Web';
+  }
+
+  if (kind === 'PDF') {
+    return 'PDF';
+  }
+
+  if (kind === 'WORD') {
+    return 'Word';
+  }
+
+  if (kind === 'VIDEO') {
+    return 'Vídeo';
+  }
+
+  if (kind === 'NOTEBOOK') {
+    return 'Notebook';
+  }
+
+  return getReviewResourceTypeLabel(resource.type);
+}
+
 function hasChecks(accessibilityResult: AccessibilityResource | undefined) {
   return Boolean(accessibilityResult?.checks.length);
 }
@@ -569,6 +658,124 @@ function isNonAnalyzableResource(
   accessibilityResult: AccessibilityResource | undefined,
 ) {
   return !hasChecks(accessibilityResult) || getAccessLabel(resource) !== 'OK';
+}
+
+function normalizeIssueText(value: string | null | undefined) {
+  return (
+    value
+      ?.trim()
+      .toLocaleLowerCase('es-ES')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '') ?? ''
+  );
+}
+
+function getNotebookIssueLabel(value: string) {
+  const normalizedValue = normalizeIssueText(value);
+
+  if (
+    normalizedValue.includes('intro') ||
+    normalizedValue.includes('explicacion inicial') ||
+    normalizedValue.includes('context')
+  ) {
+    return 'Falta explicación inicial';
+  }
+
+  if (
+    normalizedValue.includes('alt') ||
+    normalizedValue.includes('imagen') ||
+    normalizedValue.includes('image')
+  ) {
+    return 'Imágenes sin texto alternativo';
+  }
+
+  if (
+    normalizedValue.includes('output') ||
+    normalizedValue.includes('salida') ||
+    normalizedValue.includes('visual') ||
+    normalizedValue.includes('chart') ||
+    normalizedValue.includes('graf')
+  ) {
+    return 'Outputs visuales sin explicación';
+  }
+
+  if (
+    normalizedValue.includes('error') ||
+    normalizedValue.includes('traceback') ||
+    normalizedValue.includes('exception')
+  ) {
+    return 'Errores guardados';
+  }
+
+  if (
+    normalizedValue.includes('markdown') ||
+    normalizedValue.includes('estructura') ||
+    normalizedValue.includes('heading') ||
+    normalizedValue.includes('titulo')
+  ) {
+    return 'Notebook sin estructura Markdown';
+  }
+
+  return value;
+}
+
+function getNoAccessReason(resource: ResourceListItem) {
+  return (
+    resource.reasonCode ||
+    resource.accessNote ||
+    resource.errorMessage ||
+    resource.urlStatus ||
+    resource.accessStatus
+  );
+}
+
+function getPrimaryIssue(
+  resource: ResourceListItem,
+  accessibilityResult: AccessibilityResource | undefined,
+  kind: AccessibilityResourceKind,
+) {
+  const accessLabel = getAccessLabel(resource);
+
+  if (
+    accessLabel === 'REQUIERE SSO' ||
+    accessLabel === 'REQUIERE INTERACCIÓN'
+  ) {
+    return 'No analizable automáticamente porque requiere acceso externo, SSO o interacción.';
+  }
+
+  if (accessLabel === 'NO ACCEDE') {
+    return `No accede: ${getNoAccessReason(resource) ?? 'sin motivo informado'}.`;
+  }
+
+  const firstIssue = accessibilityResult?.checks.find(
+    (check) =>
+      check.status === 'FAIL' ||
+      check.status === 'WARNING' ||
+      check.status === 'ERROR',
+  );
+
+  if (firstIssue) {
+    const issueText = firstIssue.title || firstIssue.id;
+    return kind === 'NOTEBOOK' ? getNotebookIssueLabel(issueText) : issueText;
+  }
+
+  if (accessibilityResult?.error) {
+    return accessibilityResult.error;
+  }
+
+  if (!accessibilityResult?.checks.length && kind === 'OTHER') {
+    return 'Este tipo de recurso se analizará en una fase posterior.';
+  }
+
+  if (!accessibilityResult?.checks.length && kind === 'VIDEO') {
+    return 'Requiere revisión manual del proveedor de vídeo.';
+  }
+
+  if (!accessibilityResult?.checks.length) {
+    return 'Sin análisis automático disponible todavía.';
+  }
+
+  return 'Sin incidencias principales.';
 }
 
 function buildPriorityRecommendations(
@@ -620,6 +827,12 @@ function buildPriorityRecommendations(
     );
   }
 
+  if (kindHasIssue('NOTEBOOK')) {
+    recommendations.push(
+      'Añadir estructura Markdown, explicaciones y alternativas textuales en notebooks.',
+    );
+  }
+
   if (resources.some(isNoAccessResource)) {
     recommendations.push(
       'Corregir enlaces rotos o permisos de recursos que no se pueden acceder.',
@@ -660,6 +873,100 @@ function MetricCard({
   );
 }
 
+function resourceMatchesFilters(
+  resource: ResourceListItem,
+  filters: ResourceFilters,
+  accessibilityResult: AccessibilityResource | undefined,
+) {
+  if (filters.onlyNoAccess && !isNoAccessResource(resource)) {
+    return false;
+  }
+
+  if (filters.onlyDownloadable && !resource.canDownload) {
+    return false;
+  }
+
+  const selectedTypeFilters = [
+    filters.onlyHtml,
+    filters.onlyPdf,
+    filters.onlyWord,
+    filters.onlyVideo,
+    filters.onlyNotebook,
+  ].some(Boolean);
+
+  if (selectedTypeFilters) {
+    const kind = getResourceAccessibilityKind(resource, accessibilityResult);
+    const matchesKind =
+      (filters.onlyHtml && kind === 'HTML') ||
+      (filters.onlyPdf && kind === 'PDF') ||
+      (filters.onlyWord && kind === 'WORD') ||
+      (filters.onlyVideo && kind === 'VIDEO') ||
+      (filters.onlyNotebook && kind === 'NOTEBOOK');
+
+    if (!matchesKind) {
+      return false;
+    }
+  }
+
+  if (
+    filters.onlyFailures &&
+    !accessibilityResult?.checks.some((check) => check.status === 'FAIL')
+  ) {
+    return false;
+  }
+
+  if (
+    filters.onlyWarnings &&
+    !accessibilityResult?.checks.some((check) => check.status === 'WARNING')
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function filterGroups(
+  groups: ResourceGroup[],
+  filters: ResourceFilters,
+  accessibilityByResourceId: Map<string, AccessibilityResource>,
+) {
+  return groups
+    .filter((group) => !(filters.hideGlobalUnplaced && group.isGlobalUnplaced))
+    .map((group) => ({
+      ...group,
+      resources: group.resources.filter((resource) =>
+        resourceMatchesFilters(
+          resource,
+          filters,
+          accessibilityByResourceId.get(resource.id),
+        ),
+      ),
+    }))
+    .filter((group) => group.resources.length > 0);
+}
+
+function FilterCheckbox({
+  checked,
+  children,
+  onChange,
+}: {
+  checked: boolean;
+  children: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-[var(--color-surface-soft)] p-4 text-sm font-semibold text-ink">
+      <input
+        checked={checked}
+        className="mt-1 h-5 w-5 accent-[var(--uoc-blue)]"
+        onChange={(event) => onChange(event.target.checked)}
+        type="checkbox"
+      />
+      <span>{children}</span>
+    </label>
+  );
+}
+
 function ResourceRow({
   accessibilityResult,
   jobId,
@@ -675,6 +982,11 @@ function ResourceRow({
     resource,
     accessibilityResult,
   );
+  const primaryIssue = getPrimaryIssue(
+    resource,
+    accessibilityResult,
+    resourceKind,
+  );
 
   return (
     <li className="rounded-2xl border border-line bg-white p-4">
@@ -684,10 +996,16 @@ function ResourceRow({
             {resource.title}
           </h4>
           <p className="mt-1 text-sm text-subtle">
-            Tipo: {getReviewResourceTypeLabel(resource.type)}
+            Tipo: {getDisplayResourceTypeLabel(resource, resourceKind)}
             {resourceKind !== 'OTHER'
-              ? ` · Análisis ${resourceKind === 'WORD' ? 'Word' : resourceKind}`
+              ? ` · Análisis ${getAccessibilityKindLabel(resourceKind)}`
               : ''}
+          </p>
+          <p className="mt-2 text-sm leading-6 text-subtle">
+            <span className="font-semibold text-ink">
+              Incidencia principal:
+            </span>{' '}
+            {primaryIssue}
           </p>
         </div>
 
@@ -732,6 +1050,7 @@ export function ResourcesPage() {
   const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>(
     {},
   );
+  const [filters, setFilters] = useState<ResourceFilters>(EMPTY_FILTERS);
   const [isLoading, setIsLoading] = useState(true);
   const [isRetrying, setIsRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -824,6 +1143,10 @@ export function ResourcesPage() {
 
     return sortGlobalGroupLast(buildGroupsByPath(resources));
   }, [resources, structure]);
+  const filteredGroups = useMemo(
+    () => filterGroups(groups, filters, accessibilityByResourceId),
+    [accessibilityByResourceId, filters, groups],
+  );
   const resourceScores = useMemo(
     () =>
       resources.map((resource) =>
@@ -838,6 +1161,58 @@ export function ResourcesPage() {
   const globalPriority = getPriority(globalScore);
   const accessibilitySummary =
     accessibility?.summary ?? EMPTY_ACCESSIBILITY_SUMMARY;
+  const accessibilitySummaryItems = [
+    {
+      label: 'Recursos HTML analizados',
+      value: accessibilitySummary.htmlResourcesAnalyzed,
+      show: true,
+    },
+    {
+      label: 'Recursos PDF analizados',
+      value: accessibilitySummary.pdfResourcesAnalyzed,
+      show: true,
+    },
+    {
+      label: 'Recursos Word analizados',
+      value: accessibilitySummary.wordResourcesAnalyzed,
+      show: true,
+    },
+    {
+      label: 'Recursos de vídeo analizados',
+      value: accessibilitySummary.videoResourcesAnalyzed,
+      show: true,
+    },
+    {
+      label: 'Recursos Notebook analizados',
+      value: accessibilitySummary.notebookResourcesAnalyzed,
+      show: true,
+    },
+    {
+      label: 'Checks correctos',
+      value: accessibilitySummary.pass,
+      show: true,
+    },
+    {
+      label: 'Avisos',
+      value: accessibilitySummary.warning,
+      show: true,
+    },
+    {
+      label: 'Incumplimientos',
+      value: accessibilitySummary.fail,
+      show: true,
+    },
+    {
+      label: 'No aplicables',
+      value: accessibilitySummary.notApplicable,
+      show: true,
+    },
+    {
+      label: 'Errores de análisis',
+      value: accessibilitySummary.errors,
+      show: accessibilitySummary.errors > 0,
+    },
+  ].filter((item) => item.show);
   const analyzedResourceCount = resources.filter((resource) =>
     hasChecks(accessibilityByResourceId.get(resource.id)),
   ).length;
@@ -859,11 +1234,19 @@ export function ResourcesPage() {
     accessibility,
     resources,
   );
+  const activeFilterCount = Object.values(filters).filter(Boolean).length;
 
   const togglePanel = (panelId: string) => {
     setExpandedPanels((current) => ({
       ...current,
       [panelId]: !current[panelId],
+    }));
+  };
+
+  const updateFilter = (name: keyof ResourceFilters, checked: boolean) => {
+    setFilters((current) => ({
+      ...current,
+      [name]: checked,
     }));
   };
 
@@ -971,6 +1354,27 @@ export function ResourcesPage() {
 
           <section className="rounded-3xl border border-line bg-white p-6 shadow-card">
             <h2 className="text-xl font-semibold tracking-[-0.03em] text-ink">
+              Resumen de accesibilidad automática
+            </h2>
+            <dl className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              {accessibilitySummaryItems.map((item) => (
+                <div
+                  className="rounded-2xl border border-line bg-[var(--color-surface-soft)] p-4"
+                  key={item.label}
+                >
+                  <dt className="text-sm font-medium text-subtle">
+                    {item.label}
+                  </dt>
+                  <dd className="mt-1 text-2xl font-semibold tracking-[-0.03em] text-ink">
+                    {item.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+
+          <section className="rounded-3xl border border-line bg-white p-6 shadow-card">
+            <h2 className="text-xl font-semibold tracking-[-0.03em] text-ink">
               Recomendaciones prioritarias
             </h2>
             <ol className="mt-5 space-y-3">
@@ -990,6 +1394,99 @@ export function ResourcesPage() {
             </ol>
           </section>
 
+          <section className="rounded-3xl border border-line bg-white p-6 shadow-card">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold tracking-[-0.03em] text-ink">
+                  Filtros
+                </h2>
+                <p className="text-sm leading-6 text-subtle">
+                  Filtra sin perder la estructura por módulo. Los filtros de
+                  tipo se combinan entre sí.
+                </p>
+              </div>
+
+              <button
+                className="button-secondary w-full sm:w-auto"
+                disabled={activeFilterCount === 0}
+                onClick={() => setFilters(EMPTY_FILTERS)}
+                type="button"
+              >
+                Limpiar filtros
+              </button>
+            </div>
+
+            <fieldset className="mt-5">
+              <legend className="sr-only">Filtrar recursos</legend>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <FilterCheckbox
+                  checked={filters.onlyNoAccess}
+                  onChange={(checked) => updateFilter('onlyNoAccess', checked)}
+                >
+                  Mostrar solo NO ACCEDE
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.onlyDownloadable}
+                  onChange={(checked) =>
+                    updateFilter('onlyDownloadable', checked)
+                  }
+                >
+                  Mostrar solo descargables
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.onlyFailures}
+                  onChange={(checked) => updateFilter('onlyFailures', checked)}
+                >
+                  Mostrar solo incumplimientos
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.onlyWarnings}
+                  onChange={(checked) => updateFilter('onlyWarnings', checked)}
+                >
+                  Mostrar solo avisos
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.onlyHtml}
+                  onChange={(checked) => updateFilter('onlyHtml', checked)}
+                >
+                  Mostrar solo recursos HTML
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.onlyPdf}
+                  onChange={(checked) => updateFilter('onlyPdf', checked)}
+                >
+                  Mostrar solo recursos PDF
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.onlyWord}
+                  onChange={(checked) => updateFilter('onlyWord', checked)}
+                >
+                  Mostrar solo recursos Word
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.onlyVideo}
+                  onChange={(checked) => updateFilter('onlyVideo', checked)}
+                >
+                  Mostrar solo recursos de vídeo
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.onlyNotebook}
+                  onChange={(checked) => updateFilter('onlyNotebook', checked)}
+                >
+                  Mostrar solo recursos Notebook
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.hideGlobalUnplaced}
+                  onChange={(checked) =>
+                    updateFilter('hideGlobalUnplaced', checked)
+                  }
+                >
+                  Ocultar recursos globales/no ubicados
+                </FilterCheckbox>
+              </div>
+            </fieldset>
+          </section>
+
           <section className="space-y-4">
             <div className="space-y-1">
               <h2 className="text-xl font-semibold tracking-[-0.03em] text-ink">
@@ -1001,13 +1498,13 @@ export function ResourcesPage() {
               </p>
             </div>
 
-            {groups.length === 0 ? (
+            {filteredGroups.length === 0 ? (
               <div className="card-panel p-6 text-sm text-subtle">
-                No hay recursos detectados para mostrar.
+                No hay recursos que coincidan con los filtros actuales.
               </div>
             ) : (
               <div className="space-y-3">
-                {groups.map((group) => {
+                {filteredGroups.map((group) => {
                   const panelId = toPanelId('section', group.id);
                   const isExpanded = expandedPanels[panelId] ?? false;
                   const sectionDescriptionId = `${panelId}-description`;

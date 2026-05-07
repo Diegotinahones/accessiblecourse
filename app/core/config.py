@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     canvas_token: str | None = None
     canvas_per_page: int = 100
     canvas_timeout_seconds: float = 20.0
+    token_encryption_key: str | None = None
+    session_secret: str | None = None
     token_session_secret: str | None = None
     token_cookie_secure: bool = False
     token_cookie_samesite: Literal["lax", "strict", "none"] = "lax"

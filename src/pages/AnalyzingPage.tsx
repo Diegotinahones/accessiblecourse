@@ -42,12 +42,20 @@ function getAnalysisCopy(status: JobStatus | null) {
     return 'Analizando vídeo';
   }
 
+  if (status?.phase === 'NOTEBOOK_ACCESSIBILITY_SCAN') {
+    return 'Procesando accesibilidad de los notebooks';
+  }
+
   if (status?.phase === 'DONE') {
     return 'Análisis completado';
   }
 
   if (progress >= 99) {
     return 'Análisis completado';
+  }
+
+  if (progress >= 98) {
+    return 'Procesando accesibilidad de los notebooks';
   }
 
   if (progress >= 97) {
@@ -79,6 +87,14 @@ function getAnalysisCopy(status: JobStatus | null) {
   }
 
   return 'Accediendo al curso';
+}
+
+function getAnalysisContext(status: JobStatus | null) {
+  if (status?.phase !== 'NOTEBOOK_ACCESSIBILITY_SCAN') {
+    return null;
+  }
+
+  return 'Revisando estructura, explicaciones, salidas visuales y errores guardados en notebooks.';
 }
 
 export function AnalyzingPage() {
@@ -158,6 +174,7 @@ export function AnalyzingPage() {
 
   const progress = jobStatus?.progress ?? 0;
   const statusMessage = getAnalysisCopy(jobStatus);
+  const statusContext = getAnalysisContext(jobStatus);
   const liveMessage = `${statusMessage}. ${progress}% completado.`;
 
   return (
@@ -186,6 +203,9 @@ export function AnalyzingPage() {
             <p aria-live="polite" className="text-lg font-semibold text-ink">
               {liveMessage}
             </p>
+            {statusContext ? (
+              <p className="text-sm leading-6 text-subtle">{statusContext}</p>
+            ) : null}
           </>
         )}
       </section>

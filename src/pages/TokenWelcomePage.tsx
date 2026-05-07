@@ -3,6 +3,7 @@ import { LayoutSimple } from '../components/LayoutSimple';
 
 interface TokenWelcomePageProps {
   actionError: string | null;
+  demoTokenAvailable: boolean;
   isSubmitting: boolean;
   onActivateDemo: () => Promise<boolean>;
   onContinueWithoutToken?: () => void;
@@ -11,6 +12,7 @@ interface TokenWelcomePageProps {
 
 export function TokenWelcomePage({
   actionError,
+  demoTokenAvailable,
   isSubmitting,
   onActivateDemo,
   onContinueWithoutToken,
@@ -62,14 +64,24 @@ export function TokenWelcomePage({
         <div className="flex flex-col gap-3 sm:flex-row sm:justify-center">
           <button
             className="button-primary w-full sm:w-auto"
-            disabled={isSubmitting}
-            onClick={() => {
-              void onActivateDemo();
-            }}
+            onClick={() => navigate('/token/configure')}
             type="button"
           >
-            {isSubmitting ? 'Configurando token…' : 'Configurar token'}
+            Configurar token
           </button>
+
+          {demoTokenAvailable ? (
+            <button
+              className="button-secondary w-full sm:w-auto"
+              disabled={isSubmitting}
+              onClick={() => {
+                void onActivateDemo();
+              }}
+              type="button"
+            >
+              {isSubmitting ? 'Activando demo…' : 'Usar token de demo'}
+            </button>
+          ) : null}
 
           {onContinueWithoutToken ? (
             <button

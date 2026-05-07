@@ -303,7 +303,7 @@ def build_imscc_with_offline_deep_scan() -> bytes:
     return buffer.getvalue()
 
 
-def build_imscc_with_pec_section_deep_scan(*, include_video: bool = False) -> bytes:
+def build_imscc_with_pec_section_deep_scan(*, include_video: bool = False, include_notebook: bool = False) -> bytes:
     buffer = io.BytesIO()
     with ZipFile(buffer, "w") as archive:
         archive.writestr(
@@ -334,6 +334,7 @@ def build_imscc_with_pec_section_deep_scan(*, include_video: bool = False) -> by
             if include_video
             else ""
         )
+        notebook_link = '<a href="../notebooks/lab.ipynb">Notebook del laboratorio</a>' if include_notebook else ""
         archive.writestr(
             "course/pec1/activity.html",
             f"""
@@ -341,12 +342,56 @@ def build_imscc_with_pec_section_deep_scan(*, include_video: bool = False) -> by
               <a href="../downloads/brief.pdf">Brief de la PEC</a>
               <a href="../downloads/ficha.docx">Ficha Word</a>
               {video_link}
+              {notebook_link}
               <a href="https://example.com/como-citar-ia">¿Cómo citar la IA…</a>
             </body></html>
             """,
         )
         archive.writestr("course/downloads/brief.pdf", build_text_pdf())
         archive.writestr("course/downloads/ficha.docx", build_text_docx())
+        if include_notebook:
+            archive.writestr(
+                "course/notebooks/lab.ipynb",
+                json.dumps(
+                    {
+                        "nbformat": 4,
+                        "nbformat_minor": 5,
+                        "metadata": {},
+                        "cells": [
+                            {
+                                "cell_type": "code",
+                                "metadata": {},
+                                "source": "print('arranque sin contexto')",
+                                "execution_count": 2,
+                                "outputs": [],
+                            },
+                            {
+                                "cell_type": "markdown",
+                                "metadata": {},
+                                "source": (
+                                    "# Laboratorio\n\n"
+                                    "Este notebook explica los pasos del laboratorio y permite validar "
+                                    "el analisis estatico de estructura y errores guardados."
+                                ),
+                            },
+                            {
+                                "cell_type": "code",
+                                "metadata": {},
+                                "source": "1 / 0",
+                                "execution_count": 1,
+                                "outputs": [
+                                    {
+                                        "output_type": "error",
+                                        "ename": "ZeroDivisionError",
+                                        "evalue": "division by zero",
+                                        "traceback": [],
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ),
+            )
     return buffer.getvalue()
 
 
@@ -1080,7 +1125,42 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     assert executive["modules"][0]["resources"][0]["reportAnchorId"].startswith("resource-")
 
 
-def test_report_generation_includes_access_html_pdf_word_and_video_accessibility_summaries(
+def test_accessibility_endpoint_includes_discovered_notebook_results(client) -> None:
+    create_response = client.post(
+        "/api/jobs",
+        files={
+            "file": (
+                "course.imscc",
+                build_imscc_with_pec_section_deep_scan(include_notebook=True),
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    accessibility_response = client.get(f"/api/jobs/{job_id}/accessibility")
+    assert accessibility_response.status_code == 200, accessibility_response.text
+    accessibility = accessibility_response.json()
+
+    assert accessibility["summary"]["notebookResourcesTotal"] == 1
+    assert accessibility["summary"]["notebookResourcesAnalyzed"] == 1
+    assert accessibility["summary"]["byType"]["NOTEBOOK"]["resourcesAnalyzed"] == 1
+    notebook = next(resource for resource in accessibility["resources"] if resource["analysisType"] == "NOTEBOOK")
+    checks = {check["checkId"]: check["status"] for check in notebook["checks"]}
+    assert notebook["title"] == "Notebook del laboratorio"
+    assert checks["notebook.readable"] == "PASS"
+    assert checks["notebook.title"] == "PASS"
+    assert checks["notebook.intro_markdown"] == "WARNING"
+    assert checks["notebook.execution_errors"] == "FAIL"
+
+    with Session(client.app.state.engine) as session:
+        events = session.exec(select(JobEvent).where(JobEvent.job_id == job_id)).all()
+    assert any(event.message == "Procesando accesibilidad de los notebooks" for event in events)
+
+
+def test_report_generation_includes_access_html_pdf_word_video_and_notebook_accessibility_summaries(
     client,
     monkeypatch,
     test_settings,
@@ -1106,7 +1186,7 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
         files={
             "file": (
                 "course.imscc",
-                build_imscc_with_pec_section_deep_scan(include_video=True),
+                build_imscc_with_pec_section_deep_scan(include_video=True, include_notebook=True),
                 "application/octet-stream",
             )
         },
@@ -1121,9 +1201,9 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
 
     assert report["meta"]["jobId"] == job_id
     assert report["mode"] == {"key": "OFFLINE_IMSCC", "label": "OFFLINE IMSCC"}
-    assert report["accessSummary"]["resourcesDetected"] == 5
-    assert report["accessSummary"]["resourcesAccessed"] == 5
-    assert report["accessSummary"]["downloadable"] == 3
+    assert report["accessSummary"]["resourcesDetected"] == 6
+    assert report["accessSummary"]["resourcesAccessed"] == 6
+    assert report["accessSummary"]["downloadable"] == 4
     assert report["accessSummary"]["noAccessible"] == 0
     assert report["accessSummary"]["requiresSSO"] == 0
     assert report["accessSummary"]["requiresInteraction"] == 0
@@ -1135,17 +1215,20 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
     assert report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"] == 1
     assert report["automaticAccessibilitySummary"]["videoResourcesDetected"] == 1
     assert report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"] == 1
+    assert report["automaticAccessibilitySummary"]["notebookResourcesDetected"] == 1
+    assert report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"] == 1
     assert report["automaticAccessibilitySummary"]["failCount"] >= 1
     assert report["automaticAccessibilitySummary"]["warningCount"] >= 1
     assert 0 <= report["executiveSummary"]["score"] <= 100
     assert report["executiveSummary"]["priority"] in {"alta", "media", "baja"}
-    assert report["executiveSummary"]["resourcesDetected"] == 5
-    assert report["executiveSummary"]["resourcesAnalyzed"] == 4
+    assert report["executiveSummary"]["resourcesDetected"] == 6
+    assert report["executiveSummary"]["resourcesAnalyzed"] == 5
     assert len(report["executiveSummary"]["priorityRecommendations"]) == 3
     assert report["moduleScores"]
-    assert report["moduleScores"][0]["resourcesAnalyzed"] == 4
+    assert report["moduleScores"][0]["resourcesAnalyzed"] == 5
     assert report["resourceScores"]
     assert any(resource["type"] == "VIDEO" for resource in report["resourceScores"])
+    assert any(resource["type"] == "NOTEBOOK" for resource in report["resourceScores"])
     assert report["htmlAccessibilitySummary"]["resourcesDetected"] == 1
     assert report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert report["htmlAccessibilitySummary"]["failCount"] >= 1
@@ -1161,6 +1244,10 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
     assert report["videoAccessibilitySummary"]["resourcesDetected"] == 1
     assert report["videoAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert report["videoAccessibilitySummary"]["warningCount"] >= 1
+    assert report["notebookAccessibilitySummary"]["resourcesDetected"] == 1
+    assert report["notebookAccessibilitySummary"]["resourcesAnalyzed"] == 1
+    assert report["notebookAccessibilitySummary"]["failCount"] >= 1
+    assert report["notebookAccessibilitySummary"]["warningCount"] >= 1
     assert report["issueSummary"]
     assert report["keyIssues"]
     assert report["keyIssues"][0]["status"] == "FAIL"
@@ -1168,6 +1255,7 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
     assert any(issue["resourceType"] == "PDF" for issue in report["keyIssues"])
     assert any(issue["resourceType"] == "WORD" for issue in report["keyIssues"])
     assert any(issue["resourceType"] == "VIDEO" for issue in report["keyIssues"])
+    assert any(issue["resourceType"] == "NOTEBOOK" for issue in report["keyIssues"])
     assert report["htmlResources"][0]["resourceId"] == "res-html"
     assert report["htmlResources"][0]["overallStatus"] == "FAIL"
     assert report["htmlResources"][0]["summarized"] is False
@@ -1180,6 +1268,9 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
     assert report["videoResources"][0]["title"] == "Vídeo de apoyo"
     assert report["videoResources"][0]["provider"] == "YouTube"
     assert report["videoResources"][0]["overallStatus"] == "WARNING"
+    assert report["notebookResources"][0]["title"] == "Notebook del laboratorio"
+    assert report["notebookResources"][0]["overallStatus"] == "FAIL"
+    assert report["notebookResources"][0]["summarized"] is False
     assert any(
         resource["reason"] == "EXTERNO_NO_ANALIZADO" for resource in report["notAutomaticallyAnalyzable"]
     )
@@ -1195,17 +1286,19 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
     assert pdf_path.stat().st_size > 0
 
     stored_report = json.loads(json_path.read_text(encoding="utf-8"))
-    assert stored_report["accessSummary"]["resourcesDetected"] == 5
+    assert stored_report["accessSummary"]["resourcesDetected"] == 6
     assert stored_report["automaticAccessibilitySummary"]["pdfResourcesAnalyzed"] == 1
     assert stored_report["automaticAccessibilitySummary"]["wordResourcesAnalyzed"] == 1
     assert stored_report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"] == 1
-    assert stored_report["executiveSummary"]["resourcesAnalyzed"] == 4
+    assert stored_report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"] == 1
+    assert stored_report["executiveSummary"]["resourcesAnalyzed"] == 5
     assert stored_report["moduleScores"]
     assert stored_report["resourceScores"]
     assert stored_report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert stored_report["pdfAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert stored_report["wordAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert stored_report["videoAccessibilitySummary"]["resourcesAnalyzed"] == 1
+    assert stored_report["notebookAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert stored_report["keyIssues"][0]["status"] == "FAIL"
 
     word_document = Document(str(docx_path))
@@ -1221,11 +1314,14 @@ def test_report_generation_includes_access_html_pdf_word_and_video_accessibility
     assert "Detalle por recurso PDF" in paragraphs
     assert "Detalle por recurso Word" in paragraphs
     assert "Detalle por recurso de vídeo" in paragraphs
+    assert "Detalle por recurso Notebook" in paragraphs
     assert "Recursos no analizables automáticamente" in paragraphs
     assert any("Página de actividad" in paragraph for paragraph in paragraphs)
     assert any("Brief de la PEC" in paragraph for paragraph in paragraphs)
     assert any("Ficha Word" in paragraph for paragraph in paragraphs)
     assert any("Vídeo de apoyo" in paragraph for paragraph in paragraphs)
+    assert any("Notebook del laboratorio" in paragraph for paragraph in paragraphs)
+    assert any("Los notebooks se analizan de forma estática" in paragraph for paragraph in paragraphs)
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

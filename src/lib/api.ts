@@ -1,5 +1,4 @@
 import type {
-  CanvasAuth,
   ChecklistSaveRequest,
   ChecklistSaveResult,
   ChecklistTemplatesResponse,
@@ -53,6 +52,7 @@ interface RawJobStatusResponse {
     | 'PDF_ACCESSIBILITY_SCAN'
     | 'DOCX_ACCESSIBILITY_SCAN'
     | 'VIDEO_ACCESSIBILITY_SCAN'
+    | 'NOTEBOOK_ACCESSIBILITY_SCAN'
     | 'DONE'
     | 'ERROR';
   progress: number;
@@ -111,6 +111,18 @@ function getErrorMessage(payload: unknown): string {
 
     if ('detail' in payload && typeof payload.detail === 'string') {
       return payload.detail;
+    }
+
+    if ('errorCode' in payload && typeof payload.errorCode === 'string') {
+      return payload.errorCode;
+    }
+
+    if ('error_code' in payload && typeof payload.error_code === 'string') {
+      return payload.error_code;
+    }
+
+    if ('code' in payload && typeof payload.code === 'string') {
+      return payload.code;
     }
   }
 
@@ -197,13 +209,6 @@ function uploadRequest<T>(
   });
 }
 
-function buildCanvasHeaders(auth: CanvasAuth): HeadersInit {
-  return {
-    'X-Canvas-Base-Url': auth.baseUrl,
-    'X-Canvas-Token': auth.token,
-  };
-}
-
 function normalizeOnlineCourse(course: RawOnlineCourse): OnlineCourse {
   return {
     id: String(course.id),
@@ -216,18 +221,47 @@ function normalizeOnlineCourse(course: RawOnlineCourse): OnlineCourse {
   };
 }
 
-function normalizeTokenStatus(payload: unknown, fallbackActive = false) {
+function normalizeTokenStatus(
+  payload: unknown,
+  fallbackActive = false,
+  fallbackMode: TokenStatus['mode'] = fallbackActive ? 'user' : 'none',
+) {
   const item = readRecord(payload);
+  const rawMode = readString(
+    item.mode ?? item.tokenMode ?? item.token_mode ?? item.source,
+  )?.toLowerCase();
+  const tokenActive =
+    readBoolean(
+      item.tokenActive ??
+        item.token_active ??
+        item.tokenConfigured ??
+        item.token_configured ??
+        item.configured ??
+        item.active ??
+        item.isActive ??
+        item.is_active,
+    ) ?? fallbackActive;
+  const mode =
+    rawMode === 'demo'
+      ? 'demo'
+      : rawMode === 'user' || rawMode === 'configured' || rawMode === 'custom'
+        ? 'user'
+        : tokenActive
+          ? fallbackMode
+          : 'none';
 
   return {
-    tokenActive:
+    tokenActive,
+    tokenConfigured:
+      readBoolean(item.tokenConfigured ?? item.token_configured) ?? tokenActive,
+    demoTokenAvailable:
       readBoolean(
-        item.tokenActive ??
-          item.token_active ??
-          item.active ??
-          item.isActive ??
-          item.is_active,
-      ) ?? fallbackActive,
+        item.demoTokenAvailable ??
+          item.demo_token_available ??
+          item.hasDemoToken ??
+          item.has_demo_token,
+      ) ?? false,
+    mode,
   };
 }
 
@@ -260,6 +294,16 @@ function normalizeReviewType(
     value.endsWith('.DOCX')
   ) {
     return 'WORD';
+  }
+  if (
+    value === 'NOTEBOOK' ||
+    value === 'IPYNB' ||
+    value.includes('JUPYTER') ||
+    value.includes('NOTEBOOK') ||
+    value.includes('IPYNB') ||
+    value.endsWith('.IPYNB')
+  ) {
+    return 'NOTEBOOK';
   }
   if (value === 'VIDEO') {
     return 'VIDEO';
@@ -461,6 +505,18 @@ function normalizeAccessibilityKind(
     normalizedValue.endsWith('.MOV')
   ) {
     return 'VIDEO';
+  }
+
+  if (
+    normalizedValue === 'NOTEBOOK' ||
+    normalizedValue === 'IPYNB' ||
+    normalizedValue.startsWith('NOTEBOOK_') ||
+    normalizedValue.includes('JUPYTER') ||
+    normalizedValue.includes('NOTEBOOK') ||
+    normalizedValue.includes('IPYNB') ||
+    normalizedValue.endsWith('.IPYNB')
+  ) {
+    return 'NOTEBOOK';
   }
 
   if (
@@ -1255,6 +1311,9 @@ function deriveAccessibilitySummary(
     videoResourcesAnalyzed: analyzedResources.filter(
       (resource) => resource.kind === 'VIDEO',
     ).length,
+    notebookResourcesAnalyzed: analyzedResources.filter(
+      (resource) => resource.kind === 'NOTEBOOK',
+    ).length,
     pass: allChecks.filter((check) => check.status === 'PASS').length,
     warning: allChecks.filter((check) => check.status === 'WARNING').length,
     fail: allChecks.filter((check) => check.status === 'FAIL').length,
@@ -1309,6 +1368,22 @@ function normalizeAccessibilitySummary(
       readNumber(readRecord(summary.video).resourcesAnalyzed) ??
       readNumber(readRecord(summary.video).resources_analyzed) ??
       fallbackSummary.videoResourcesAnalyzed,
+    notebookResourcesAnalyzed:
+      readNumber(summary.notebookResourcesAnalyzed) ??
+      readNumber(summary.notebook_resources_analyzed) ??
+      readNumber(summary.jupyterResourcesAnalyzed) ??
+      readNumber(summary.jupyter_resources_analyzed) ??
+      readNumber(summary.ipynbResourcesAnalyzed) ??
+      readNumber(summary.ipynb_resources_analyzed) ??
+      readNumber(summary.resourcesNotebookAnalyzed) ??
+      readNumber(summary.resources_notebook_analyzed) ??
+      readNumber(readRecord(summary.notebook).resourcesAnalyzed) ??
+      readNumber(readRecord(summary.notebook).resources_analyzed) ??
+      readNumber(readRecord(summary.jupyter).resourcesAnalyzed) ??
+      readNumber(readRecord(summary.jupyter).resources_analyzed) ??
+      readNumber(readRecord(summary.ipynb).resourcesAnalyzed) ??
+      readNumber(readRecord(summary.ipynb).resources_analyzed) ??
+      fallbackSummary.notebookResourcesAnalyzed,
     pass:
       readNumber(summary.pass) ??
       readNumber(summary.passed) ??
@@ -1352,6 +1427,7 @@ function emptyAccessibilityResponse(jobId: string): AccessibilityResponse {
       pdfResourcesAnalyzed: 0,
       wordResourcesAnalyzed: 0,
       videoResourcesAnalyzed: 0,
+      notebookResourcesAnalyzed: 0,
       pass: 0,
       warning: 0,
       fail: 0,
@@ -1485,6 +1561,90 @@ function normalizeAccessibilityResponse(
       fallbackKind: 'VIDEO',
       resources: readArray(readRecord(root.video_accessibility).resources),
     },
+    { fallbackKind: 'NOTEBOOK', resources: readArray(root.notebook) },
+    { fallbackKind: 'NOTEBOOK', resources: readArray(root.notebooks) },
+    { fallbackKind: 'NOTEBOOK', resources: readArray(root.jupyter) },
+    { fallbackKind: 'NOTEBOOK', resources: readArray(root.ipynb) },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.notebookResources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.notebook_resources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.jupyterResources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.jupyter_resources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.ipynbResources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.ipynb_resources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.notebookAccessibility),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.notebook_accessibility),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.jupyterAccessibility),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.jupyter_accessibility),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.ipynbAccessibility),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(root.ipynb_accessibility),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(readRecord(root.notebook).resources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(readRecord(root.notebook).results),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(readRecord(root.jupyter).resources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(readRecord(root.jupyter).results),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(readRecord(root.ipynb).resources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(readRecord(root.ipynb).results),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(readRecord(root.notebookAccessibility).resources),
+    },
+    {
+      fallbackKind: 'NOTEBOOK',
+      resources: readArray(readRecord(root.notebook_accessibility).resources),
+    },
   ];
   const resources = mergeAccessibilityResources(
     resourceGroups
@@ -1545,7 +1705,18 @@ export const api = {
     const payload = await request<unknown>('/token/activate-demo', {
       method: 'POST',
     });
-    return normalizeTokenStatus(payload, true);
+    return normalizeTokenStatus(payload, true, 'demo');
+  },
+
+  async configureToken(token: string): Promise<TokenStatus> {
+    const payload = await request<unknown>('/token/configure', {
+      body: JSON.stringify({ token }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    });
+    return normalizeTokenStatus(payload, true, 'user');
   },
 
   async deactivateToken(): Promise<TokenStatus> {
@@ -1580,30 +1751,9 @@ export const api = {
     return normalizeJobStatus(payload);
   },
 
-  async listOnlineCourses(auth: CanvasAuth): Promise<OnlineCourse[]> {
-    const payload = await request<RawOnlineCourse[]>('/online/courses', {
-      headers: buildCanvasHeaders(auth),
-    });
-    return payload.map(normalizeOnlineCourse);
-  },
-
   async listCanvasCourses(): Promise<OnlineCourse[]> {
     const payload = await request<RawOnlineCourse[]>('/canvas/courses');
     return payload.map(normalizeOnlineCourse);
-  },
-
-  async createOnlineJob(
-    payload: { courseId: string; courseName?: string | null },
-    auth: CanvasAuth,
-  ): Promise<JobCreatedResponse> {
-    return request<JobCreatedResponse>('/online/jobs', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...buildCanvasHeaders(auth),
-      },
-      body: JSON.stringify(payload),
-    });
   },
 
   async createCanvasJob(payload: {

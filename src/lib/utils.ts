@@ -38,6 +38,10 @@ export function buildStepMessage(progress: number) {
     return 'Análisis completado';
   }
 
+  if (progress >= 98) {
+    return 'Procesando accesibilidad de los notebooks';
+  }
+
   if (progress >= 97) {
     return 'Procesando accesibilidad de los recursos de vídeo';
   }

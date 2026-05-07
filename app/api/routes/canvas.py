@@ -109,6 +109,7 @@ def create_canvas_job(
         limit=settings.online_rate_limit_per_minute,
     )
     credentials = _canvas_credentials_from_request(request, settings)
+    token_mode = get_canvas_token_session_status(request, settings).mode
     client = _build_canvas_client(credentials, settings)
     course = client.get_course(payload.courseId)
 
@@ -122,7 +123,7 @@ def create_canvas_job(
     )
     request.app.state.online_job_contexts.put(
         response.jobId,
-        OnlineJobContext(credentials=credentials, course_id=course.id, course_name=course.name, auth_source="demo"),
+        OnlineJobContext(credentials=credentials, course_id=course.id, course_name=course.name, auth_source=token_mode),
     )
     background_tasks.add_task(
         process_online_job,

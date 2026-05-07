@@ -345,6 +345,8 @@ class StubUrlChecker:
 
 
 def test_online_courses_and_job_flow(client, monkeypatch) -> None:
+    client.app.state.settings.canvas_base_url = "https://canvas.example.edu"
+    client.app.state.settings.canvas_token = "secret-token"
     monkeypatch.setattr(
         "app.api.routes.online.build_canvas_client",
         lambda credentials, settings: StubCanvasClient(credentials),
@@ -358,13 +360,15 @@ def test_online_courses_and_job_flow(client, monkeypatch) -> None:
         lambda settings: StubUrlChecker(),
     )
 
-    courses_response = client.get("/api/online/courses", headers=canvas_headers())
+    activate_response = client.post("/api/token/activate-demo")
+    assert activate_response.status_code == 200, activate_response.text
+
+    courses_response = client.get("/api/online/courses")
     assert courses_response.status_code == 200, courses_response.text
     assert courses_response.json()[0]["name"] == "Accesibilidad Digital"
 
     create_response = client.post(
         "/api/online/jobs",
-        headers=canvas_headers(),
         json={"courseId": "77", "courseName": "Accesibilidad Digital"},
     )
     assert create_response.status_code == 201, create_response.text

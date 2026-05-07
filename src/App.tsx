@@ -1,19 +1,49 @@
 import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { LayoutSimple } from './components/LayoutSimple';
-import { api } from './lib/api';
+import { ApiError, api } from './lib/api';
+import type { TokenStatus } from './lib/types';
 import { AnalyzingPage } from './pages/AnalyzingPage';
 import { LandingPage } from './pages/LandingPage';
 import { OnlineTokenRequiredPage } from './pages/OnlineTokenRequiredPage';
 import { OnlinePage } from './pages/OnlinePage';
 import { ReportPage } from './pages/ReportPage';
 import { ResourcesPage } from './pages/ResourcesPage';
+import { TokenConfigurePage } from './pages/TokenConfigurePage';
 import { TokenManagementPage } from './pages/TokenManagementPage';
 import { TokenWelcomePage } from './pages/TokenWelcomePage';
 import { UploadPage } from './pages/UploadPage';
 
+const EMPTY_TOKEN_STATUS: TokenStatus = {
+  demoTokenAvailable: false,
+  mode: 'none',
+  tokenActive: false,
+  tokenConfigured: false,
+};
+
+function getConfigureTokenErrorMessage(caughtError: unknown) {
+  if (
+    caughtError instanceof ApiError &&
+    caughtError.message.includes('invalid_canvas_token')
+  ) {
+    return 'No hemos podido validar el token. Revisa que sea correcto y siga vigente.';
+  }
+
+  if (
+    caughtError instanceof Error &&
+    caughtError.message.includes('invalid_canvas_token')
+  ) {
+    return 'No hemos podido validar el token. Revisa que sea correcto y siga vigente.';
+  }
+
+  return caughtError instanceof Error
+    ? caughtError.message
+    : 'No hemos podido guardar el token de acceso.';
+}
+
 export default function App() {
-  const [tokenActive, setTokenActive] = useState(false);
+  const [tokenStatus, setTokenStatus] =
+    useState<TokenStatus>(EMPTY_TOKEN_STATUS);
   const [isCheckingToken, setIsCheckingToken] = useState(true);
   const [tokenStatusError, setTokenStatusError] = useState<string | null>(null);
   const [tokenActionError, setTokenActionError] = useState<string | null>(null);
@@ -32,15 +62,15 @@ export default function App() {
           return;
         }
 
-        setTokenActive(status.tokenActive);
+        setTokenStatus(status);
         setTokenStatusError(null);
-        setHasContinuedWithoutToken(status.tokenActive);
+        setHasContinuedWithoutToken(status.tokenConfigured);
       } catch {
         if (!active) {
           return;
         }
 
-        setTokenActive(false);
+        setTokenStatus(EMPTY_TOKEN_STATUS);
         setTokenStatusError('No se ha podido comprobar el estado del token.');
       } finally {
         if (active) {
@@ -67,9 +97,9 @@ export default function App() {
         );
         return false;
       }
-      setTokenActive(status.tokenActive);
+      setTokenStatus(status);
       setTokenStatusError(null);
-      setHasContinuedWithoutToken(status.tokenActive);
+      setHasContinuedWithoutToken(status.tokenConfigured);
       return status.tokenActive;
     } catch (caughtError) {
       setTokenActionError(
@@ -83,12 +113,36 @@ export default function App() {
     }
   };
 
+  const handleConfigureToken = async (token: string) => {
+    try {
+      setIsTokenActionPending(true);
+      setTokenActionError(null);
+      const status = await api.configureToken(token);
+      if (!status.tokenActive) {
+        setTokenActionError(
+          'No hemos podido validar el token. Revisa que sea correcto y siga vigente.',
+        );
+        return false;
+      }
+
+      setTokenStatus(status);
+      setTokenStatusError(null);
+      setHasContinuedWithoutToken(status.tokenConfigured);
+      return status.tokenActive;
+    } catch (caughtError) {
+      setTokenActionError(getConfigureTokenErrorMessage(caughtError));
+      return false;
+    } finally {
+      setIsTokenActionPending(false);
+    }
+  };
+
   const handleDeactivateToken = async () => {
     try {
       setIsTokenActionPending(true);
       setTokenActionError(null);
-      await api.deactivateToken();
-      setTokenActive(false);
+      const status = await api.deactivateToken();
+      setTokenStatus(status);
       setHasContinuedWithoutToken(false);
       return true;
     } catch (caughtError) {
@@ -125,7 +179,9 @@ export default function App() {
     );
   }
 
-  const shouldShowTokenWelcome = !tokenActive && !hasContinuedWithoutToken;
+  const tokenActive = tokenStatus.tokenActive && tokenStatus.tokenConfigured;
+  const shouldShowTokenWelcome =
+    !tokenStatus.tokenConfigured && !hasContinuedWithoutToken;
 
   return (
     <Routes>
@@ -135,6 +191,7 @@ export default function App() {
           shouldShowTokenWelcome ? (
             <TokenWelcomePage
               actionError={tokenActionError}
+              demoTokenAvailable={tokenStatus.demoTokenAvailable}
               isSubmitting={isTokenActionPending}
               onActivateDemo={handleActivateDemoToken}
               onContinueWithoutToken={handleContinueWithoutToken}
@@ -143,6 +200,7 @@ export default function App() {
           ) : (
             <LandingPage
               tokenActive={tokenActive}
+              tokenConfigured={tokenStatus.tokenConfigured}
               tokenStatusError={tokenStatusError}
             />
           )
@@ -157,11 +215,19 @@ export default function App() {
           ) : (
             <OnlineTokenRequiredPage
               actionError={tokenActionError}
-              isSubmitting={isTokenActionPending}
-              onActivateDemo={handleActivateDemoToken}
               statusError={tokenStatusError}
             />
           )
+        }
+      />
+      <Route
+        path="/token/configure"
+        element={
+          <TokenConfigurePage
+            actionError={tokenActionError}
+            isSubmitting={isTokenActionPending}
+            onConfigureToken={handleConfigureToken}
+          />
         }
       />
       <Route
@@ -174,7 +240,7 @@ export default function App() {
             onContinueWithoutToken={handleContinueWithoutToken}
             onDeactivateToken={handleDeactivateToken}
             statusError={tokenStatusError}
-            tokenActive={tokenActive}
+            tokenStatus={tokenStatus}
           />
         }
       />

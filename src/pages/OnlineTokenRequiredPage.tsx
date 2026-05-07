@@ -3,15 +3,11 @@ import { LayoutSimple } from '../components/LayoutSimple';
 
 interface OnlineTokenRequiredPageProps {
   actionError: string | null;
-  isSubmitting: boolean;
-  onActivateDemo: () => Promise<boolean>;
   statusError: string | null;
 }
 
 export function OnlineTokenRequiredPage({
   actionError,
-  isSubmitting,
-  onActivateDemo,
   statusError,
 }: OnlineTokenRequiredPageProps) {
   const navigate = useNavigate();
@@ -54,13 +50,10 @@ export function OnlineTokenRequiredPage({
         <div className="flex flex-col gap-3 sm:flex-row sm:justify-center">
           <button
             className="button-primary w-full sm:w-auto"
-            disabled={isSubmitting}
-            onClick={() => {
-              void onActivateDemo();
-            }}
+            onClick={() => navigate('/token/configure')}
             type="button"
           >
-            {isSubmitting ? 'Configurando token…' : 'Configurar token'}
+            Configurar token
           </button>
           <button
             className="button-secondary w-full sm:w-auto"

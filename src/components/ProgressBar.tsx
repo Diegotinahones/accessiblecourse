@@ -1,25 +1,30 @@
 interface ProgressBarProps {
   label: string;
   value: number;
+  valueText?: string;
 }
 
-export function ProgressBar({ label, value }: ProgressBarProps) {
-  const safeValue = Math.max(0, Math.min(100, value));
+export function ProgressBar({ label, value, valueText }: ProgressBarProps) {
+  const safeValue = Math.round(Math.max(0, Math.min(100, value)));
+  const accessibleValueText = valueText ?? `${safeValue}% completado`;
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-4 text-sm font-medium text-subtle">
-        <span>{label}</span>
-        <span>{safeValue}%</span>
+        <span aria-hidden="true">{label}</span>
+        <span aria-hidden="true">{safeValue}%</span>
       </div>
-      <div
+      <progress
         aria-label={label}
-        aria-valuemax={100}
-        aria-valuemin={0}
-        aria-valuenow={safeValue}
-        aria-valuetext={`${safeValue}% completado`}
+        aria-valuetext={accessibleValueText}
+        className="sr-only"
+        key={`${label}-${safeValue}`}
+        max={100}
+        value={safeValue}
+      />
+      <div
+        aria-hidden="true"
         className="h-3 overflow-hidden rounded-full bg-[var(--uoc-border)]"
-        role="progressbar"
       >
         <div
           className="h-full rounded-full bg-[var(--uoc-cyan)] transition-all duration-500"

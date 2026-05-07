@@ -10,7 +10,12 @@ import {
 } from '../lib/utils';
 
 function buildCourseMeta(course: OnlineCourse) {
-  return [course.courseCode, course.term].filter(Boolean).join(' · ');
+  const uniqueParts = [course.courseCode, course.term].filter(
+    (part, index, parts): part is string =>
+      Boolean(part) && parts.indexOf(part) === index && part !== course.name,
+  );
+
+  return uniqueParts.join(' · ');
 }
 
 function getCourseLoadErrorMessage(caughtError: unknown) {
@@ -116,23 +121,14 @@ export function OnlinePage() {
       backLabel="Cambiar modo"
       backTo="/?mode=online"
       showTokenButton={false}
-      title="Selecciona tu curso"
+      title="Cursos disponibles"
+      useMainLandmark={false}
     >
       <form
-        className="mx-auto max-w-3xl space-y-6 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8"
+        className="mx-auto max-w-3xl space-y-6 rounded-2xl border border-line bg-white p-6 shadow-card sm:p-8"
         onSubmit={handleSubmit}
       >
-        <div className="flex flex-col gap-4 text-left sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1">
-            <h2 className="text-lg font-semibold text-ink">
-              Cursos disponibles
-            </h2>
-            <p className="text-sm text-subtle">
-              Se cargan desde Canvas/UOC usando la configuración segura del
-              backend.
-            </p>
-          </div>
-
+        <div className="flex justify-end">
           {error ? (
             <button
               className="button-secondary w-full sm:w-auto"
@@ -210,9 +206,7 @@ export function OnlinePage() {
               </div>
             ) : (
               <fieldset className="space-y-4">
-                <legend className="text-base font-semibold text-ink">
-                  Curso de Canvas/UOC
-                </legend>
+                <legend className="sr-only">Curso de Canvas/UOC</legend>
 
                 <div className="space-y-3">
                   {courses.map((course) => {
@@ -231,9 +225,8 @@ export function OnlinePage() {
                       >
                         <span className="flex items-start gap-4">
                           <input
-                            aria-describedby={meta ? descriptionId : undefined}
                             checked={checked}
-                            className="mt-1 h-5 w-5 accent-[var(--uoc-blue)]"
+                            className="mt-1 h-5 w-5 shrink-0 accent-[var(--uoc-blue)]"
                             id={inputId}
                             name="canvas-course"
                             onChange={() => setSelectedCourseId(course.id)}
@@ -247,6 +240,7 @@ export function OnlinePage() {
                             </span>
                             {meta ? (
                               <span
+                                aria-hidden="true"
                                 className="block text-sm text-subtle"
                                 id={descriptionId}
                               >

@@ -23,21 +23,18 @@ export function TokenWelcomePage({
   return (
     <LayoutSimple
       align="center"
-      description="Configura el acceso online o continúa con el modo offline."
       showSkipLink={false}
       showTokenButton={false}
       title="Bienvenido a AccessibleCourse"
+      useMainLandmark={false}
       variant="plain"
     >
-      <section className="mx-auto max-w-3xl space-y-6 rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8">
-        <div className="space-y-4 text-left">
+      <section className="mx-auto max-w-3xl space-y-7 rounded-2xl border border-line bg-white p-6 shadow-card sm:p-8">
+        <div className="mx-auto max-w-2xl text-left">
           <p className="text-lg leading-8 text-ink">
-            Configura tu token de acceso de Canvas para que podamos analizar los
-            cursos a los que tienes acceso.
-          </p>
-          <p className="text-base leading-7 text-subtle">
-            Si no dispones de token, puedes continuar usando el modo offline
-            subiendo un archivo IMSCC o ZIP del curso.
+            Configura un token para que podamos acceder a los cursos de Canvas
+            que tengas disponibles. Si no dispones de ningún token de acceso,
+            puedes continuar con el modo offline.
           </p>
         </div>
 
@@ -61,7 +58,7 @@ export function TokenWelcomePage({
           </p>
         ) : null}
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:justify-center">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:justify-center">
           <button
             className="button-primary w-full sm:w-auto"
             onClick={() => navigate('/token/configure')}

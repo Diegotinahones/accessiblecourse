@@ -12,6 +12,7 @@ interface LayoutSimpleProps {
   align?: 'left' | 'center';
   showSkipLink?: boolean;
   showTokenButton?: boolean;
+  useMainLandmark?: boolean;
   variant?: 'app' | 'plain';
 }
 
@@ -25,10 +26,12 @@ export function LayoutSimple({
   align = 'left',
   showSkipLink = true,
   showTokenButton = true,
+  useMainLandmark = true,
   variant = 'app',
 }: LayoutSimpleProps) {
   const navigate = useNavigate();
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const PageContainer = useMainLandmark ? 'main' : 'div';
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -75,7 +78,7 @@ export function LayoutSimple({
         </header>
       ) : null}
 
-      <main
+      <PageContainer
         id="page-content"
         className={classNames(
           'mx-auto flex w-full max-w-6xl flex-col px-4 py-8 sm:px-6 sm:py-10 lg:px-8',
@@ -110,7 +113,7 @@ export function LayoutSimple({
 
         <div className="flex-1">{children}</div>
         {footer ? <div className="mt-8">{footer}</div> : null}
-      </main>
+      </PageContainer>
     </div>
   );
 }

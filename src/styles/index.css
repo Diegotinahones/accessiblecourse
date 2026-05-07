@@ -5,17 +5,17 @@
 @layer base {
   :root {
     color-scheme: light;
-    --uoc-blue: #001f5b;
-    --uoc-cyan: #00a6c8;
+    --uoc-blue: #000078;
+    --uoc-cyan: #00b5e2;
     --uoc-white: #ffffff;
     --uoc-border: #d8e0e8;
     --uoc-muted: #4b5c72;
     --status-green: #057a55;
     --status-yellow: #b7791f;
     --status-red: #c53030;
-    --color-uoc-blue: #001f5b;
-    --color-uoc-blue-strong: #001640;
-    --color-uoc-cyan: #00a6c8;
+    --color-uoc-blue: #000078;
+    --color-uoc-blue-strong: #00005f;
+    --color-uoc-cyan: #00b5e2;
     --color-uoc-cyan-soft: #e5f8fb;
     --color-page: #ffffff;
     --color-surface: #ffffff;
@@ -64,7 +64,7 @@
 
 @layer components {
   .button-primary {
-    @apply inline-flex min-h-12 items-center justify-center rounded-xl px-5 py-3 text-base font-semibold text-white transition disabled:cursor-not-allowed disabled:bg-[#d0d5dd] disabled:text-[#667085];
+    @apply inline-flex min-h-12 items-center justify-center rounded-lg px-5 py-3 text-base font-semibold text-white transition disabled:cursor-not-allowed disabled:bg-[#d0d5dd] disabled:text-[#667085];
     background-color: var(--color-uoc-blue);
   }
 
@@ -73,7 +73,7 @@
   }
 
   .button-secondary {
-    @apply inline-flex min-h-12 items-center justify-center rounded-xl border bg-white px-5 py-3 text-base font-semibold text-ink transition disabled:cursor-not-allowed disabled:text-slate-400;
+    @apply inline-flex min-h-12 items-center justify-center rounded-lg border bg-white px-5 py-3 text-base font-semibold text-ink transition disabled:cursor-not-allowed disabled:text-slate-400;
     border-color: var(--color-border);
   }
 

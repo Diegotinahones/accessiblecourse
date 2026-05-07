@@ -172,18 +172,19 @@ export function AnalyzingPage() {
     };
   }, [appMode, jobId, navigate]);
 
-  const progress = jobStatus?.progress ?? 0;
+  const displayProgress = Math.round(
+    Math.max(0, Math.min(100, jobStatus?.progress ?? 0)),
+  );
   const statusMessage = getAnalysisCopy(jobStatus);
   const statusContext = getAnalysisContext(jobStatus);
-  const liveMessage = `${statusMessage}. ${progress}% completado.`;
 
   return (
     <LayoutSimple
       backLabel="Volver"
       backTo={`/${appMode}${getModeSearch(appMode)}`}
-      description="Esto puede tardar unos minutos."
       showTokenButton={false}
       title="Estamos analizando los recursos"
+      useMainLandmark={false}
     >
       <section className="mx-auto max-w-2xl space-y-6 rounded-3xl border border-line bg-white p-6 text-center shadow-card sm:p-8">
         {error ? (
@@ -199,9 +200,12 @@ export function AnalyzingPage() {
           </div>
         ) : (
           <>
-            <ProgressBar label="Progreso del análisis" value={progress} />
+            <ProgressBar
+              label="Progreso del análisis"
+              value={displayProgress}
+            />
             <p aria-live="polite" className="text-lg font-semibold text-ink">
-              {liveMessage}
+              {statusMessage}
             </p>
             {statusContext ? (
               <p className="text-sm leading-6 text-subtle">{statusContext}</p>

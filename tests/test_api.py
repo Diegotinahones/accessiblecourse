@@ -1159,6 +1159,29 @@ def test_accessibility_endpoint_includes_discovered_notebook_results(client) -> 
         events = session.exec(select(JobEvent).where(JobEvent.job_id == job_id)).all()
     assert any(event.message == "Procesando accesibilidad de los notebooks" for event in events)
 
+    executive_response = client.get(f"/api/jobs/{job_id}/executive-summary")
+    assert executive_response.status_code == 200, executive_response.text
+    executive = executive_response.json()
+    executive_resources = [
+        resource
+        for module in executive["modules"]
+        for resource in module["resources"]
+    ]
+    executive_notebook = next(resource for resource in executive_resources if resource["type"] == "NOTEBOOK")
+    notebook_module = next(
+        module
+        for module in executive["modules"]
+        if any(resource["resourceId"] == executive_notebook["resourceId"] for resource in module["resources"])
+    )
+    assert executive["summary"]["resourcesAnalyzed"] == 4
+    assert executive["accessibilityScore"] is not None
+    assert notebook_module["score"] is not None
+    assert notebook_module["priority"] in {"HIGH", "MEDIUM", "LOW"}
+    assert executive_notebook["score"] is not None
+    assert executive_notebook["priority"] == "HIGH"
+    assert executive_notebook["mainIssue"] == "Errores de ejecución guardados"
+    assert executive_notebook["reportAnchorId"].startswith("resource-")
+
 
 def test_report_generation_includes_access_html_pdf_word_video_and_notebook_accessibility_summaries(
     client,

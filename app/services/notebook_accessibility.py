@@ -476,10 +476,10 @@ def _check_visual_outputs(context: _NotebookContext) -> AccessibilityCheckResult
         )
     return _result(
         "notebook.visual_outputs",
-            "Salidas visuales explicadas",
-            "PASS",
-            "Los outputs visuales tienen Markdown cercano que aporta contexto.",
-            "Mantén descripciones textuales para gráficos y resultados visuales.",
+        "Salidas visuales explicadas",
+        "PASS",
+        "Los outputs visuales tienen Markdown cercano que aporta contexto.",
+        "Mantén descripciones textuales para gráficos y resultados visuales.",
         "WCAG 1.1.1",
     )
 

@@ -1250,6 +1250,26 @@ function normalizeAccessibilityResource(
       fallbackKind,
     ),
     checks: rawChecks.map(normalizeAccessibilityCheck),
+    score:
+      readNumber(item.score) ??
+      readNumber(item.accessibilityScore) ??
+      readNumber(item.accessibility_score) ??
+      readNumber(item.score100) ??
+      readNumber(item.score_100) ??
+      readNumber(item.score0To100) ??
+      readNumber(item.score_0_100),
+    priority:
+      readString(item.priority) ??
+      readString(item.priorityLevel) ??
+      readString(item.priority_level) ??
+      readString(item.severity),
+    mainIssue:
+      readString(item.mainIssue) ??
+      readString(item.main_issue) ??
+      readString(item.primaryIssue) ??
+      readString(item.primary_issue) ??
+      readString(item.issue) ??
+      readString(item.recommendation),
     error:
       readString(item.error) ??
       readString(item.errorMessage) ??
@@ -1283,6 +1303,9 @@ function mergeAccessibilityResources(
       ...existingResource,
       title: existingResource.title ?? resource.title,
       checks: nextChecks,
+      score: existingResource.score ?? resource.score,
+      priority: existingResource.priority ?? resource.priority,
+      mainIssue: existingResource.mainIssue ?? resource.mainIssue,
       error: existingResource.error ?? resource.error,
     });
   });
@@ -1295,7 +1318,12 @@ function deriveAccessibilitySummary(
 ): AccessibilitySummary {
   const allChecks = resources.flatMap((resource) => resource.checks);
   const analyzedResources = resources.filter(
-    (resource) => resource.checks.length > 0 || resource.error,
+    (resource) =>
+      resource.checks.length > 0 ||
+      resource.error ||
+      resource.score !== null ||
+      resource.priority ||
+      resource.mainIssue,
   );
 
   return {

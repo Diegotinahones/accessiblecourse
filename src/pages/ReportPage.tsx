@@ -8,9 +8,7 @@ import {
   getDirectReportDownloadUrls,
 } from '../lib/api';
 import type { AppMode, GeneratedReport } from '../lib/types';
-import { formatDate } from '../lib/types';
 import {
-  classNames,
   getModeSearch,
   isAppMode,
   loadRememberedAppMode,
@@ -19,7 +17,6 @@ import {
 } from '../lib/utils';
 
 interface ReportLocationState {
-  announcement?: string;
   courseName?: string | null;
 }
 
@@ -27,29 +24,8 @@ function getLoadMessage(isGenerating: boolean) {
   return isGenerating ? 'Generando informe…' : 'Cargando informe…';
 }
 
-function getReportScore(report: GeneratedReport) {
-  if (report.resourceCount === 0) {
-    return 0;
-  }
-
-  const penalty = Math.min(
-    100,
-    Math.round((report.failedItemCount / report.resourceCount) * 10),
-  );
-
-  return Math.max(0, 100 - penalty);
-}
-
-function getScoreClass(score: number) {
-  if (score >= 80) {
-    return 'score-green';
-  }
-
-  if (score >= 60) {
-    return 'score-yellow';
-  }
-
-  return 'score-red';
+function downloadFile(url: string) {
+  window.location.assign(url);
 }
 
 export function ReportPage() {
@@ -62,9 +38,6 @@ export function ReportPage() {
   const [loading, setLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [announcement, setAnnouncement] = useState(
-    navigationState?.announcement ?? '',
-  );
   const modeParam = searchParams.get('mode');
   const appMode: AppMode = isAppMode(modeParam)
     ? modeParam
@@ -106,7 +79,6 @@ export function ReportPage() {
             const payload = await generateReport(resolvedJobId);
             if (!cancelled) {
               setReport(payload);
-              setAnnouncement((current) => current || 'Informe generado.');
             }
           } catch (generationError) {
             if (!cancelled) {
@@ -156,23 +128,10 @@ export function ReportPage() {
     <LayoutSimple
       backLabel="Volver a recursos"
       backTo={jobId ? `/resources/${jobId}${getModeSearch(appMode)}` : '/'}
-      description="Este informe recoge el diagnóstico completo de acceso y accesibilidad automática de los recursos analizados."
       showTokenButton={false}
       title="Informe detallado"
+      useMainLandmark={false}
     >
-      <p aria-live="polite" className="sr-only">
-        {announcement}
-      </p>
-
-      {announcement ? (
-        <div
-          className="mb-6 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-success"
-          role="status"
-        >
-          {announcement}
-        </div>
-      ) : null}
-
       {error ? (
         <div
           aria-live="assertive"
@@ -190,61 +149,42 @@ export function ReportPage() {
       ) : null}
 
       {!loading && report && downloadUrls ? (
-        <div className="space-y-6">
-          <section className="card-panel space-y-6 p-6">
-            <div className="space-y-2">
-              <p className="text-sm text-subtle">{courseName}</p>
-              <p className="text-sm text-subtle">
-                Generado el {formatDate(report.generatedAt)}
-              </p>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-3">
-              <article className="rounded-2xl border border-line bg-[var(--color-surface-soft)] p-4">
-                <p className="text-sm text-subtle">Score global</p>
-                <p
-                  className={classNames(
-                    'mt-2 text-3xl font-semibold tracking-[-0.04em]',
-                    getScoreClass(getReportScore(report)),
-                  )}
-                >
-                  {getReportScore(report)}/100
-                </p>
-              </article>
-
-              <article className="rounded-2xl border border-line bg-[var(--color-surface-soft)] p-4">
-                <p className="text-sm text-subtle">Recursos analizados</p>
-                <p className="mt-2 text-3xl font-semibold text-ink">
-                  {report.resourceCount}
-                </p>
-              </article>
-
-              <article className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
-                <p className="text-sm text-subtle">Incidencias principales</p>
-                <p className="mt-2 text-3xl font-semibold text-ink">
-                  {report.failedItemCount}
-                </p>
-              </article>
-            </div>
-
-            <p className="text-sm leading-6 text-subtle">
-              Las descargas contienen el detalle técnico completo por recurso,
-              con evidencias y recomendaciones.
+        <section className="mx-auto max-w-3xl rounded-3xl border border-line bg-white p-6 shadow-card sm:p-8">
+          <div className="space-y-3">
+            <p className="text-sm font-semibold uppercase tracking-[0.12em] text-subtle">
+              {courseName}
             </p>
+            <p className="text-lg leading-8 text-ink">
+              El informe incluye el diagnóstico completo por recurso, con
+              incidencias ordenadas por gravedad, evidencias y recomendaciones
+              de mejora.
+            </p>
+          </div>
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-              <a className="button-primary" href={downloadUrls.pdf}>
-                Descargar PDF
-              </a>
-              <a className="button-secondary" href={downloadUrls.docx}>
-                Descargar Word
-              </a>
-              <a className="button-secondary" href={downloadUrls.json}>
-                Descargar JSON
-              </a>
-            </div>
-          </section>
-        </div>
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+            <button
+              className="button-primary w-full sm:w-auto"
+              onClick={() => downloadFile(downloadUrls.pdf)}
+              type="button"
+            >
+              Descargar PDF
+            </button>
+            <button
+              className="button-secondary w-full sm:w-auto"
+              onClick={() => downloadFile(downloadUrls.docx)}
+              type="button"
+            >
+              Descargar Word
+            </button>
+            <button
+              className="button-secondary w-full sm:w-auto"
+              onClick={() => downloadFile(downloadUrls.json)}
+              type="button"
+            >
+              Descargar JSON
+            </button>
+          </div>
+        </section>
       ) : null}
     </LayoutSimple>
   );

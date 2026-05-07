@@ -284,6 +284,9 @@ export interface AccessibilityResource {
   title: string | null;
   kind: AccessibilityResourceKind;
   checks: AccessibilityCheck[];
+  score: number | null;
+  priority: string | null;
+  mainIssue: string | null;
   error: string | null;
 }
 

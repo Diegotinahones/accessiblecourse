@@ -41,14 +41,16 @@ export function TokenConfigurePage({
   return (
     <LayoutSimple
       align="center"
-      backLabel="Cancelar"
+      backLabel="Volver"
       backTo="/"
-      description="Introduce tu token personal de Canvas/UOC."
+      description="Introduce tu token de Canvas para que podamos acceder a tus cursos."
+      showSkipLink={false}
       showTokenButton={false}
-      title="Configurar token de Canvas"
+      title="Configura tu token"
+      useMainLandmark={false}
     >
       <form
-        className="mx-auto max-w-2xl space-y-6 rounded-3xl border border-line bg-white p-6 text-left shadow-card sm:p-8"
+        className="mx-auto max-w-xl space-y-5 rounded-2xl border border-line bg-white p-6 text-left shadow-card sm:p-7"
         onSubmit={handleSubmit}
       >
         <div className="space-y-3">
@@ -58,11 +60,11 @@ export function TokenConfigurePage({
           >
             Token de acceso de Canvas
           </label>
-          <div className="flex flex-col gap-3 sm:flex-row">
+          <div className="relative">
             <input
               aria-describedby="canvas-token-help"
               autoComplete="off"
-              className="field-input"
+              className="field-input pr-36"
               disabled={isSubmitting}
               id="canvas-access-token"
               onChange={(event) => setToken(event.target.value)}
@@ -70,17 +72,16 @@ export function TokenConfigurePage({
               value={token}
             />
             <button
-              className="button-secondary shrink-0"
+              className="absolute right-2 top-1/2 min-h-10 -translate-y-1/2 rounded-md px-3 text-sm font-semibold text-[var(--uoc-blue)] transition hover:bg-[var(--color-uoc-cyan-soft)]"
               disabled={isSubmitting}
               onClick={() => setShowToken((current) => !current)}
               type="button"
             >
-              {showToken ? 'Ocultar token' : 'Mostrar token'}
+              {showToken ? 'Ocultar' : 'Mostrar'}
             </button>
           </div>
           <p className="text-sm leading-6 text-subtle" id="canvas-token-help">
-            El token se enviará al servidor por HTTPS, se validará con
-            Canvas/UOC y se guardará cifrado. No se mostrará de nuevo.
+            No guardamos el token en este navegador.
           </p>
         </div>
 
@@ -104,21 +105,13 @@ export function TokenConfigurePage({
           </p>
         ) : null}
 
-        <div className="flex flex-col gap-3 sm:flex-row">
+        <div>
           <button
             className="button-primary w-full sm:w-auto"
             disabled={isSubmitting}
             type="submit"
           >
-            {isSubmitting ? 'Guardando token…' : 'Guardar token'}
-          </button>
-          <button
-            className="button-secondary w-full sm:w-auto"
-            disabled={isSubmitting}
-            onClick={() => navigate('/')}
-            type="button"
-          >
-            Cancelar
+            {isSubmitting ? 'Guardando token…' : 'Continuar'}
           </button>
         </div>
       </form>

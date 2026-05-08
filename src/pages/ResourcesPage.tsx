@@ -71,6 +71,21 @@ const EMPTY_ACCESSIBILITY_SUMMARY: AccessibilitySummary = {
   errors: 0,
 };
 
+function getResourceNoun(count: number) {
+  return count === 1 ? 'recurso' : 'recursos';
+}
+
+function formatResourceCount(count: number) {
+  return `${count} ${getResourceNoun(count)}`;
+}
+
+function getAnalyzedResourceLabel(count: number, descriptor: string) {
+  const resourceLabel = count === 1 ? 'Recurso' : 'Recursos';
+  const analyzedLabel = count === 1 ? 'analizado' : 'analizados';
+
+  return `${resourceLabel} ${descriptor} ${analyzedLabel}`;
+}
+
 function normalizeComparableText(value: string | null | undefined) {
   return (
     value
@@ -396,7 +411,7 @@ function getResourceKind(
 
 function getResourceTypeLabel(kind: AccessibilityResourceKind) {
   if (kind === 'HTML') {
-    return 'Web';
+    return 'Página web';
   }
 
   if (kind === 'PDF') {
@@ -945,6 +960,7 @@ export function ResourcesPage() {
     {},
   );
   const [filters, setFilters] = useState<ResourceFilters>(EMPTY_FILTERS);
+  const [isIssueInfoOpen, setIsIssueInfoOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isRetrying, setIsRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1056,26 +1072,41 @@ export function ResourcesPage() {
     accessibility?.summary ?? EMPTY_ACCESSIBILITY_SUMMARY;
   const accessibilitySummaryItems = [
     {
-      label: 'Recursos HTML analizados',
+      label: getAnalyzedResourceLabel(
+        accessibilitySummary.htmlResourcesAnalyzed,
+        'HTML',
+      ),
       value: accessibilitySummary.htmlResourcesAnalyzed,
     },
     {
-      label: 'Recursos PDF analizados',
+      label: getAnalyzedResourceLabel(
+        accessibilitySummary.pdfResourcesAnalyzed,
+        'PDF',
+      ),
       value: accessibilitySummary.pdfResourcesAnalyzed,
     },
     {
-      label: 'Recursos Word analizados',
+      label: getAnalyzedResourceLabel(
+        accessibilitySummary.wordResourcesAnalyzed,
+        'Word',
+      ),
       value: accessibilitySummary.wordResourcesAnalyzed,
     },
     {
-      label: 'Recursos de vídeo analizados',
+      label: getAnalyzedResourceLabel(
+        accessibilitySummary.videoResourcesAnalyzed,
+        'de vídeo',
+      ),
       value: accessibilitySummary.videoResourcesAnalyzed,
     },
     {
-      label: 'Recursos Notebook analizados',
+      label: getAnalyzedResourceLabel(
+        accessibilitySummary.notebookResourcesAnalyzed,
+        'Notebook',
+      ),
       value: accessibilitySummary.notebookResourcesAnalyzed,
     },
-    { label: 'Incumplimientos', value: accessibilitySummary.fail },
+    { label: 'Incidencias', value: accessibilitySummary.fail },
     { label: 'Avisos', value: accessibilitySummary.warning },
   ];
   const activeFilterCount = Object.values(filters).filter(Boolean).length;
@@ -1083,7 +1114,7 @@ export function ResourcesPage() {
   const courseTitle =
     rememberedCourseName?.trim() ||
     structure?.title?.trim() ||
-    (jobId ? `Curso ${jobId}` : 'Curso');
+    'Curso analizado';
 
   const togglePanel = (panelId: string) => {
     setExpandedPanels((current) => ({
@@ -1131,7 +1162,7 @@ export function ResourcesPage() {
       backLabel="Volver"
       backTo={`/${appMode}${getModeSearch(appMode)}`}
       showTokenButton={false}
-      title={courseTitle}
+      title="Análisis ejecutivo"
       useMainLandmark={false}
     >
       {error ? (
@@ -1152,6 +1183,9 @@ export function ResourcesPage() {
         <div className="space-y-7">
           <section aria-live="polite" className="border-b border-line pb-6">
             <h2 className="sr-only">Score total</h2>
+            <p className="mb-4 max-w-3xl text-lg leading-8 text-subtle">
+              {courseTitle}
+            </p>
             <p className="flex flex-col gap-3 text-xl font-semibold tracking-[-0.03em] text-ink sm:flex-row sm:items-center">
               <span>Score total</span>
               <span
@@ -1190,6 +1224,35 @@ export function ResourcesPage() {
                 </div>
               ))}
             </dl>
+            <div className="mt-4">
+              <button
+                aria-controls="issues-warnings-info"
+                aria-expanded={isIssueInfoOpen}
+                className="button-secondary w-full text-left sm:w-auto"
+                onClick={() => setIsIssueInfoOpen((current) => !current)}
+                type="button"
+              >
+                Más información sobre incidencias y avisos
+              </button>
+              <div
+                className="mt-3 rounded-2xl border border-line bg-[var(--color-surface-soft)] p-4 text-sm leading-6 text-subtle"
+                hidden={!isIssueInfoOpen}
+                id="issues-warnings-info"
+              >
+                <p>
+                  <span className="font-semibold text-ink">Incidencias:</span>{' '}
+                  Son problemas detectados automáticamente que pueden impedir o
+                  dificultar el acceso al contenido. Conviene revisarlos con
+                  prioridad.
+                </p>
+                <p className="mt-2">
+                  <span className="font-semibold text-ink">Avisos:</span> Son
+                  posibles mejoras o elementos que requieren revisión manual. No
+                  siempre implican una barrera directa, pero pueden afectar a la
+                  calidad de la accesibilidad.
+                </p>
+              </div>
+            </div>
           </section>
 
           <details className="rounded-3xl border border-line bg-white p-5 shadow-card">
@@ -1229,7 +1292,7 @@ export function ResourcesPage() {
                   checked={filters.onlyHtml}
                   onChange={(checked) => updateFilter('onlyHtml', checked)}
                 >
-                  Mostrar solo recursos HTML
+                  Mostrar solo páginas web / HTML
                 </FilterCheckbox>
                 <FilterCheckbox
                   checked={filters.onlyPdf}
@@ -1309,7 +1372,7 @@ export function ResourcesPage() {
                             <ScoreBadge score={moduleScore} />
                             <span className="text-sm font-medium text-subtle">
                               {isExpanded ? 'Cerrar' : 'Abrir'} ·{' '}
-                              {group.resources.length} recursos
+                              {formatResourceCount(group.resources.length)}
                             </span>
                           </span>
                         </button>

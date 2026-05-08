@@ -419,7 +419,7 @@ export function getReviewStateLabel(state: ReviewState): string {
 export function getReviewResourceTypeLabel(type: ReviewResourceType): string {
   switch (type) {
     case 'WEB':
-      return 'Web';
+      return 'Página web';
     case 'PDF':
       return 'PDF';
     case 'WORD':

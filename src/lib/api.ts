@@ -1143,9 +1143,94 @@ function normalizeResourcesResponse(
   };
 }
 
+const ACCESSIBILITY_CHECK_TITLE_FALLBACKS: Record<
+  AccessibilityResourceKind,
+  string[]
+> = {
+  HTML: [
+    'Idioma principal definido',
+    'Título de página',
+    'Encabezado principal',
+    'Jerarquía de encabezados',
+    'Imágenes con texto alternativo',
+    'Enlaces descriptivos',
+    'Botones con nombre accesible',
+    'Campos de formulario con etiqueta',
+    'Iframes con título',
+    'Tablas con encabezados',
+  ],
+  PDF: [
+    'PDF legible/no cifrado',
+    'Texto extraíble',
+    'Idioma del documento',
+    'Título del documento',
+    'PDF etiquetado',
+    'Encabezados estructurados',
+    'Imágenes con texto alternativo',
+    'Tablas estructuradas',
+    'Enlaces detectables',
+    'Marcadores en documentos largos',
+  ],
+  WORD: [
+    'Documento legible',
+    'Texto extraíble',
+    'Idioma del documento',
+    'Título del documento',
+    'Uso de estilos de encabezado',
+    'Jerarquía de encabezados',
+    'Imágenes con texto alternativo',
+    'Tablas con estructura',
+    'Enlaces descriptivos',
+    'Listas estructuradas',
+  ],
+  VIDEO: [
+    'Recurso de vídeo accesible',
+    'Título descriptivo del vídeo',
+    'Proveedor/plataforma identificada',
+    'Iframe con título accesible',
+    'Subtítulos detectables',
+    'Transcripción detectable',
+    'Audio descripción o alternativa equivalente',
+    'Controles del reproductor',
+    'Autoplay / reproducción automática',
+    'Fichero local con metadatos verificables',
+  ],
+  NOTEBOOK: [
+    'Notebook legible',
+    'Texto explicativo inicial',
+    'Título principal',
+    'Jerarquía de encabezados Markdown',
+    'Celdas Markdown descriptivas',
+    'Imágenes con alternativa textual',
+    'Enlaces descriptivos',
+    'Salidas visuales explicadas',
+    'Errores de ejecución guardados',
+    'Orden y limpieza de ejecución',
+    'Tablas Markdown estructuradas',
+  ],
+  OTHER: [],
+};
+
+function isGenericCheckTitle(value: string | null) {
+  return Boolean(value?.trim().match(/^check\s*\d+\b/i));
+}
+
+function getFallbackCheckTitle(
+  kind: AccessibilityResourceKind,
+  id: string,
+  index: number,
+) {
+  const fallbackTitles = ACCESSIBILITY_CHECK_TITLE_FALLBACKS[kind];
+  const numericId = id.match(/(\d+)$/);
+  const fallbackIndex = numericId ? Number(numericId[1]) - 1 : index;
+
+  return fallbackTitles[fallbackIndex] ?? `Comprobación ${index + 1}`;
+}
+
 function normalizeAccessibilityCheck(
   value: unknown,
   index: number,
+  kind: AccessibilityResourceKind,
 ): AccessibilityCheck {
   const item = readRecord(value);
   const id =
@@ -1155,13 +1240,18 @@ function normalizeAccessibilityCheck(
     readString(item.key) ??
     `check-${index + 1}`;
 
+  const title =
+    readString(item.checkTitle) ??
+    readString(item.check_title) ??
+    readString(item.title) ??
+    readString(item.label) ??
+    readString(item.name);
+
   return {
     id,
-    title:
-      readString(item.title) ??
-      readString(item.label) ??
-      readString(item.name) ??
-      `Check ${index + 1}`,
+    title: !isGenericCheckTitle(title)
+      ? (title ?? getFallbackCheckTitle(kind, id, index))
+      : getFallbackCheckTitle(kind, id, index),
     status: normalizeAccessibilityStatus(
       item.status ??
         item.result ??
@@ -1214,42 +1304,46 @@ function normalizeAccessibilityResource(
               ? readArray(item.items)
               : readArray(item.results);
 
+  const kind = normalizeAccessibilityKind(
+    item.kind ??
+      item.resourceKind ??
+      item.resource_kind ??
+      item.analysisType ??
+      item.analysis_type ??
+      item.scanType ??
+      item.scan_type ??
+      item.resourceType ??
+      item.resource_type ??
+      item.mimeType ??
+      item.mime_type ??
+      item.filename ??
+      item.fileName ??
+      item.file_name ??
+      item.contentKind ??
+      item.content_kind ??
+      item.provider ??
+      item.videoProvider ??
+      item.video_provider ??
+      item.videoUrl ??
+      item.video_url ??
+      item.mediaUrl ??
+      item.media_url ??
+      item.embedUrl ??
+      item.embed_url ??
+      item.embed ??
+      item.iframe ??
+      item.iframeHtml ??
+      item.type,
+    fallbackKind,
+  );
+
   return {
     resourceId,
     title: readString(item.title),
-    kind: normalizeAccessibilityKind(
-      item.kind ??
-        item.resourceKind ??
-        item.resource_kind ??
-        item.analysisType ??
-        item.analysis_type ??
-        item.scanType ??
-        item.scan_type ??
-        item.resourceType ??
-        item.resource_type ??
-        item.mimeType ??
-        item.mime_type ??
-        item.filename ??
-        item.fileName ??
-        item.file_name ??
-        item.contentKind ??
-        item.content_kind ??
-        item.provider ??
-        item.videoProvider ??
-        item.video_provider ??
-        item.videoUrl ??
-        item.video_url ??
-        item.mediaUrl ??
-        item.media_url ??
-        item.embedUrl ??
-        item.embed_url ??
-        item.embed ??
-        item.iframe ??
-        item.iframeHtml ??
-        item.type,
-      fallbackKind,
+    kind,
+    checks: rawChecks.map((check, index) =>
+      normalizeAccessibilityCheck(check, index, kind),
     ),
-    checks: rawChecks.map(normalizeAccessibilityCheck),
     score:
       readNumber(item.score) ??
       readNumber(item.accessibilityScore) ??

@@ -46,6 +46,8 @@ export interface JobStatus {
   message: string;
   currentStep: number;
   totalSteps: number;
+  courseTitle?: string | null;
+  courseName?: string | null;
 }
 
 export interface OnlineCourse {
@@ -245,6 +247,8 @@ export interface CourseStructure {
 
 export interface ResourceListResponse {
   jobId: string;
+  courseTitle?: string | null;
+  courseName?: string | null;
   resources: ResourceListItem[];
   totalAnalizables?: number;
   noAnalizablesExternos?: number;
@@ -305,6 +309,8 @@ export interface AccessibilitySummary {
 
 export interface AccessibilityResponse {
   jobId: string;
+  courseTitle?: string | null;
+  courseName?: string | null;
   summary: AccessibilitySummary;
   resources: AccessibilityResource[];
 }
@@ -378,6 +384,8 @@ export interface ReviewFailResource {
 
 export interface ReviewSummary {
   jobId: string;
+  courseTitle?: string | null;
+  courseName?: string | null;
   totalResources: number;
   totalFailItems: number;
   lastUpdated: string;

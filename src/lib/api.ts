@@ -59,6 +59,10 @@ interface RawJobStatusResponse {
   message?: string;
   currentStep?: number;
   totalSteps?: number;
+  courseTitle?: string | null;
+  course_title?: string | null;
+  courseName?: string | null;
+  course_name?: string | null;
   errorCode?: string | null;
 }
 
@@ -1044,6 +1048,10 @@ function normalizeJobStatus(payload: RawJobStatusResponse): JobStatus {
     message: payload.message ?? buildStepMessage(payload.progress),
     currentStep,
     totalSteps,
+    courseTitle:
+      readString(payload.courseTitle) ?? readString(payload.course_title),
+    courseName:
+      readString(payload.courseName) ?? readString(payload.course_name),
   };
 }
 
@@ -1112,6 +1120,8 @@ function normalizeResourcesResponse(
   }
 
   const resources = payload.resources.map(normalizeResource);
+  const payloadRecord = readRecord(payload);
+  const accessRecord = readRecord(payloadRecord.access);
   const payloadWithLegacyStructure = payload as ResourceListResponse & {
     courseStructure?: CourseStructure | null;
   };
@@ -1122,6 +1132,16 @@ function normalizeResourcesResponse(
   return {
     ...payload,
     jobId: payload.jobId ?? jobId,
+    courseTitle:
+      readString(payloadRecord.courseTitle) ??
+      readString(payloadRecord.course_title) ??
+      readString(accessRecord.courseTitle) ??
+      readString(accessRecord.course_title),
+    courseName:
+      readString(payloadRecord.courseName) ??
+      readString(payloadRecord.course_name) ??
+      readString(accessRecord.courseName) ??
+      readString(accessRecord.course_name),
     resources,
     totalAnalizables: payload.totalAnalizables ?? resources.length,
     noAnalizablesExternos: payload.noAnalizablesExternos ?? 0,
@@ -1544,6 +1564,8 @@ function normalizeAccessibilitySummary(
 function emptyAccessibilityResponse(jobId: string): AccessibilityResponse {
   return {
     jobId,
+    courseTitle: null,
+    courseName: null,
     summary: {
       htmlResourcesAnalyzed: 0,
       pdfResourcesAnalyzed: 0,
@@ -1788,6 +1810,16 @@ function normalizeAccessibilityResponse(
       readString(root.jobId) ??
       readString(root.job_id) ??
       jobId,
+    courseTitle:
+      readString(response.courseTitle) ??
+      readString(response.course_title) ??
+      readString(root.courseTitle) ??
+      readString(root.course_title),
+    courseName:
+      readString(response.courseName) ??
+      readString(response.course_name) ??
+      readString(root.courseName) ??
+      readString(root.course_name),
     summary: normalizeAccessibilitySummary(
       root.summary ?? root,
       fallbackSummary,
@@ -1954,8 +1986,68 @@ export function saveChecklist(
   );
 }
 
-export function fetchSummary(jobId: string): Promise<ReviewSummary> {
-  return request<ReviewSummary>(`/jobs/${jobId}/summary`);
+function normalizeReviewSummary(
+  jobId: string,
+  payload: unknown,
+): ReviewSummary {
+  const root = readRecord(payload);
+  const executiveSummary = readRecord(root.executiveSummary);
+  const executiveSummarySnake = readRecord(root.executive_summary);
+  const reviewSession = readRecord(root.reviewSession);
+  const reviewSessionSnake = readRecord(root.review_session);
+  const normalizedReviewSession =
+    Object.keys(reviewSession).length > 0 ? reviewSession : reviewSessionSnake;
+
+  return {
+    ...(payload as ReviewSummary),
+    jobId: readString(root.jobId) ?? readString(root.job_id) ?? jobId,
+    courseTitle:
+      readString(executiveSummary.courseTitle) ??
+      readString(executiveSummary.course_title) ??
+      readString(executiveSummarySnake.courseTitle) ??
+      readString(executiveSummarySnake.course_title) ??
+      readString(root.courseTitle) ??
+      readString(root.course_title),
+    courseName:
+      readString(executiveSummary.courseName) ??
+      readString(executiveSummary.course_name) ??
+      readString(executiveSummarySnake.courseName) ??
+      readString(executiveSummarySnake.course_name) ??
+      readString(root.courseName) ??
+      readString(root.course_name),
+    totalResources:
+      readNumber(root.totalResources) ?? readNumber(root.total_resources) ?? 0,
+    totalFailItems:
+      readNumber(root.totalFailItems) ?? readNumber(root.total_fail_items) ?? 0,
+    lastUpdated:
+      readString(root.lastUpdated) ??
+      readString(root.last_updated) ??
+      new Date(0).toISOString(),
+    reviewSession: {
+      jobId,
+      status:
+        normalizedReviewSession.status === 'IN_PROGRESS' ||
+        normalizedReviewSession.status === 'COMPLETE' ||
+        normalizedReviewSession.status === 'NOT_STARTED'
+          ? normalizedReviewSession.status
+          : 'NOT_STARTED',
+      startedAt:
+        readString(normalizedReviewSession.startedAt) ??
+        readString(normalizedReviewSession.started_at),
+      updatedAt:
+        readString(normalizedReviewSession.updatedAt) ??
+        readString(normalizedReviewSession.updated_at) ??
+        new Date(0).toISOString(),
+    },
+    resources: Array.isArray(root.resources)
+      ? (root.resources as ReviewSummary['resources'])
+      : [],
+  };
+}
+
+export async function fetchSummary(jobId: string): Promise<ReviewSummary> {
+  const payload = await request<unknown>(`/jobs/${jobId}/summary`);
+  return normalizeReviewSummary(jobId, payload);
 }
 
 export function fetchReport(jobId: string): Promise<GeneratedReport> {

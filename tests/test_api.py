@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from docx import Document
 from pathlib import Path
+from pypdf import PdfReader
 from reportlab.pdfgen import canvas as pdf_canvas
 from zipfile import ZipFile
 
@@ -1221,6 +1222,12 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
     report_response = client.post(f"/api/jobs/{job_id}/report")
     assert report_response.status_code == 200, report_response.text
     report = report_response.json()
+    accessibility_response = client.get(f"/api/jobs/{job_id}/accessibility")
+    assert accessibility_response.status_code == 200, accessibility_response.text
+    accessibility = accessibility_response.json()
+    executive_response = client.get(f"/api/jobs/{job_id}/executive-summary")
+    assert executive_response.status_code == 200, executive_response.text
+    executive = executive_response.json()
 
     assert report["meta"]["jobId"] == job_id
     assert report["mode"] == {"key": "OFFLINE_IMSCC", "label": "OFFLINE IMSCC"}
@@ -1242,10 +1249,24 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
     assert report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"] == 1
     assert report["automaticAccessibilitySummary"]["failCount"] >= 1
     assert report["automaticAccessibilitySummary"]["warningCount"] >= 1
+    for metric_key in ("passCount", "failCount", "warningCount", "notApplicableCount", "errorCount", "incidentCount"):
+        assert report["automaticAccessibilitySummary"][metric_key] == accessibility["summary"][metric_key]
+    assert report["automaticAccessibilitySummary"]["incidentCount"] == (
+        report["automaticAccessibilitySummary"]["failCount"] + report["automaticAccessibilitySummary"]["errorCount"]
+    )
+    assert report["automaticAccessibilitySummary"]["resourcesAnalyzed"] == executive["summary"]["resourcesAnalyzed"]
+    assert report["automaticAccessibilitySummary"]["notAnalyzableResources"] == executive["summary"]["notAnalyzableResources"]
+    assert report["automaticAccessibilitySummary"]["metricsSource"] == "centralized"
+    assert report["automaticAccessibilitySummary"]["metricsVersion"] == "1.0"
     assert 0 <= report["executiveSummary"]["score"] <= 100
     assert report["executiveSummary"]["priority"] in {"alta", "media", "baja"}
     assert report["executiveSummary"]["resourcesDetected"] == 6
     assert report["executiveSummary"]["resourcesAnalyzed"] == 5
+    assert report["executiveSummary"]["score"] == executive["accessibilityScore"]
+    assert report["executiveSummary"]["incidentCount"] == executive["summary"]["incidentCount"]
+    assert report["executiveSummary"]["warningCount"] == executive["summary"]["warningCount"]
+    assert report["executiveSummary"]["metricsSource"] == executive["metricsSource"] == "centralized"
+    assert report["executiveSummary"]["metricsVersion"] == executive["metricsVersion"] == "1.0"
     assert len(report["executiveSummary"]["priorityRecommendations"]) == 3
     assert report["moduleScores"]
     assert report["moduleScores"][0]["resourcesAnalyzed"] == 5
@@ -1326,6 +1347,12 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
 
     word_document = Document(str(docx_path))
     paragraphs = [paragraph.text for paragraph in word_document.paragraphs if paragraph.text]
+    table_pairs = {
+        (row.cells[0].text, row.cells[1].text)
+        for table in word_document.tables
+        for row in table.rows
+        if len(row.cells) >= 2
+    }
     assert "Resumen ejecutivo" in paragraphs
     assert "Resumen de acceso" in paragraphs
     assert "Resumen de accesibilidad automática" in paragraphs
@@ -1345,6 +1372,12 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
     assert any("Vídeo de apoyo" in paragraph for paragraph in paragraphs)
     assert any("Notebook del laboratorio" in paragraph for paragraph in paragraphs)
     assert any("Los notebooks se analizan de forma estática" in paragraph for paragraph in paragraphs)
+    assert ("Incidencias (FAIL + ERROR)", str(executive["summary"]["incidentCount"])) in table_pairs
+    assert ("Correctos (PASS)", str(accessibility["summary"]["passCount"])) in table_pairs
+
+    pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf_path)).pages)
+    assert "Incidencias (FAIL + ERROR)" in pdf_text
+    assert str(executive["summary"]["incidentCount"]) in pdf_text
 
 
 def test_checklist_upsert_is_idempotent(client, test_settings) -> None:

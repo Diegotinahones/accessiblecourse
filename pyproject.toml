@@ -6,6 +6,7 @@ addopts = "--ignore=tests/test_imscc_parser.py"
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+exclude = [".vercel_python_packages"]
 
 [tool.ruff.lint]
 ignore = ["B008", "UP042"]

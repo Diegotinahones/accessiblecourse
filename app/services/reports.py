@@ -37,10 +37,16 @@ from app.models.entities import (
     utcnow,
 )
 from app.schemas import GeneratedReportResponse, ReportDownloads, ReportFailure, ReportGroup, ResourceResponse
+from app.services.access_analysis import build_access_summary
+from app.services.accessibility_metrics import (
+    CRITICAL_FAIL_CHECKS,
+    IMPORTANT_WARNING_CHECKS,
+    calculate_accessibility_metrics,
+    report_priority,
+)
 from app.services.catalog import SEVERITY_ORDER, get_item_severity
 from app.services.course_metadata import load_course_metadata, public_course_metadata
 from app.services.docx_accessibility import ensure_docx_accessibility_report
-from app.services.executive_summary import CRITICAL_FAIL_CHECKS, IMPORTANT_WARNING_CHECKS
 from app.services.html_accessibility import ensure_accessibility_report
 from app.services.notebook_accessibility import (
     NOTEBOOK_ANALYSIS_SCOPE_NOTE,
@@ -79,7 +85,7 @@ MEDIA_TYPES = {
     "json": "application/json",
 }
 
-AUTO_STATUS_ORDER = {"FAIL": 0, "WARNING": 1}
+AUTO_STATUS_ORDER = {"FAIL": 0, "ERROR": 1, "WARNING": 2}
 AUTO_NOT_ANALYZABLE_EXPLANATION = (
     "No se analizan automáticamente porque requieren autenticación externa, interacción humana "
     "o un tipo de análisis todavía no implementado."
@@ -87,7 +93,7 @@ AUTO_NOT_ANALYZABLE_EXPLANATION = (
 REPORT_NAVY = "002B45"
 REPORT_CYAN = "00A6B2"
 REPORT_BORDER = "C9D7DF"
-REPORT_PRIORITY_ORDER = {"alta": 0, "media": 1, "baja": 2}
+REPORT_PRIORITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "alta": 0, "media": 1, "baja": 2}
 REPORT_TECHNICAL_STATUSES = {"FAIL", "WARNING", "ERROR"}
 
 
@@ -382,18 +388,21 @@ def _is_notebook_candidate(item: Any) -> bool:
     return bool(core.contentAvailable or core.localPath or core.downloadable)
 
 
-def _build_access_summary_data(inventory_items: list[Any]) -> dict[str, int]:
+def _build_access_summary_data(job_id: str, inventory_items: list[Any]) -> dict[str, int]:
     main_items = [item for item in inventory_items if _is_main_item(item)]
-    relevant_items = [item for item in inventory_items if getattr(item, "analysis_category", "") != "TECHNICAL_IGNORED"]
+    central_summary = build_access_summary(
+        job_id=job_id,
+        resources=[item.model_dump(mode="python") for item in main_items],
+        progress=100,
+        status="done",
+    )
     return {
-        "resourcesDetected": len(main_items),
-        "resourcesAccessed": sum(1 for item in main_items if bool(getattr(item, "can_access", False))),
-        "downloadable": sum(1 for item in main_items if bool(getattr(item, "can_download", False))),
-        "noAccessible": sum(1 for item in main_items if _enum_value(getattr(item, "access_status", None)) == "NO_ACCEDE"),
-        "requiresSSO": sum(1 for item in relevant_items if _enum_value(getattr(item, "access_status", None)) == "REQUIERE_SSO"),
-        "requiresInteraction": sum(
-            1 for item in relevant_items if _enum_value(getattr(item, "access_status", None)) == "REQUIERE_INTERACCION"
-        ),
+        "resourcesDetected": int(central_summary["total"]),
+        "resourcesAccessed": int(central_summary["accessible"]),
+        "downloadable": int(central_summary["downloadable"]),
+        "noAccessible": int(central_summary["no_accede_count"]),
+        "requiresSSO": int(central_summary["requires_sso_count"]),
+        "requiresInteraction": int(central_summary["requires_interaction_count"]),
         "globalUnplaced": sum(1 for item in main_items if getattr(item, "section_type", None) == "global_unplaced"),
         "noAnalyzableExternal": sum(1 for item in inventory_items if _is_auxiliary_item(item)),
         "technicalIgnored": sum(
@@ -547,131 +556,6 @@ def _flatten_notebook_accessibility_resources(notebook_accessibility_report) -> 
     return flattened
 
 
-def _build_html_summary_data(inventory_items: list[Any], accessibility_report) -> dict[str, int]:
-    type_summary = accessibility_report.summary.byType.get("HTML")
-    return {
-        "resourcesDetected": sum(1 for item in inventory_items if _is_html_candidate(item)),
-        "resourcesAnalyzed": accessibility_report.summary.htmlResourcesAnalyzed,
-        "passCount": type_summary.passCount if type_summary else accessibility_report.summary.passCount,
-        "failCount": type_summary.failCount if type_summary else accessibility_report.summary.failCount,
-        "warningCount": type_summary.warningCount if type_summary else accessibility_report.summary.warningCount,
-        "notApplicableCount": type_summary.notApplicableCount if type_summary else accessibility_report.summary.notApplicableCount,
-        "errorCount": type_summary.errorCount if type_summary else accessibility_report.summary.errorCount,
-    }
-
-
-def _build_pdf_summary_data(inventory_items: list[Any], pdf_accessibility_report) -> dict[str, int]:
-    type_summary = pdf_accessibility_report.summary.byType.get("PDF")
-    return {
-        "resourcesDetected": sum(1 for item in inventory_items if _is_pdf_candidate(item)),
-        "resourcesAnalyzed": pdf_accessibility_report.summary.pdfResourcesAnalyzed,
-        "passCount": type_summary.passCount if type_summary else pdf_accessibility_report.summary.passCount,
-        "failCount": type_summary.failCount if type_summary else pdf_accessibility_report.summary.failCount,
-        "warningCount": type_summary.warningCount if type_summary else pdf_accessibility_report.summary.warningCount,
-        "notApplicableCount": type_summary.notApplicableCount
-        if type_summary
-        else pdf_accessibility_report.summary.notApplicableCount,
-        "errorCount": type_summary.errorCount if type_summary else pdf_accessibility_report.summary.errorCount,
-    }
-
-
-def _build_docx_summary_data(inventory_items: list[Any], docx_accessibility_report) -> dict[str, int]:
-    type_summary = docx_accessibility_report.summary.byType.get("DOCX")
-    return {
-        "resourcesDetected": sum(1 for item in inventory_items if _is_docx_candidate(item)),
-        "resourcesAnalyzed": docx_accessibility_report.summary.docxResourcesAnalyzed,
-        "passCount": type_summary.passCount if type_summary else docx_accessibility_report.summary.passCount,
-        "failCount": type_summary.failCount if type_summary else docx_accessibility_report.summary.failCount,
-        "warningCount": type_summary.warningCount if type_summary else docx_accessibility_report.summary.warningCount,
-        "notApplicableCount": type_summary.notApplicableCount
-        if type_summary
-        else docx_accessibility_report.summary.notApplicableCount,
-        "errorCount": type_summary.errorCount if type_summary else docx_accessibility_report.summary.errorCount,
-    }
-
-
-def _build_video_summary_data(inventory_items: list[Any], video_accessibility_report) -> dict[str, int]:
-    type_summary = video_accessibility_report.summary.byType.get("VIDEO")
-    return {
-        "resourcesDetected": sum(1 for item in inventory_items if _is_video_candidate(item)),
-        "resourcesAnalyzed": video_accessibility_report.summary.videoResourcesAnalyzed,
-        "passCount": type_summary.passCount if type_summary else 0,
-        "failCount": type_summary.failCount if type_summary else 0,
-        "warningCount": type_summary.warningCount if type_summary else 0,
-        "notApplicableCount": type_summary.notApplicableCount if type_summary else 0,
-        "errorCount": type_summary.errorCount if type_summary else 0,
-    }
-
-
-def _build_notebook_summary_data(inventory_items: list[Any], notebook_accessibility_report) -> dict[str, int]:
-    type_summary = notebook_accessibility_report.summary.byType.get("NOTEBOOK")
-    return {
-        "resourcesDetected": sum(1 for item in inventory_items if _is_notebook_candidate(item)),
-        "resourcesAnalyzed": notebook_accessibility_report.summary.notebookResourcesAnalyzed,
-        "passCount": type_summary.passCount if type_summary else 0,
-        "failCount": type_summary.failCount if type_summary else 0,
-        "warningCount": type_summary.warningCount if type_summary else 0,
-        "notApplicableCount": type_summary.notApplicableCount if type_summary else 0,
-        "errorCount": type_summary.errorCount if type_summary else 0,
-    }
-
-
-def _build_automatic_summary_data(
-    html_summary: dict[str, int],
-    pdf_summary: dict[str, int],
-    docx_summary: dict[str, int],
-    video_summary: dict[str, int],
-    notebook_summary: dict[str, int],
-) -> dict[str, int]:
-    return {
-        "htmlResourcesDetected": html_summary["resourcesDetected"],
-        "htmlResourcesAnalyzed": html_summary["resourcesAnalyzed"],
-        "pdfResourcesDetected": pdf_summary["resourcesDetected"],
-        "pdfResourcesAnalyzed": pdf_summary["resourcesAnalyzed"],
-        "wordResourcesDetected": docx_summary["resourcesDetected"],
-        "wordResourcesAnalyzed": docx_summary["resourcesAnalyzed"],
-        "videoResourcesDetected": video_summary["resourcesDetected"],
-        "videoResourcesAnalyzed": video_summary["resourcesAnalyzed"],
-        "notebookResourcesDetected": notebook_summary["resourcesDetected"],
-        "notebookResourcesAnalyzed": notebook_summary["resourcesAnalyzed"],
-        "passCount": (
-            html_summary["passCount"]
-            + pdf_summary["passCount"]
-            + docx_summary["passCount"]
-            + video_summary["passCount"]
-            + notebook_summary["passCount"]
-        ),
-        "failCount": (
-            html_summary["failCount"]
-            + pdf_summary["failCount"]
-            + docx_summary["failCount"]
-            + video_summary["failCount"]
-            + notebook_summary["failCount"]
-        ),
-        "warningCount": (
-            html_summary["warningCount"]
-            + pdf_summary["warningCount"]
-            + docx_summary["warningCount"]
-            + video_summary["warningCount"]
-            + notebook_summary["warningCount"]
-        ),
-        "notApplicableCount": (
-            html_summary["notApplicableCount"]
-            + pdf_summary["notApplicableCount"]
-            + docx_summary["notApplicableCount"]
-            + video_summary["notApplicableCount"]
-            + notebook_summary["notApplicableCount"]
-        ),
-        "errorCount": (
-            html_summary["errorCount"]
-            + pdf_summary["errorCount"]
-            + docx_summary["errorCount"]
-            + video_summary["errorCount"]
-            + notebook_summary["errorCount"]
-        ),
-    }
-
-
 def _build_key_issues(
     items_by_id: dict[str, Any],
     accessibility_report,
@@ -681,6 +565,7 @@ def _build_key_issues(
     notebook_accessibility_report,
 ) -> list[dict[str, str | None]]:
     issues: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str, str, str]] = set()
     for resource_type, resource_groups in (
         ("HTML", _flatten_accessibility_resources(accessibility_report)),
         ("PDF", _flatten_pdf_accessibility_resources(pdf_accessibility_report)),
@@ -692,8 +577,12 @@ def _build_key_issues(
             item = items_by_id.get(resource.resourceId)
             course_path = _item_course_path(item) if item is not None else module_title
             for check in resource.checks:
-                if check.status not in {"FAIL", "WARNING"}:
+                if check.status not in {"FAIL", "ERROR", "WARNING"}:
                     continue
+                dedupe_key = (resource_type, resource.resourceId, check.checkId, check.status)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
                 issues.append(
                     {
                         "coursePath": course_path,
@@ -738,13 +627,16 @@ def _build_issue_summary(key_issues: list[dict[str, Any]]) -> list[dict[str, Any
                 "status": issue["status"],
                 "resourceCount": 0,
                 "resources": [],
+                "_resourceIds": set(),
                 "recommendation": issue["recommendation"],
             },
         )
-        group["resourceCount"] += 1
+        group["_resourceIds"].add(issue["resourceId"])
         group["resources"].append(issue["resourceTitle"])
 
     for group in grouped.values():
+        group["resourceCount"] = len(group["_resourceIds"])
+        del group["_resourceIds"]
         group["resources"] = sorted(set(group["resources"]))[:6]
 
     return sorted(
@@ -868,12 +760,167 @@ def _main_issue_from_checks(checks: list[Any]) -> str | None:
     return None
 
 
-def _score_fields(checks: list[dict[str, Any]]) -> dict[str, Any]:
+# Legacy fallbacks are only used while normalizing reports persisted before
+# centralized metrics existed. New report generation consumes accessibility_metrics.
+def _legacy_score_fields(checks: list[dict[str, Any]]) -> dict[str, Any]:
     score = _score_from_checks(checks)
     return {
         "score": score,
         "priority": _priority_from_score(score, checks),
         "mainIssue": _main_issue_from_checks(checks),
+    }
+
+
+def _legacy_resource_score_rows(
+    html_resources: list[dict[str, Any]],
+    pdf_resources: list[dict[str, Any]],
+    word_resources: list[dict[str, Any]],
+    video_resources: list[dict[str, Any]],
+    notebook_resources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for resource_type, resources in (
+        ("HTML", html_resources),
+        ("PDF", pdf_resources),
+        ("WORD", word_resources),
+        ("VIDEO", video_resources),
+        ("NOTEBOOK", notebook_resources),
+    ):
+        for resource in resources:
+            checks = _deduped_check_dicts(resource.get("checks", []))
+            counts = _check_counts(checks)
+            rows.append(
+                {
+                    "resourceId": resource["resourceId"],
+                    "title": resource["title"],
+                    "type": resource_type,
+                    "typeLabel": _auto_resource_type_label(resource_type),
+                    "moduleTitle": resource.get("moduleTitle") or resource.get("coursePath") or "Raíz del curso",
+                    "coursePath": resource.get("coursePath") or resource.get("moduleTitle") or "Raíz del curso",
+                    "score": int(resource.get("score", _score_from_checks(checks))),
+                    "priority": str(resource.get("priority") or _priority_from_score(_score_from_checks(checks), checks)),
+                    "mainIssue": resource.get("mainIssue") or "Sin incidencias FAIL/WARNING",
+                    "failCount": counts["FAIL"],
+                    "warningCount": counts["WARNING"],
+                    "errorCount": counts["ERROR"],
+                }
+            )
+
+    return sorted(
+        rows,
+        key=lambda item: (
+            REPORT_PRIORITY_ORDER.get(str(item["priority"]), 9),
+            int(item["score"]),
+            str(item["moduleTitle"]).lower(),
+            str(item["title"]).lower(),
+        ),
+    )
+
+
+def _legacy_module_score_rows(resource_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in resource_scores:
+        grouped[str(row["moduleTitle"])].append(row)
+
+    module_rows: list[dict[str, Any]] = []
+    for module_title, rows in grouped.items():
+        score = round(sum(int(row["score"]) for row in rows) / len(rows)) if rows else 0
+        priority = _legacy_aggregate_priority(score, rows)
+        issues = [
+            str(row["mainIssue"])
+            for row in sorted(rows, key=lambda item: (int(item["score"]), str(item["title"]).lower()))
+            if row.get("mainIssue") and row["mainIssue"] != "Sin incidencias FAIL/WARNING"
+        ]
+        module_rows.append(
+            {
+                "moduleTitle": module_title,
+                "score": score,
+                "priority": priority,
+                "resourcesAnalyzed": len(rows),
+                "mainIssues": list(dict.fromkeys(issues))[:3] or ["Sin incidencias principales"],
+            }
+        )
+
+    return sorted(
+        module_rows,
+        key=lambda item: (
+            REPORT_PRIORITY_ORDER.get(str(item["priority"]), 9),
+            int(item["score"]),
+            str(item["moduleTitle"]).lower(),
+        ),
+    )
+
+
+def _legacy_aggregate_priority(score: int, resource_scores: list[dict[str, Any]]) -> str:
+    priorities = {str(row.get("priority")) for row in resource_scores}
+    if score < 60 or "alta" in priorities:
+        return "alta"
+    if score < 80 or "media" in priorities:
+        return "media"
+    return "baja"
+
+
+def _legacy_global_score(resource_scores: list[dict[str, Any]], access_summary: dict[str, int]) -> int:
+    detected = int(access_summary.get("resourcesDetected", 0))
+    if not resource_scores:
+        return 0 if detected else 100
+    return round(sum(int(row["score"]) for row in resource_scores) / len(resource_scores))
+
+
+def _legacy_main_problem_labels(issue_summary: list[dict[str, Any]]) -> list[str]:
+    labels = [
+        f"{_auto_resource_type_label(issue['resourceType'])}: {issue['checkTitle']} "
+        f"({issue['status']}, {issue['resourceCount']} recurso(s))"
+        for issue in issue_summary[:5]
+    ]
+    return labels or ["No se han detectado incidencias FAIL/WARNING en los checks automáticos."]
+
+
+def _legacy_executive_recommendations(issue_summary: list[dict[str, Any]], skipped_count: int) -> list[str]:
+    recommendations: list[str] = []
+    for issue in issue_summary:
+        recommendation = str(issue.get("recommendation") or "").strip()
+        if recommendation and recommendation not in recommendations:
+            recommendations.append(recommendation)
+        if len(recommendations) >= 3:
+            return recommendations
+
+    defaults = [
+        "Corregir primero los checks FAIL que afectan a más recursos o a módulos completos.",
+        "Revisar manualmente los recursos no analizables y documentar la evidencia obtenida.",
+        "Regenerar el informe después de aplicar cambios para verificar la mejora de score.",
+    ]
+    if skipped_count == 0:
+        defaults[1] = "Mantener una revisión manual breve para validar calidad pedagógica y experiencia de uso."
+    for recommendation in defaults:
+        if recommendation not in recommendations:
+            recommendations.append(recommendation)
+        if len(recommendations) >= 3:
+            break
+    return recommendations[:3]
+
+
+def _legacy_build_executive_summary(
+    access_summary: dict[str, int],
+    resource_scores: list[dict[str, Any]],
+    issue_summary: list[dict[str, Any]],
+    skipped_resources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    score = _legacy_global_score(resource_scores, access_summary)
+    main_problems = _legacy_main_problem_labels(issue_summary)
+    return {
+        "score": score,
+        "priority": _legacy_aggregate_priority(score, resource_scores),
+        "resourcesDetected": int(access_summary.get("resourcesDetected", 0)),
+        "resourcesAnalyzed": len(resource_scores),
+        "notAutomaticallyAnalyzable": len(skipped_resources),
+        "incidentCount": 0,
+        "warningCount": 0,
+        "metricsSource": None,
+        "metricsVersion": None,
+        "mainProblems": main_problems,
+        "priorityRecommendations": _legacy_executive_recommendations(issue_summary, len(skipped_resources)),
+        "narrative": _executive_narrative(main_problems),
     }
 
 
@@ -901,7 +948,9 @@ def _build_html_resource_details(items_by_id: dict[str, Any], accessibility_repo
                 "accessStatus": resource.accessStatus,
                 "overallStatus": overall_status,
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
-                **_score_fields(checks),
+                "score": None,
+                "priority": None,
+                "mainIssue": None,
                 "checks": checks,
             }
         )
@@ -932,7 +981,9 @@ def _build_pdf_resource_details(items_by_id: dict[str, Any], pdf_accessibility_r
                 "accessStatus": resource.accessStatus,
                 "overallStatus": overall_status,
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
-                **_score_fields(checks),
+                "score": None,
+                "priority": None,
+                "mainIssue": None,
                 "checks": checks,
             }
         )
@@ -963,7 +1014,9 @@ def _build_docx_resource_details(items_by_id: dict[str, Any], docx_accessibility
                 "accessStatus": resource.accessStatus,
                 "overallStatus": overall_status,
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
-                **_score_fields(checks),
+                "score": None,
+                "priority": None,
+                "mainIssue": None,
                 "checks": checks,
             }
         )
@@ -996,7 +1049,9 @@ def _build_video_resource_details(items_by_id: dict[str, Any], video_accessibili
                 "overallStatus": overall_status,
                 "provider": provider or "No identificado",
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
-                **_score_fields(checks),
+                "score": None,
+                "priority": None,
+                "mainIssue": None,
                 "checks": checks,
             }
         )
@@ -1027,7 +1082,9 @@ def _build_notebook_resource_details(items_by_id: dict[str, Any], notebook_acces
                 "accessStatus": resource.accessStatus,
                 "overallStatus": overall_status,
                 "summarized": all(check["status"] in {"PASS", "NOT_APPLICABLE"} for check in checks),
-                **_score_fields(checks),
+                "score": None,
+                "priority": None,
+                "mainIssue": None,
                 "checks": checks,
             }
         )
@@ -1083,123 +1140,47 @@ def _build_skipped_resources(inventory_items: list[Any], analyzed_ids: set[str])
     return sorted(skipped, key=lambda item: (str(item["coursePath"]).lower(), str(item["title"]).lower()))
 
 
-def _resource_score_rows(
-    html_resources: list[dict[str, Any]],
-    pdf_resources: list[dict[str, Any]],
-    word_resources: list[dict[str, Any]],
-    video_resources: list[dict[str, Any]],
-    notebook_resources: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for resource_type, resources in (
-        ("HTML", html_resources),
-        ("PDF", pdf_resources),
-        ("WORD", word_resources),
-        ("VIDEO", video_resources),
-        ("NOTEBOOK", notebook_resources),
-    ):
+def _deduped_check_dicts(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for check in checks:
+        key = (str(check.get("checkId") or ""), str(check.get("status") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(check)
+    return deduped
+
+
+def _apply_metric_scores_to_resource_details(
+    metrics: dict[str, Any],
+    resource_collections: list[list[dict[str, Any]]],
+) -> None:
+    scores_by_id = metrics.get("reportResourceScoreById", {})
+    if not isinstance(scores_by_id, dict):
+        return
+    for resources in resource_collections:
         for resource in resources:
-            checks = resource.get("checks", [])
-            counts = _check_counts(checks)
-            rows.append(
-                {
-                    "resourceId": resource["resourceId"],
-                    "title": resource["title"],
-                    "type": resource_type,
-                    "typeLabel": _auto_resource_type_label(resource_type),
-                    "moduleTitle": resource.get("moduleTitle") or resource.get("coursePath") or "Raíz del curso",
-                    "coursePath": resource.get("coursePath") or resource.get("moduleTitle") or "Raíz del curso",
-                    "score": int(resource.get("score", _score_from_checks(checks))),
-                    "priority": str(resource.get("priority") or _priority_from_score(_score_from_checks(checks), checks)),
-                    "mainIssue": resource.get("mainIssue") or "Sin incidencias FAIL/WARNING",
-                    "failCount": counts["FAIL"],
-                    "warningCount": counts["WARNING"],
-                    "errorCount": counts["ERROR"],
-                }
-            )
-
-    return sorted(
-        rows,
-        key=lambda item: (
-            REPORT_PRIORITY_ORDER.get(str(item["priority"]), 9),
-            int(item["score"]),
-            str(item["moduleTitle"]).lower(),
-            str(item["title"]).lower(),
-        ),
-    )
+            score = scores_by_id.get(str(resource["resourceId"]))
+            if not isinstance(score, dict):
+                continue
+            resource["score"] = score.get("score")
+            resource["priority"] = score.get("priority")
+            resource["mainIssue"] = score.get("mainIssue")
 
 
-def _module_score_rows(resource_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in resource_scores:
-        grouped[str(row["moduleTitle"])].append(row)
-
-    module_rows: list[dict[str, Any]] = []
-    for module_title, rows in grouped.items():
-        score = round(sum(int(row["score"]) for row in rows) / len(rows)) if rows else 0
-        priority = _aggregate_priority(score, rows)
-        issues = [
-            str(row["mainIssue"])
-            for row in sorted(rows, key=lambda item: (int(item["score"]), str(item["title"]).lower()))
-            if row.get("mainIssue") and row["mainIssue"] != "Sin incidencias FAIL/WARNING"
-        ]
-        module_rows.append(
-            {
-                "moduleTitle": module_title,
-                "score": score,
-                "priority": priority,
-                "resourcesAnalyzed": len(rows),
-                "mainIssues": list(dict.fromkeys(issues))[:3] or ["Sin incidencias principales"],
-            }
-        )
-
-    return sorted(
-        module_rows,
-        key=lambda item: (
-            REPORT_PRIORITY_ORDER.get(str(item["priority"]), 9),
-            int(item["score"]),
-            str(item["moduleTitle"]).lower(),
-        ),
-    )
+def _build_main_problem_labels_from_top_issues(top_issues: list[dict[str, Any]]) -> list[str]:
+    labels = [
+        f"{_auto_resource_type_label(issue['type'])}: {issue['checkTitle']} ({issue['count']} recurso(s))"
+        for issue in top_issues[:5]
+    ]
+    return labels or ["No se han detectado incidencias FAIL/ERROR/WARNING en el análisis automático."]
 
 
-def _aggregate_priority(score: int, resource_scores: list[dict[str, Any]]) -> str:
-    priorities = {str(row.get("priority")) for row in resource_scores}
-    if score < 60 or "alta" in priorities:
-        return "alta"
-    if score < 80 or "media" in priorities:
-        return "media"
-    return "baja"
-
-
-def _global_score(resource_scores: list[dict[str, Any]], access_summary: dict[str, int]) -> int:
-    detected = int(access_summary.get("resourcesDetected", 0))
-    if not resource_scores:
-        return 0 if detected else 100
-    return round(sum(int(row["score"]) for row in resource_scores) / len(resource_scores))
-
-
-def _build_main_problem_labels(issue_summary: list[dict[str, Any]]) -> list[str]:
-    labels = []
-    for issue in issue_summary[:5]:
-        labels.append(
-            f"{_auto_resource_type_label(issue['resourceType'])}: {issue['checkTitle']} "
-            f"({issue['status']}, {issue['resourceCount']} recurso(s))"
-        )
-    return labels or ["No se han detectado incidencias FAIL/WARNING en el análisis automático."]
-
-
-def _executive_recommendations(issue_summary: list[dict[str, Any]], skipped_count: int) -> list[str]:
-    recommendations = []
-    for issue in issue_summary:
-        recommendation = str(issue.get("recommendation") or "").strip()
-        if recommendation and recommendation not in recommendations:
-            recommendations.append(recommendation)
-        if len(recommendations) == 3:
-            return recommendations
-
+def _executive_recommendations_from_central(top_recommendations: list[str], skipped_count: int) -> list[str]:
+    recommendations = [recommendation for recommendation in top_recommendations if recommendation]
     defaults = [
-        "Corregir primero los checks FAIL que afectan a más recursos o a módulos completos.",
+        "Corregir primero los checks FAIL o ERROR que afectan a más recursos o a módulos completos.",
         "Revisar manualmente los recursos no analizables y documentar la evidencia obtenida.",
         "Regenerar el informe después de aplicar cambios para verificar la mejora de score.",
     ]
@@ -1208,7 +1189,7 @@ def _executive_recommendations(issue_summary: list[dict[str, Any]], skipped_coun
     for recommendation in defaults:
         if recommendation not in recommendations:
             recommendations.append(recommendation)
-        if len(recommendations) == 3:
+        if len(recommendations) >= 3:
             break
     return recommendations[:3]
 
@@ -1220,22 +1201,24 @@ def _executive_narrative(main_problems: list[str]) -> str:
     return f"Las principales barreras detectadas están relacionadas con {compact}."
 
 
-def _build_executive_summary(
-    access_summary: dict[str, int],
-    resource_scores: list[dict[str, Any]],
-    issue_summary: list[dict[str, Any]],
-    skipped_resources: list[dict[str, Any]],
-) -> dict[str, Any]:
-    score = _global_score(resource_scores, access_summary)
-    main_problems = _build_main_problem_labels(issue_summary)
+def _build_report_executive_summary(metrics: dict[str, Any]) -> dict[str, Any]:
+    main_problems = _build_main_problem_labels_from_top_issues(metrics.get("topIssues", []))
+    not_analyzable_resources = int(metrics.get("notAnalyzableResources") or 0)
     return {
-        "score": score,
-        "priority": _aggregate_priority(score, resource_scores),
-        "resourcesDetected": int(access_summary.get("resourcesDetected", 0)),
-        "resourcesAnalyzed": len(resource_scores),
-        "notAutomaticallyAnalyzable": len(skipped_resources),
+        "score": metrics.get("accessibilityScore"),
+        "priority": report_priority(str(metrics.get("priority") or "NOT_SCORED")),
+        "resourcesDetected": int(metrics.get("resourcesDetected") or 0),
+        "resourcesAnalyzed": int(metrics.get("resourcesAnalyzed") or 0),
+        "notAutomaticallyAnalyzable": not_analyzable_resources,
+        "incidentCount": int(metrics.get("incidentCount") or 0),
+        "warningCount": int(metrics.get("warningCount") or 0),
+        "metricsSource": metrics.get("metricsSource"),
+        "metricsVersion": metrics.get("metricsVersion"),
         "mainProblems": main_problems,
-        "priorityRecommendations": _executive_recommendations(issue_summary, len(skipped_resources)),
+        "priorityRecommendations": _executive_recommendations_from_central(
+            metrics.get("topRecommendations", []),
+            not_analyzable_resources,
+        ),
         "narrative": _executive_narrative(main_problems),
     }
 
@@ -1343,7 +1326,7 @@ def _build_report_payload(
     _ensure_report_ready(session, settings, job_id)
 
     inventory_items = load_inventory_file(settings, job_id)
-    accessibility_report = _ensure_accessibility_data(
+    _ensure_accessibility_data(
         settings,
         job_id,
         inventory_items,
@@ -1351,7 +1334,7 @@ def _build_report_payload(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
-    pdf_accessibility_report = _ensure_pdf_accessibility_data(
+    _ensure_pdf_accessibility_data(
         settings,
         job_id,
         inventory_items,
@@ -1359,7 +1342,7 @@ def _build_report_payload(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
-    docx_accessibility_report = _ensure_docx_accessibility_data(
+    _ensure_docx_accessibility_data(
         settings,
         job_id,
         inventory_items,
@@ -1367,7 +1350,7 @@ def _build_report_payload(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
-    video_accessibility_report = _ensure_video_accessibility_data(
+    _ensure_video_accessibility_data(
         settings,
         job_id,
         inventory_items,
@@ -1375,7 +1358,7 @@ def _build_report_payload(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
-    notebook_accessibility_report = _ensure_notebook_accessibility_data(
+    combined_accessibility_report = _ensure_notebook_accessibility_data(
         settings,
         job_id,
         inventory_items,
@@ -1391,46 +1374,41 @@ def _build_report_payload(
     course_title = _resolve_course_title(session, settings, job_id)
     course_metadata = public_course_metadata(load_course_metadata(settings, job_id), fallback_title=course_title)
     mode = _resolve_mode(session, job_id, inventory_items)
-    access_summary = _build_access_summary_data(inventory_items)
-    html_summary = _build_html_summary_data(inventory_items, accessibility_report)
-    pdf_summary = _build_pdf_summary_data(inventory_items, pdf_accessibility_report)
-    docx_summary = _build_docx_summary_data(inventory_items, docx_accessibility_report)
-    video_summary = _build_video_summary_data(inventory_items, video_accessibility_report)
-    notebook_summary = _build_notebook_summary_data(inventory_items, notebook_accessibility_report)
-    automatic_summary = _build_automatic_summary_data(
-        html_summary,
-        pdf_summary,
-        docx_summary,
-        video_summary,
-        notebook_summary,
+    metrics = calculate_accessibility_metrics(
+        job_id=job_id,
+        inventory_items=inventory_items,
+        accessibility_report=combined_accessibility_report,
     )
+    access_summary = _build_access_summary_data(job_id, inventory_items)
+    access_summary.update(metrics["accessSummary"])
+    html_summary = metrics["reportTypeSummaries"]["HTML"]
+    pdf_summary = metrics["reportTypeSummaries"]["PDF"]
+    docx_summary = metrics["reportTypeSummaries"]["WORD"]
+    video_summary = metrics["reportTypeSummaries"]["VIDEO"]
+    notebook_summary = metrics["reportTypeSummaries"]["NOTEBOOK"]
+    automatic_summary = metrics["automaticSummary"]
     key_issues = _build_key_issues(
         items_by_id,
-        accessibility_report,
-        pdf_accessibility_report,
-        docx_accessibility_report,
-        video_accessibility_report,
-        notebook_accessibility_report,
+        combined_accessibility_report,
+        combined_accessibility_report,
+        combined_accessibility_report,
+        combined_accessibility_report,
+        combined_accessibility_report,
     )
     issue_summary = _build_issue_summary(key_issues)
-    html_resources = _build_html_resource_details(items_by_id, accessibility_report)
-    pdf_resources = _build_pdf_resource_details(items_by_id, pdf_accessibility_report)
-    docx_resources = _build_docx_resource_details(items_by_id, docx_accessibility_report)
-    video_resources = _build_video_resource_details(items_by_id, video_accessibility_report)
-    notebook_resources = _build_notebook_resource_details(items_by_id, notebook_accessibility_report)
-    analyzed_ids = {
-        resource["resourceId"]
-        for resource in html_resources + pdf_resources + docx_resources + video_resources + notebook_resources
-    }
-    skipped_resources = _build_skipped_resources(inventory_items, analyzed_ids)
-    resource_scores = _resource_score_rows(
-        html_resources,
-        pdf_resources,
-        docx_resources,
-        video_resources,
-        notebook_resources,
+    html_resources = _build_html_resource_details(items_by_id, combined_accessibility_report)
+    pdf_resources = _build_pdf_resource_details(items_by_id, combined_accessibility_report)
+    docx_resources = _build_docx_resource_details(items_by_id, combined_accessibility_report)
+    video_resources = _build_video_resource_details(items_by_id, combined_accessibility_report)
+    notebook_resources = _build_notebook_resource_details(items_by_id, combined_accessibility_report)
+    _apply_metric_scores_to_resource_details(
+        metrics,
+        [html_resources, pdf_resources, docx_resources, video_resources, notebook_resources],
     )
-    module_scores = _module_score_rows(resource_scores)
+    analyzed_ids = set(metrics.get("analyzedResourceIds", []))
+    skipped_resources = _build_skipped_resources(inventory_items, analyzed_ids)
+    resource_scores = metrics["reportResourceScores"]
+    module_scores = metrics["reportModuleScores"]
 
     routes, resource_sections, total_fails, total_pending = _build_manual_review_sections(
         session,
@@ -1476,7 +1454,7 @@ def _build_report_payload(
         "mode": mode,
         "accessSummary": access_summary,
         "automaticAccessibilitySummary": automatic_summary,
-        "executiveSummary": _build_executive_summary(access_summary, resource_scores, issue_summary, skipped_resources),
+        "executiveSummary": _build_report_executive_summary(metrics),
         "moduleScores": module_scores,
         "resourceScores": resource_scores,
         "htmlAccessibilitySummary": html_summary,
@@ -1570,6 +1548,8 @@ def _auto_resource_type_label(value: Any) -> str:
     normalized = str(value or "").upper()
     if normalized in {"DOCX", "WORD"}:
         return "Word"
+    if normalized in {"HTML", "WEB"}:
+        return "HTML"
     if normalized == "VIDEO":
         return "Vídeo"
     if normalized == "NOTEBOOK":
@@ -1578,7 +1558,7 @@ def _auto_resource_type_label(value: Any) -> str:
 
 
 def _compact_detail_recommendation(check: dict[str, Any]) -> str:
-    if check.get("status") in {"FAIL", "WARNING"}:
+    if check.get("status") in {"FAIL", "ERROR", "WARNING"}:
         return "Ver recomendación en el resumen agrupado."
     return str(check.get("recommendation") or "")
 
@@ -1593,8 +1573,20 @@ def _technical_checks(resource: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _priority_label(value: Any) -> str:
-    normalized = str(value or "").lower()
-    return {"alta": "Alta", "media": "Media", "baja": "Baja"}.get(normalized, str(value or "-"))
+    normalized = str(value or "").upper()
+    return {
+        "HIGH": "Alta",
+        "MEDIUM": "Media",
+        "LOW": "Baja",
+        "NOT_SCORED": "Sin puntuación",
+        "ALTA": "Alta",
+        "MEDIA": "Media",
+        "BAJA": "Baja",
+    }.get(normalized, str(value or "-"))
+
+
+def _format_score(value: Any) -> str:
+    return "Sin puntuación" if value is None else f"{value}/100"
 
 
 def _append_docx_technical_resources(
@@ -1616,7 +1608,7 @@ def _append_docx_technical_resources(
         document.add_heading(resource["title"], level=2)
         metadata = (
             f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-            f"Score: {resource.get('score', 0)}/100 | Prioridad: {_priority_label(resource.get('priority'))} | "
+            f"Score: {_format_score(resource.get('score'))} | Prioridad: {_priority_label(resource.get('priority'))} | "
             f"Estado de acceso: {resource['accessStatus']}"
         )
         if resource.get("provider"):
@@ -1663,7 +1655,7 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
     document.add_paragraph(f"Job ID: {report['meta']['jobId']}")
     score_paragraph = document.add_paragraph()
     score_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    score_run = score_paragraph.add_run(f"{executive['score']}/100")
+    score_run = score_paragraph.add_run(_format_score(executive["score"]))
     score_run.bold = True
     score_run.font.size = Pt(30)
     score_run.font.color.rgb = RGBColor(0, 43, 69)
@@ -1679,7 +1671,7 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
     _append_docx_summary_table(
         document,
         [
-            ("Puntuación de accesibilidad analizada", f"{executive['score']}/100"),
+            ("Puntuación de accesibilidad analizada", _format_score(executive["score"])),
             ("Prioridad global", _priority_label(executive["priority"])),
             ("Recursos detectados", str(executive["resourcesDetected"])),
             ("Recursos analizados", str(executive["resourcesAnalyzed"])),
@@ -1721,10 +1713,11 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
             ("Recursos de vídeo analizados", str(report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"])),
             ("Recursos Notebook detectados", str(report["automaticAccessibilitySummary"]["notebookResourcesDetected"])),
             ("Recursos Notebook analizados", str(report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"])),
-            ("Total PASS", str(report["automaticAccessibilitySummary"]["passCount"])),
+            ("Incidencias (FAIL + ERROR)", str(report["automaticAccessibilitySummary"]["incidentCount"])),
+            ("Correctos (PASS)", str(report["automaticAccessibilitySummary"]["passCount"])),
             ("Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])),
-            ("Total WARNING", str(report["automaticAccessibilitySummary"]["warningCount"])),
-            ("Total NOT_APPLICABLE", str(report["automaticAccessibilitySummary"]["notApplicableCount"])),
+            ("Avisos (WARNING)", str(report["automaticAccessibilitySummary"]["warningCount"])),
+            ("No aplicables (NOT_APPLICABLE)", str(report["automaticAccessibilitySummary"]["notApplicableCount"])),
             ("Total ERROR", str(report["automaticAccessibilitySummary"]["errorCount"])),
         ],
     )
@@ -1737,7 +1730,7 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
             [
                 [
                     row["moduleTitle"],
-                    f"{row['score']}/100",
+                    _format_score(row["score"]),
                     _priority_label(row["priority"]),
                     row["resourcesAnalyzed"],
                     _clip_text("; ".join(row["mainIssues"]), 180),
@@ -1758,7 +1751,7 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
                     row["title"],
                     row["typeLabel"],
                     row["moduleTitle"],
-                    f"{row['score']}/100",
+                    _format_score(row["score"]),
                     _priority_label(row["priority"]),
                     _clip_text(row["mainIssue"], 160),
                 ]
@@ -1921,7 +1914,7 @@ def _append_pdf_technical_resources(
         story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
         metadata = (
             f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
-            f"Score: {resource.get('score', 0)}/100 | Prioridad: {_priority_label(resource.get('priority'))} | "
+            f"Score: {_format_score(resource.get('score'))} | Prioridad: {_priority_label(resource.get('priority'))} | "
             f"Estado de acceso: {resource['accessStatus']}"
         )
         if resource.get("provider"):
@@ -1999,7 +1992,7 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
         _pdf_paragraph("Informe de accesibilidad", styles["CoverTitle"]),
         _pdf_paragraph(f"{brand_name} · {report['meta']['courseTitle'] or report['meta']['jobId']}", styles["CoverSubtitle"]),
         Spacer(1, 0.4 * cm),
-        _pdf_paragraph(f"{executive['score']}/100", styles["Score"]),
+        _pdf_paragraph(_format_score(executive["score"]), styles["Score"]),
         _pdf_paragraph(f"Prioridad global: {_priority_label(executive['priority'])}", styles["CoverSubtitle"]),
         Spacer(1, 0.5 * cm),
         _pdf_paragraph(f"Modo: {report['mode']['label']}", styles["Normal"]),
@@ -2015,7 +2008,7 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
         story,
         [
             ["Indicador", "Valor"],
-            ["Puntuación de accesibilidad analizada", f"{executive['score']}/100"],
+            ["Puntuación de accesibilidad analizada", _format_score(executive["score"])],
             ["Prioridad global", _priority_label(executive["priority"])],
             ["Recursos detectados", str(executive["resourcesDetected"])],
             ["Recursos analizados", str(executive["resourcesAnalyzed"])],
@@ -2059,10 +2052,11 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
             ["Recursos de vídeo analizados", str(report["automaticAccessibilitySummary"]["videoResourcesAnalyzed"])],
             ["Recursos Notebook detectados", str(report["automaticAccessibilitySummary"]["notebookResourcesDetected"])],
             ["Recursos Notebook analizados", str(report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"])],
-            ["Total PASS", str(report["automaticAccessibilitySummary"]["passCount"])],
+            ["Incidencias (FAIL + ERROR)", str(report["automaticAccessibilitySummary"]["incidentCount"])],
+            ["Correctos (PASS)", str(report["automaticAccessibilitySummary"]["passCount"])],
             ["Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])],
-            ["Total WARNING", str(report["automaticAccessibilitySummary"]["warningCount"])],
-            ["Total NOT_APPLICABLE", str(report["automaticAccessibilitySummary"]["notApplicableCount"])],
+            ["Avisos (WARNING)", str(report["automaticAccessibilitySummary"]["warningCount"])],
+            ["No aplicables (NOT_APPLICABLE)", str(report["automaticAccessibilitySummary"]["notApplicableCount"])],
             ["Total ERROR", str(report["automaticAccessibilitySummary"]["errorCount"])],
         ],
         widths=[9 * cm, 4.2 * cm],
@@ -2075,7 +2069,7 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
             rows.append(
                 [
                     row["moduleTitle"],
-                    f"{row['score']}/100",
+                    _format_score(row["score"]),
                     _priority_label(row["priority"]),
                     str(row["resourcesAnalyzed"]),
                     _clip_text("; ".join(row["mainIssues"]), 180),
@@ -2094,7 +2088,7 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
                     row["title"],
                     row["typeLabel"],
                     row["moduleTitle"],
-                    f"{row['score']}/100",
+                    _format_score(row["score"]),
                     _priority_label(row["priority"]),
                     _clip_text(row["mainIssue"], 140),
                 ]
@@ -2315,6 +2309,19 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
         automatic_summary.setdefault("videoResourcesAnalyzed", 0)
         automatic_summary.setdefault("notebookResourcesDetected", 0)
         automatic_summary.setdefault("notebookResourcesAnalyzed", 0)
+        automatic_summary.setdefault(
+            "incidentCount",
+            int(automatic_summary.get("failCount", 0)) + int(automatic_summary.get("errorCount", 0)),
+        )
+        automatic_summary.setdefault("resourcesDetected", 0)
+        automatic_summary.setdefault("resourcesAccessed", 0)
+        automatic_summary.setdefault("resourcesAnalyzed", 0)
+        automatic_summary.setdefault("notAnalyzableResources", 0)
+        automatic_summary.setdefault("resourcesByType", {})
+        automatic_summary.setdefault("analyzedByType", {})
+        automatic_summary.setdefault("accessibilityScore", None)
+        automatic_summary.setdefault("metricsSource", None)
+        automatic_summary.setdefault("metricsVersion", None)
 
     if "wordAccessibilitySummary" not in normalized:
         normalized["wordAccessibilitySummary"] = normalized.pop("docxAccessibilitySummary", _empty_auto_summary())
@@ -2333,14 +2340,14 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
         for resource in normalized.get(collection_name, []):
             if not isinstance(resource, dict):
                 continue
-            score_fields = _score_fields(resource.get("checks", []))
+            score_fields = _legacy_score_fields(resource.get("checks", []))
             resource.setdefault("score", score_fields["score"])
             resource.setdefault("priority", score_fields["priority"])
             resource.setdefault("mainIssue", score_fields["mainIssue"])
 
     normalized.setdefault(
         "resourceScores",
-        _resource_score_rows(
+        _legacy_resource_score_rows(
             normalized.get("htmlResources", []),
             normalized.get("pdfResources", []),
             normalized.get("wordResources", []),
@@ -2348,10 +2355,10 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
             normalized.get("notebookResources", []),
         ),
     )
-    normalized.setdefault("moduleScores", _module_score_rows(normalized["resourceScores"]))
+    normalized.setdefault("moduleScores", _legacy_module_score_rows(normalized["resourceScores"]))
     normalized.setdefault(
         "executiveSummary",
-        _build_executive_summary(
+        _legacy_build_executive_summary(
             normalized.get("accessSummary", {}),
             normalized["resourceScores"],
             normalized.get("issueSummary", []),
@@ -2375,6 +2382,9 @@ def _empty_auto_summary() -> dict[str, int]:
         "warningCount": 0,
         "notApplicableCount": 0,
         "errorCount": 0,
+        "incidentCount": 0,
+        "metricsSource": None,
+        "metricsVersion": None,
     }
 
 

@@ -382,6 +382,7 @@ class AccessibilityTypeSummaryRead(StrictModel):
     warningCount: int = 0
     notApplicableCount: int = 0
     errorCount: int = 0
+    incidentCount: int = 0
 
 
 class AccessibilitySummaryRead(StrictModel):
@@ -400,6 +401,17 @@ class AccessibilitySummaryRead(StrictModel):
     warningCount: int = 0
     notApplicableCount: int = 0
     errorCount: int = 0
+    incidentCount: int = 0
+    resourcesDetected: int = 0
+    resourcesAccessed: int = 0
+    resourcesAnalyzed: int = 0
+    downloadableResources: int = 0
+    notAnalyzableResources: int = 0
+    resourcesByType: dict[str, int] = Field(default_factory=dict)
+    analyzedByType: dict[str, int] = Field(default_factory=dict)
+    accessibilityScore: int | None = None
+    metricsSource: str | None = None
+    metricsVersion: str | None = None
     byType: dict[str, AccessibilityTypeSummaryRead] = Field(default_factory=dict)
 
 
@@ -410,6 +422,8 @@ class AccessibilityReportRead(StrictModel):
     courseCode: str | None = None
     courseId: str | None = None
     generatedAt: datetime | None = None
+    metricsSource: str | None = None
+    metricsVersion: str | None = None
     summary: AccessibilitySummaryRead
     modules: list[AccessibilityModuleRead] = Field(default_factory=list)
     resources: list[AccessibilityResourceRead] = Field(default_factory=list)
@@ -430,6 +444,15 @@ class ExecutiveSummaryStatsRead(StrictModel):
     resourcesAccessed: int = 0
     resourcesAnalyzed: int = 0
     downloadableResources: int = 0
+    incidentCount: int = 0
+    failCount: int = 0
+    warningCount: int = 0
+    errorCount: int = 0
+    passCount: int = 0
+    notApplicableCount: int = 0
+    notAnalyzableResources: int = 0
+    resourcesByType: dict[str, int] = Field(default_factory=dict)
+    analyzedByType: dict[str, int] = Field(default_factory=dict)
     highPriorityResources: int = 0
     mediumPriorityResources: int = 0
     lowPriorityResources: int = 0
@@ -469,6 +492,8 @@ class ExecutiveSummaryRead(StrictModel):
     courseId: str | None = None
     accessibilityScore: int | None = None
     priority: ExecutivePriority
+    metricsSource: str | None = None
+    metricsVersion: str | None = None
     summary: ExecutiveSummaryStatsRead
     topIssues: list[ExecutiveTopIssueRead] = Field(default_factory=list)
     topRecommendations: list[str] = Field(default_factory=list)
@@ -688,6 +713,9 @@ class ReportHtmlAccessibilitySummaryRead(StrictModel):
     warningCount: int
     notApplicableCount: int
     errorCount: int
+    incidentCount: int = 0
+    metricsSource: str | None = None
+    metricsVersion: str | None = None
 
 
 class ReportPdfAccessibilitySummaryRead(ReportHtmlAccessibilitySummaryRead):
@@ -714,14 +742,28 @@ class ReportAutomaticAccessibilitySummaryRead(StrictModel):
     warningCount: int
     notApplicableCount: int
     errorCount: int
+    incidentCount: int = 0
+    resourcesDetected: int = 0
+    resourcesAccessed: int = 0
+    resourcesAnalyzed: int = 0
+    notAnalyzableResources: int = 0
+    resourcesByType: dict[str, int] = Field(default_factory=dict)
+    analyzedByType: dict[str, int] = Field(default_factory=dict)
+    accessibilityScore: int | None = None
+    metricsSource: str | None = None
+    metricsVersion: str | None = None
 
 
 class ReportExecutiveSummaryRead(StrictModel):
-    score: int
+    score: int | None = None
     priority: str
     resourcesDetected: int
     resourcesAnalyzed: int
     notAutomaticallyAnalyzable: int
+    incidentCount: int = 0
+    warningCount: int = 0
+    metricsSource: str | None = None
+    metricsVersion: str | None = None
     mainProblems: list[str]
     priorityRecommendations: list[str]
     narrative: str
@@ -754,7 +796,7 @@ class ReportIssueSummaryRead(StrictModel):
     resourceType: Literal["HTML", "PDF", "WORD", "VIDEO", "NOTEBOOK"]
     checkId: str
     checkTitle: str
-    status: Literal["FAIL", "WARNING"]
+    status: Literal["FAIL", "WARNING", "ERROR"]
     resourceCount: int
     resources: list[str]
     recommendation: str
@@ -768,7 +810,7 @@ class ReportKeyIssueRead(StrictModel):
     resourceType: Literal["HTML", "PDF", "WORD", "VIDEO", "NOTEBOOK"]
     checkId: str
     checkTitle: str
-    status: Literal["FAIL", "WARNING"]
+    status: Literal["FAIL", "WARNING", "ERROR"]
     evidence: str
     recommendation: str
 

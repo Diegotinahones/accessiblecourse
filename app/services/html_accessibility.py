@@ -413,11 +413,23 @@ def append_accessibility_resource_result(
 
 def recompute_accessibility_summary(report: AccessibilityReport) -> AccessibilitySummary:
     summary = AccessibilitySummary()
+    seen_resources: set[tuple[str, str]] = set()
+    seen_checks: set[tuple[str, str, str, str]] = set()
     for module in report.modules:
         for resource in module.resources:
             analysis_type = _resource_analysis_type(resource)
-            _increment_resource_counts(summary, analysis_type)
-            _increment_summary(summary, resource.checks, analysis_type=analysis_type)
+            resource_key = (analysis_type, resource.resourceId)
+            if resource_key not in seen_resources:
+                seen_resources.add(resource_key)
+                _increment_resource_counts(summary, analysis_type)
+            unique_checks: list[AccessibilityCheckResult] = []
+            for check in resource.checks:
+                check_key = (analysis_type, resource.resourceId, check.checkId, check.status)
+                if check_key in seen_checks:
+                    continue
+                seen_checks.add(check_key)
+                unique_checks.append(check)
+            _increment_summary(summary, unique_checks, analysis_type=analysis_type)
     report.summary = summary
     return summary
 

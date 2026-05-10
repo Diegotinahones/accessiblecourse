@@ -39,6 +39,7 @@ from app.schemas import (
     ReviewSummaryPayload,
 )
 from app.services.access_analysis import build_access_summary
+from app.services.accessibility_metrics import calculate_accessibility_metrics
 from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContext
 from app.services.course_metadata import load_course_metadata, public_course_metadata
 from app.services.course_structure import (
@@ -218,8 +219,22 @@ def _job_course_metadata(session: Session, settings: Settings, job_id: str) -> d
     return public_course_metadata(metadata, fallback_title=fallback_title)
 
 
-def _accessibility_report_read(report, *, course_metadata: dict[str, str | None] | None = None) -> AccessibilityReportRead:
+def _accessibility_report_read(
+    report,
+    *,
+    course_metadata: dict[str, str | None] | None = None,
+    inventory_items: list[dict] | None = None,
+) -> AccessibilityReportRead:
     payload = report.model_dump(mode="python")
+    if inventory_items is not None:
+        metrics = calculate_accessibility_metrics(
+            job_id=report.jobId,
+            inventory_items=inventory_items,
+            accessibility_report=report,
+        )
+        payload["summary"] = metrics["accessibilitySummary"]
+        payload["metricsSource"] = metrics["metricsSource"]
+        payload["metricsVersion"] = metrics["metricsVersion"]
     if course_metadata:
         payload.update(course_metadata)
     payload["resources"] = [
@@ -792,7 +807,11 @@ def get_job_accessibility(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
-    return _accessibility_report_read(report, course_metadata=_job_course_metadata(session, settings, job_id))
+    return _accessibility_report_read(
+        report,
+        course_metadata=_job_course_metadata(session, settings, job_id),
+        inventory_items=inventory,
+    )
 
 
 @router.get("/{job_id}/executive-summary", response_model=ExecutiveSummaryRead)

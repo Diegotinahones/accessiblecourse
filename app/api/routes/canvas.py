@@ -14,6 +14,7 @@ from app.core.rate_limit import MemoryRateLimiter, get_client_ip
 from app.schemas import JobCreatedResponse, OnlineJobCreateRequest
 from app.services.canvas_api import CanvasAPIClient, CanvasAPIError
 from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContext
+from app.services.course_metadata import choose_course_title
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.access_analysis import OnlineAccessAdapter, analyze_access
 from app.services.jobs import create_online_job_record, process_online_job
@@ -112,6 +113,7 @@ def create_canvas_job(
     token_mode = get_canvas_token_session_status(request, settings).mode
     client = _build_canvas_client(credentials, settings)
     course = client.get_course(payload.courseId)
+    course_title = choose_course_title(course.name, payload.courseName, course.course_code)
 
     job_id = str(uuid4())
     response = create_online_job_record(
@@ -119,11 +121,12 @@ def create_canvas_job(
         settings,
         job_id=job_id,
         course_id=course.id,
-        course_name=course.name,
+        course_name=course_title,
+        course_code=course.course_code,
     )
     request.app.state.online_job_contexts.put(
         response.jobId,
-        OnlineJobContext(credentials=credentials, course_id=course.id, course_name=course.name, auth_source=token_mode),
+        OnlineJobContext(credentials=credentials, course_id=course.id, course_name=course_title, auth_source=token_mode),
     )
     background_tasks.add_task(
         process_online_job,

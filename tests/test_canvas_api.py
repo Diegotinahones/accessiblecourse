@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.services.canvas_api import CanvasAPIClient, CanvasAPIError
+from app.services.canvas_client import CanvasCourse
 from tests.conftest import build_sample_imscc
 from tests.test_online_api import StubCanvasClient, StubUrlChecker
 
@@ -323,6 +324,64 @@ def test_canvas_job_uses_server_side_token(client, monkeypatch) -> None:
     resources_response = client.get(f"/api/jobs/{job_id}/resources")
     assert resources_response.status_code == 200, resources_response.text
     assert len(resources_response.json()["resources"]) == 9
+
+
+def test_online_job_preserves_full_canvas_course_title_in_results_and_report(client, monkeypatch) -> None:
+    full_title = "M2.879 - TFM - Área 2 - Aula 1"
+    client.app.state.settings.canvas_base_url = "https://canvas.example.edu"
+    client.app.state.settings.canvas_token = "secret-token"
+
+    class ShortNameCanvasClient(StubCanvasClient):
+        def get_course(self, course_id: str) -> CanvasCourse:
+            return CanvasCourse(
+                id=course_id,
+                name="M2",
+                term="2025/26",
+                start_at=None,
+                end_at=None,
+                course_code="M2.879",
+            )
+
+    monkeypatch.setattr(
+        "app.api.routes.canvas._build_canvas_client",
+        lambda credentials, settings: ShortNameCanvasClient(credentials),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.canvas._build_url_checker",
+        lambda settings: StubUrlChecker(),
+    )
+
+    activate_response = client.post("/api/token/activate-demo")
+    assert activate_response.status_code == 200, activate_response.text
+
+    create_response = client.post("/api/canvas/jobs", json={"courseId": "77", "courseName": full_title})
+    assert create_response.status_code == 201, create_response.text
+    job_id = create_response.json()["jobId"]
+
+    access_response = client.get(f"/api/jobs/{job_id}/access")
+    assert access_response.status_code == 200, access_response.text
+    assert access_response.json()["courseTitle"] == full_title
+    assert access_response.json()["summary"]["courseTitle"] == full_title
+
+    accessibility_response = client.get(f"/api/jobs/{job_id}/accessibility")
+    assert accessibility_response.status_code == 200, accessibility_response.text
+    assert accessibility_response.json()["courseTitle"] == full_title
+
+    executive_response = client.get(f"/api/jobs/{job_id}/executive-summary")
+    assert executive_response.status_code == 200, executive_response.text
+    executive = executive_response.json()
+    assert executive["courseTitle"] == full_title
+    assert executive["courseName"] == full_title
+    assert executive["courseCode"] == "M2.879"
+    assert executive["courseTitle"] != "M2"
+
+    report_response = client.post(f"/api/jobs/{job_id}/report")
+    assert report_response.status_code == 200, report_response.text
+    report = report_response.json()
+    assert report["meta"]["courseTitle"] == full_title
+    assert report["meta"]["courseName"] == full_title
+    assert report["meta"]["courseCode"] == "M2.879"
+    assert report["meta"]["courseTitle"] != "M2"
 
 
 def test_canvas_access_summary_groups_resources_by_module(client, monkeypatch) -> None:

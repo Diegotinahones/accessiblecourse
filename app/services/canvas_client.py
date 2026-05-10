@@ -65,6 +65,7 @@ class CanvasCourse:
     term: str | None
     start_at: datetime | None
     end_at: datetime | None
+    course_code: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -487,6 +488,7 @@ class CanvasClient:
             term=_require_string(term_payload, "name") or None,
             start_at=_parse_datetime(payload.get("start_at")),
             end_at=_parse_datetime(payload.get("end_at")),
+            course_code=_require_string(payload, "course_code") or None,
         )
 
     def _paginate(self, path: str, *, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:

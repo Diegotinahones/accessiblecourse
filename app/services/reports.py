@@ -38,6 +38,7 @@ from app.models.entities import (
 )
 from app.schemas import GeneratedReportResponse, ReportDownloads, ReportFailure, ReportGroup, ResourceResponse
 from app.services.catalog import SEVERITY_ORDER, get_item_severity
+from app.services.course_metadata import load_course_metadata, public_course_metadata
 from app.services.docx_accessibility import ensure_docx_accessibility_report
 from app.services.executive_summary import CRITICAL_FAIL_CHECKS, IMPORTANT_WARNING_CHECKS
 from app.services.html_accessibility import ensure_accessibility_report
@@ -136,7 +137,19 @@ def _enum_value(value: Any) -> str:
     return str(value)
 
 
-def _resolve_course_title(session: Session, job_id: str) -> str | None:
+def _resolve_course_title(session: Session, settings: Settings, job_id: str) -> str | None:
+    processing_job = session.get(ProcessingJob, job_id)
+    fallback_title = getattr(processing_job, "original_filename", None) if processing_job is not None else None
+    metadata = load_course_metadata(settings, job_id)
+    if metadata:
+        return public_course_metadata(metadata, fallback_title=fallback_title)["courseTitle"]
+
+    review_job = session.get(ReviewJob, job_id)
+    if review_job and review_job.name:
+        candidate = review_job.name.strip()
+        if candidate:
+            return candidate
+
     processing_job = session.get(ProcessingJob, job_id)
     if (
         processing_job
@@ -146,12 +159,6 @@ def _resolve_course_title(session: Session, job_id: str) -> str | None:
         stem = Path(processing_job.original_filename).stem.strip()
         if stem:
             return stem
-
-    review_job = session.get(ReviewJob, job_id)
-    if review_job and review_job.name:
-        candidate = review_job.name.strip()
-        if candidate:
-            return candidate
 
     return None
 
@@ -1381,7 +1388,8 @@ def _build_report_payload(
     created_at = utcnow()
     created_at_iso = created_at.isoformat()
     report_id = f"report-{uuid4().hex[:12]}"
-    course_title = _resolve_course_title(session, job_id)
+    course_title = _resolve_course_title(session, settings, job_id)
+    course_metadata = public_course_metadata(load_course_metadata(settings, job_id), fallback_title=course_title)
     mode = _resolve_mode(session, job_id, inventory_items)
     access_summary = _build_access_summary_data(inventory_items)
     html_summary = _build_html_summary_data(inventory_items, accessibility_report)
@@ -1457,6 +1465,9 @@ def _build_report_payload(
             "reportId": report_id,
             "createdAt": created_at_iso,
             "courseTitle": course_title,
+            "courseName": course_metadata["courseName"],
+            "courseCode": course_metadata["courseCode"],
+            "courseId": course_metadata["courseId"],
             "jobId": job_id,
             "includePending": include_pending and not only_fails,
             "onlyFails": only_fails,

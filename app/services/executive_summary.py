@@ -65,6 +65,9 @@ def build_executive_summary(
     job_id: str,
     mode: str,
     course_title: str,
+    course_name: str | None = None,
+    course_code: str | None = None,
+    course_id: str | None = None,
     inventory_items: list[Any],
     accessibility_report: AccessibilityReport,
 ) -> dict[str, Any]:
@@ -114,6 +117,9 @@ def build_executive_summary(
         "jobId": job_id,
         "mode": mode,
         "courseTitle": course_title,
+        "courseName": course_name or course_title,
+        "courseCode": course_code,
+        "courseId": course_id,
         "accessibilityScore": global_score,
         "priority": global_priority,
         "summary": {

@@ -36,6 +36,7 @@ from app.services.access_analysis import OfflineAccessAdapter, OnlineAccessAdapt
 from app.services.canvas_client import CanvasClient, OnlineJobContextStore
 from app.services.canvas_inventory import build_canvas_inventory
 from app.services.catalog import get_checklist_template
+from app.services.course_metadata import build_course_metadata, choose_course_title, save_course_metadata
 from app.services.course_structure import build_fallback_course_structure, build_section_key, section_key_from_path
 from app.services.docx_accessibility import run_docx_accessibility_scan
 from app.services.html_accessibility import run_html_accessibility_scan
@@ -1101,8 +1102,16 @@ def create_online_job_record(
     job_id: str,
     course_id: str,
     course_name: str | None,
+    course_code: str | None = None,
 ) -> JobCreatedResponse:
-    resolved_course_name = course_name or f"Canvas course {course_id}"
+    course_metadata = build_course_metadata(
+        course_id=course_id,
+        course_name=course_name,
+        course_code=course_code,
+        source="canvas",
+    )
+    resolved_course_name = course_metadata["courseTitle"] or "Curso analizado"
+    save_course_metadata(settings, job_id, course_metadata)
     review_job = session.get(ReviewJob, job_id)
     if review_job is None:
         session.add(ReviewJob(id=job_id, name=resolved_course_name))
@@ -1121,7 +1130,7 @@ def create_online_job_record(
         size_bytes=0,
         total_steps=6,
         initial_message="Analisis online en cola.",
-        event_details={"source": "canvas", "courseId": course_id},
+        event_details=course_metadata,
     )
 
 
@@ -1172,6 +1181,7 @@ def _reset_job_related_data(session: Session, settings: Settings, job_id: str) -
 
     (get_job_dir(settings, job_id) / "resources.json").unlink(missing_ok=True)
     (get_job_dir(settings, job_id) / "course_structure.json").unlink(missing_ok=True)
+    (get_job_dir(settings, job_id) / "metadata.json").unlink(missing_ok=True)
     (get_job_dir(settings, job_id) / "accessibility.json").unlink(missing_ok=True)
     (get_job_dir(settings, job_id) / "pdf_accessibility.json").unlink(missing_ok=True)
     shutil.rmtree(get_extracted_dir(settings, job_id), ignore_errors=True)
@@ -1760,13 +1770,22 @@ def process_online_job(
             )
 
             course = client.get_course(context.course_id)
-            job.original_filename = course.name
-            job.stored_filename = course.name
+            course_title = choose_course_title(course.name, context.course_name, course.course_code)
+            course_metadata = build_course_metadata(
+                course_id=course.id,
+                course_name=course_title,
+                course_code=course.course_code,
+                course_title=course_title,
+                source="canvas",
+            )
+            save_course_metadata(settings, job_id, course_metadata)
+            job.original_filename = course_title
+            job.stored_filename = course_title
             review_job = session.get(ReviewJob, job_id)
             if review_job is None:
-                review_job = ReviewJob(id=job_id, name=course.name)
+                review_job = ReviewJob(id=job_id, name=course_title)
             else:
-                review_job.name = course.name
+                review_job.name = course_title
                 review_job.updated_at = utcnow()
             session.add(review_job)
             session.add(job)
@@ -1777,9 +1796,9 @@ def process_online_job(
                 job,
                 current_step=2,
                 progress=25,
-                message=f"Curso cargado: {course.name}",
+                message=f"Curso cargado: {course_title}",
                 phase=JobPhase.UPLOAD,
-                details={"courseId": course.id, "courseName": course.name},
+                details=course_metadata,
             )
 
             modules = client.list_modules(course.id)
@@ -1862,7 +1881,7 @@ def process_online_job(
                 settings,
                 job_id=job_id,
                 inventory=inventory,
-                course_structure=build_fallback_course_structure(inventory, title=course.name),
+                course_structure=build_fallback_course_structure(inventory, title=course_title),
             )
 
             _update_job_progress(
@@ -2015,7 +2034,9 @@ def process_online_job(
                 progress=100,
                 details={
                     "courseId": course.id,
-                    "courseName": course.name,
+                    "courseName": course_title,
+                    "courseTitle": course_title,
+                    "courseCode": course.course_code,
                     "resourceCount": len(inventory),
                     "accessible": access_summary["accessible"],
                     "downloadable": access_summary["downloadable"],

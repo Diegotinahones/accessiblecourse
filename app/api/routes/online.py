@@ -11,6 +11,7 @@ from app.core.errors import AppError
 from app.core.rate_limit import MemoryRateLimiter, get_client_ip
 from app.schemas import JobCreatedResponse, OnlineCourseRead, OnlineJobCreateRequest
 from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContext
+from app.services.course_metadata import choose_course_title
 from app.services.jobs import create_online_job_record, process_online_job
 from app.services.token_session import get_canvas_token_session_status, require_active_canvas_token
 from app.services.url_check import URLCheckService
@@ -59,6 +60,7 @@ def list_online_courses(
         OnlineCourseRead(
             id=course.id,
             name=course.name,
+            courseCode=course.course_code,
             term=course.term,
             start_at=course.start_at,
             end_at=course.end_at,
@@ -86,6 +88,7 @@ def create_online_job(
 
     client = build_canvas_client(auth, settings)
     course = client.get_course(payload.courseId)
+    course_title = choose_course_title(course.name, payload.courseName, course.course_code)
 
     job_id = str(uuid4())
     response = create_online_job_record(
@@ -93,14 +96,15 @@ def create_online_job(
         settings,
         job_id=job_id,
         course_id=course.id,
-        course_name=course.name,
+        course_name=course_title,
+        course_code=course.course_code,
     )
     request.app.state.online_job_contexts.put(
         response.jobId,
         OnlineJobContext(
             credentials=auth,
             course_id=course.id,
-            course_name=course.name,
+            course_name=course_title,
             auth_source=get_canvas_token_session_status(request, settings).mode,
         ),
     )

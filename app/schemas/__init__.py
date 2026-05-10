@@ -169,6 +169,7 @@ class StrictModel(BaseModel):
 class OnlineCourseRead(StrictModel):
     id: str
     name: str
+    courseCode: str | None = None
     term: str | None = None
     start_at: datetime | None = None
     end_at: datetime | None = None
@@ -288,6 +289,10 @@ class AccessSummaryGroupRead(StrictModel):
 
 class AccessSummaryRead(StrictModel):
     jobId: str
+    courseTitle: str | None = None
+    courseName: str | None = None
+    courseCode: str | None = None
+    courseId: str | None = None
     status: str
     progress: int
     total: int
@@ -334,6 +339,10 @@ class AccessModuleRead(StrictModel):
 
 class JobAccessRead(StrictModel):
     jobId: str
+    courseTitle: str | None = None
+    courseName: str | None = None
+    courseCode: str | None = None
+    courseId: str | None = None
     status: str
     phase: JobPhase
     progress: int
@@ -396,6 +405,10 @@ class AccessibilitySummaryRead(StrictModel):
 
 class AccessibilityReportRead(StrictModel):
     jobId: str
+    courseTitle: str | None = None
+    courseName: str | None = None
+    courseCode: str | None = None
+    courseId: str | None = None
     generatedAt: datetime | None = None
     summary: AccessibilitySummaryRead
     modules: list[AccessibilityModuleRead] = Field(default_factory=list)
@@ -451,6 +464,9 @@ class ExecutiveSummaryRead(StrictModel):
     jobId: str
     mode: str
     courseTitle: str
+    courseName: str | None = None
+    courseCode: str | None = None
+    courseId: str | None = None
     accessibilityScore: int | None = None
     priority: ExecutivePriority
     summary: ExecutiveSummaryStatsRead
@@ -638,6 +654,9 @@ class ReportMetaRead(StrictModel):
     reportId: str
     createdAt: datetime
     courseTitle: str | None = None
+    courseName: str | None = None
+    courseCode: str | None = None
+    courseId: str | None = None
     jobId: str
     includePending: bool
     onlyFails: bool

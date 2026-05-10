@@ -12,6 +12,7 @@ from app.api.deps import get_engine, get_rate_limiter, get_session, get_settings
 from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.rate_limit import MemoryRateLimiter, get_client_ip
+from app.models import Job as ProcessingJob
 from app.models.entities import ChecklistValue, Resource, ReviewSession
 from app.schemas import (
     AccessibilityReportRead,
@@ -39,6 +40,7 @@ from app.schemas import (
 )
 from app.services.access_analysis import build_access_summary
 from app.services.canvas_client import CanvasClient, CanvasCredentials, OnlineJobContext
+from app.services.course_metadata import load_course_metadata, public_course_metadata
 from app.services.course_structure import (
     augment_course_structure,
     build_fallback_course_structure,
@@ -209,8 +211,17 @@ def _accessibility_type_summary(summary, *, prefix: str) -> dict[str, int]:
     }
 
 
-def _accessibility_report_read(report) -> AccessibilityReportRead:
+def _job_course_metadata(session: Session, settings: Settings, job_id: str) -> dict[str, str | None]:
+    processing_job = session.get(ProcessingJob, job_id)
+    fallback_title = processing_job.original_filename if processing_job is not None else None
+    metadata = load_course_metadata(settings, job_id)
+    return public_course_metadata(metadata, fallback_title=fallback_title)
+
+
+def _accessibility_report_read(report, *, course_metadata: dict[str, str | None] | None = None) -> AccessibilityReportRead:
     payload = report.model_dump(mode="python")
+    if course_metadata:
+        payload.update(course_metadata)
     payload["resources"] = [
         resource.model_dump(mode="python")
         for module in report.modules
@@ -378,6 +389,7 @@ def _build_access_summary(session: Session, settings: Settings, job_id: str) -> 
     summary["globalUnplacedCount"] = breakdown["globalUnplacedCount"]
     summary["noAccessCount"] = breakdown["noAccessCount"]
     summary["noAccessByReason"] = breakdown["noAccessByReason"]
+    summary.update(_job_course_metadata(session, settings, job_id))
     return AccessSummaryRead.model_validate(summary)
 
 
@@ -436,6 +448,7 @@ def _build_access_response(session: Session, settings: Settings, job_id: str) ->
     ]
     return JobAccessRead(
         jobId=job_id,
+        **_job_course_metadata(session, settings, job_id),
         status=job.status,
         phase=_coerce_job_phase(job.phase),
         progress=job.progress,
@@ -779,7 +792,7 @@ def get_job_accessibility(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
-    return _accessibility_report_read(report)
+    return _accessibility_report_read(report, course_metadata=_job_course_metadata(session, settings, job_id))
 
 
 @router.get("/{job_id}/executive-summary", response_model=ExecutiveSummaryRead)
@@ -838,10 +851,14 @@ def get_job_executive_summary(
         canvas_credentials=canvas_credentials,
         course_id=course_id,
     )
+    course_metadata = _job_course_metadata(session, report_settings, job_id)
     return build_executive_summary(
         job_id=job_id,
         mode=_job_mode(report_settings, job_id),
-        course_title=job.original_filename,
+        course_title=course_metadata["courseTitle"] or job.original_filename,
+        course_name=course_metadata["courseName"],
+        course_code=course_metadata["courseCode"],
+        course_id=course_metadata["courseId"],
         inventory_items=inventory,
         accessibility_report=report,
     )

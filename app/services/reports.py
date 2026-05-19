@@ -38,6 +38,20 @@ from app.models.entities import (
 )
 from app.schemas import GeneratedReportResponse, ReportDownloads, ReportFailure, ReportGroup, ResourceResponse
 from app.services.access_analysis import build_access_summary
+from app.services.accessibility_responsibility import (
+    MANUAL_REVIEW,
+    PLATFORM_CONTROLLED,
+    PROFESSOR_ACTIONABLE,
+    PROVIDER_EXTERNAL,
+    classify_check_responsibility,
+    is_actionable_issue,
+    is_platform_observation,
+    is_reportable_issue,
+    is_scored_responsibility,
+    is_warning_or_manual_review,
+    responsibility_label,
+    responsibility_note,
+)
 from app.services.accessibility_metrics import (
     CRITICAL_FAIL_CHECKS,
     IMPORTANT_WARNING_CHECKS,
@@ -95,6 +109,28 @@ REPORT_CYAN = "00A6B2"
 REPORT_BORDER = "C9D7DF"
 REPORT_PRIORITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "alta": 0, "media": 1, "baja": 2}
 REPORT_TECHNICAL_STATUSES = {"FAIL", "WARNING", "ERROR"}
+REPORT_METHODOLOGY_PARAGRAPHS = [
+    (
+        "El análisis distingue entre incidencias accionables por el profesorado y aspectos controlados por la "
+        "plataforma o por proveedores externos. En páginas Canvas, elementos estructurales del documento HTML "
+        "como el idioma del contenedor, el título técnico de la página o el encabezado principal del marco "
+        "superior dependen de Canvas/UOC y no se contabilizan como errores del profesorado."
+    ),
+    (
+        "PDF, Word y Notebook se analizan como recursos subidos al aula y sus incidencias se consideran "
+        "accionables cuando el material es responsabilidad docente. Los notebooks se revisan de forma estática, "
+        "sin ejecutar código ni instalar kernels."
+    ),
+    (
+        "No se descargan vídeos de plataformas externas. Se verifican señales disponibles y se marca revisión "
+        "manual cuando no se puede comprobar automáticamente la existencia o calidad de subtítulos, transcripción "
+        "u otras alternativas."
+    ),
+    (
+        "Los recursos no cubiertos, protegidos por SSO/RALTI/LTI o que requieren interacción humana no penalizan "
+        "el score; se documentan para que el profesorado pueda decidir si procede una revisión manual."
+    ),
+]
 
 
 def _download_urls(job_id: str) -> dict[str, str]:
@@ -556,6 +592,33 @@ def _flatten_notebook_accessibility_resources(notebook_accessibility_report) -> 
     return flattened
 
 
+def _check_payload(
+    check: Any,
+    *,
+    analysis_type: str,
+    resource: Any,
+    item: Any | None = None,
+) -> dict[str, Any]:
+    responsibility = classify_check_responsibility(
+        str(check.checkId),
+        analysis_type=analysis_type,
+        status=str(check.status),
+        resource=resource,
+        inventory_item=item,
+    )
+    return {
+        "checkId": check.checkId,
+        "checkTitle": check.checkTitle,
+        "status": check.status,
+        "evidence": check.evidence,
+        "recommendation": check.recommendation,
+        "responsibility": responsibility,
+        "responsibilityLabel": responsibility_label(responsibility),
+        "accountabilityNote": responsibility_note(responsibility, check.checkTitle),
+        "countedInScore": is_scored_responsibility(responsibility),
+    }
+
+
 def _build_key_issues(
     items_by_id: dict[str, Any],
     accessibility_report,
@@ -579,6 +642,13 @@ def _build_key_issues(
             for check in resource.checks:
                 if check.status not in {"FAIL", "ERROR", "WARNING"}:
                     continue
+                responsibility = classify_check_responsibility(
+                    str(check.checkId),
+                    analysis_type=resource_type if resource_type != "WORD" else "DOCX",
+                    status=str(check.status),
+                    resource=resource,
+                    inventory_item=item,
+                )
                 dedupe_key = (resource_type, resource.resourceId, check.checkId, check.status)
                 if dedupe_key in seen:
                     continue
@@ -595,6 +665,9 @@ def _build_key_issues(
                         "status": check.status,
                         "evidence": check.evidence,
                         "recommendation": check.recommendation,
+                        "responsibility": responsibility,
+                        "responsibilityLabel": responsibility_label(responsibility),
+                        "accountabilityNote": responsibility_note(responsibility, check.checkTitle),
                     }
                 )
     return sorted(
@@ -617,6 +690,7 @@ def _build_issue_summary(key_issues: list[dict[str, Any]]) -> list[dict[str, Any
             str(issue["checkId"]),
             str(issue["checkTitle"]),
             str(issue["status"]),
+            str(issue.get("responsibility") or PROFESSOR_ACTIONABLE),
         )
         group = grouped.setdefault(
             key,
@@ -629,6 +703,10 @@ def _build_issue_summary(key_issues: list[dict[str, Any]]) -> list[dict[str, Any
                 "resources": [],
                 "_resourceIds": set(),
                 "recommendation": issue["recommendation"],
+                "responsibility": issue.get("responsibility") or PROFESSOR_ACTIONABLE,
+                "responsibilityLabel": issue.get("responsibilityLabel")
+                or responsibility_label(issue.get("responsibility")),
+                "accountabilityNote": issue.get("accountabilityNote"),
             },
         )
         group["_resourceIds"].add(issue["resourceId"])
@@ -648,6 +726,38 @@ def _build_issue_summary(key_issues: list[dict[str, Any]]) -> list[dict[str, Any
             str(item["checkTitle"]).lower(),
         ),
     )
+
+
+def _filter_reportable_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        issue
+        for issue in issues
+        if is_reportable_issue(str(issue.get("responsibility")), str(issue.get("status")))
+    ]
+
+
+def _filter_actionable_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        issue
+        for issue in issues
+        if is_actionable_issue(str(issue.get("responsibility")), str(issue.get("status")))
+    ]
+
+
+def _filter_warning_or_manual_review_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        issue
+        for issue in issues
+        if is_warning_or_manual_review(str(issue.get("responsibility")), str(issue.get("status")))
+    ]
+
+
+def _filter_platform_observations(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        issue
+        for issue in issues
+        if is_platform_observation(str(issue.get("responsibility")), str(issue.get("status")))
+    ]
 
 
 def _build_legacy_html_key_issues(items_by_id: dict[str, Any], accessibility_report) -> list[dict[str, str | None]]:
@@ -690,6 +800,21 @@ def _overall_automatic_status(checks: list[Any]) -> str:
         return "WARNING"
     if "ERROR" in statuses:
         return "ERROR"
+    return "PASS"
+
+
+def _overall_report_status(checks: list[dict[str, Any]]) -> str:
+    statuses = {
+        str(check.get("status"))
+        for check in checks
+        if check.get("responsibility") in {PROFESSOR_ACTIONABLE, MANUAL_REVIEW, PROVIDER_EXTERNAL}
+    }
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "ERROR" in statuses:
+        return "ERROR"
+    if "WARNING" in statuses:
+        return "WARNING"
     return "PASS"
 
 
@@ -928,17 +1053,8 @@ def _build_html_resource_details(items_by_id: dict[str, Any], accessibility_repo
     details: list[dict[str, Any]] = []
     for module_title, resource in _flatten_accessibility_resources(accessibility_report):
         item = items_by_id.get(resource.resourceId)
-        overall_status = _overall_automatic_status(resource.checks)
-        checks = [
-            {
-                "checkId": check.checkId,
-                "checkTitle": check.checkTitle,
-                "status": check.status,
-                "evidence": check.evidence,
-                "recommendation": check.recommendation,
-            }
-            for check in resource.checks
-        ]
+        checks = [_check_payload(check, analysis_type="HTML", resource=resource, item=item) for check in resource.checks]
+        overall_status = _overall_report_status(checks)
         details.append(
             {
                 "resourceId": resource.resourceId,
@@ -961,17 +1077,8 @@ def _build_pdf_resource_details(items_by_id: dict[str, Any], pdf_accessibility_r
     details: list[dict[str, Any]] = []
     for module_title, resource in _flatten_pdf_accessibility_resources(pdf_accessibility_report):
         item = items_by_id.get(resource.resourceId)
-        overall_status = _overall_automatic_status(resource.checks)
-        checks = [
-            {
-                "checkId": check.checkId,
-                "checkTitle": check.checkTitle,
-                "status": check.status,
-                "evidence": check.evidence,
-                "recommendation": check.recommendation,
-            }
-            for check in resource.checks
-        ]
+        checks = [_check_payload(check, analysis_type="PDF", resource=resource, item=item) for check in resource.checks]
+        overall_status = _overall_report_status(checks)
         details.append(
             {
                 "resourceId": resource.resourceId,
@@ -994,17 +1101,8 @@ def _build_docx_resource_details(items_by_id: dict[str, Any], docx_accessibility
     details: list[dict[str, Any]] = []
     for module_title, resource in _flatten_docx_accessibility_resources(docx_accessibility_report):
         item = items_by_id.get(resource.resourceId)
-        overall_status = _overall_automatic_status(resource.checks)
-        checks = [
-            {
-                "checkId": check.checkId,
-                "checkTitle": check.checkTitle,
-                "status": check.status,
-                "evidence": check.evidence,
-                "recommendation": check.recommendation,
-            }
-            for check in resource.checks
-        ]
+        checks = [_check_payload(check, analysis_type="DOCX", resource=resource, item=item) for check in resource.checks]
+        overall_status = _overall_report_status(checks)
         details.append(
             {
                 "resourceId": resource.resourceId,
@@ -1027,18 +1125,9 @@ def _build_video_resource_details(items_by_id: dict[str, Any], video_accessibili
     details: list[dict[str, Any]] = []
     for module_title, resource in _flatten_video_accessibility_resources(video_accessibility_report):
         item = items_by_id.get(resource.resourceId)
-        overall_status = _overall_automatic_status(resource.checks)
         provider, _host = detect_video_provider(item if item is not None else resource.model_dump(mode="python"))
-        checks = [
-            {
-                "checkId": check.checkId,
-                "checkTitle": check.checkTitle,
-                "status": check.status,
-                "evidence": check.evidence,
-                "recommendation": check.recommendation,
-            }
-            for check in resource.checks
-        ]
+        checks = [_check_payload(check, analysis_type="VIDEO", resource=resource, item=item) for check in resource.checks]
+        overall_status = _overall_report_status(checks)
         details.append(
             {
                 "resourceId": resource.resourceId,
@@ -1062,17 +1151,11 @@ def _build_notebook_resource_details(items_by_id: dict[str, Any], notebook_acces
     details: list[dict[str, Any]] = []
     for module_title, resource in _flatten_notebook_accessibility_resources(notebook_accessibility_report):
         item = items_by_id.get(resource.resourceId)
-        overall_status = _overall_automatic_status(resource.checks)
         checks = [
-            {
-                "checkId": check.checkId,
-                "checkTitle": check.checkTitle,
-                "status": check.status,
-                "evidence": check.evidence,
-                "recommendation": check.recommendation,
-            }
+            _check_payload(check, analysis_type="NOTEBOOK", resource=resource, item=item)
             for check in resource.checks
         ]
+        overall_status = _overall_report_status(checks)
         details.append(
             {
                 "resourceId": resource.resourceId,
@@ -1180,9 +1263,9 @@ def _build_main_problem_labels_from_top_issues(top_issues: list[dict[str, Any]])
 def _executive_recommendations_from_central(top_recommendations: list[str], skipped_count: int) -> list[str]:
     recommendations = [recommendation for recommendation in top_recommendations if recommendation]
     defaults = [
-        "Corregir primero los checks FAIL o ERROR que afectan a más recursos o a módulos completos.",
-        "Revisar manualmente los recursos no analizables y documentar la evidencia obtenida.",
-        "Regenerar el informe después de aplicar cambios para verificar la mejora de score.",
+        "Corregir primero las incidencias accionables FAIL o ERROR que afectan a más recursos o a módulos completos.",
+        "Revisar manualmente vídeos externos y recursos no analizables, documentando la evidencia obtenida.",
+        "Regenerar el informe después de aplicar cambios para verificar la mejora del score.",
     ]
     if skipped_count == 0:
         defaults[1] = "Mantener una revisión manual breve para validar calidad pedagógica y experiencia de uso."
@@ -1196,9 +1279,9 @@ def _executive_recommendations_from_central(top_recommendations: list[str], skip
 
 def _executive_narrative(main_problems: list[str]) -> str:
     if not main_problems or main_problems[0].startswith("No se han detectado"):
-        return "No se han detectado barreras automáticas críticas; conviene completar la revisión manual y mantener evidencias."
+        return "No se han detectado barreras automáticas accionables críticas; conviene completar la revisión manual y mantener evidencias."
     compact = "; ".join(main_problems[:3])
-    return f"Las principales barreras detectadas están relacionadas con {compact}."
+    return f"Las principales barreras accionables o revisiones manuales detectadas están relacionadas con {compact}."
 
 
 def _build_report_executive_summary(metrics: dict[str, Any]) -> dict[str, Any]:
@@ -1212,6 +1295,13 @@ def _build_report_executive_summary(metrics: dict[str, Any]) -> dict[str, Any]:
         "notAutomaticallyAnalyzable": not_analyzable_resources,
         "incidentCount": int(metrics.get("incidentCount") or 0),
         "warningCount": int(metrics.get("warningCount") or 0),
+        "actionableFailCount": int(metrics.get("actionableFailCount") or 0),
+        "actionableWarningCount": int(metrics.get("actionableWarningCount") or 0),
+        "manualReviewCount": int(metrics.get("manualReviewCount") or 0),
+        "platformControlledCount": int(metrics.get("platformControlledCount") or 0),
+        "providerExternalCount": int(metrics.get("providerExternalCount") or 0),
+        "notCoveredCount": int(metrics.get("notCoveredCount") or 0),
+        "responsibilityCounts": metrics.get("responsibilityCounts") or {},
         "metricsSource": metrics.get("metricsSource"),
         "metricsVersion": metrics.get("metricsVersion"),
         "mainProblems": main_problems,
@@ -1387,7 +1477,7 @@ def _build_report_payload(
     video_summary = metrics["reportTypeSummaries"]["VIDEO"]
     notebook_summary = metrics["reportTypeSummaries"]["NOTEBOOK"]
     automatic_summary = metrics["automaticSummary"]
-    key_issues = _build_key_issues(
+    all_key_issues = _build_key_issues(
         items_by_id,
         combined_accessibility_report,
         combined_accessibility_report,
@@ -1395,7 +1485,14 @@ def _build_report_payload(
         combined_accessibility_report,
         combined_accessibility_report,
     )
+    actionable_key_issues = _filter_actionable_issues(all_key_issues)
+    manual_review_key_issues = _filter_warning_or_manual_review_issues(all_key_issues)
+    platform_observations = _filter_platform_observations(all_key_issues)
+    key_issues = _filter_reportable_issues(all_key_issues)
     issue_summary = _build_issue_summary(key_issues)
+    actionable_issue_summary = _build_issue_summary(actionable_key_issues)
+    manual_review_issue_summary = _build_issue_summary(manual_review_key_issues)
+    platform_observations_summary = _build_issue_summary(platform_observations)
     html_resources = _build_html_resource_details(items_by_id, combined_accessibility_report)
     pdf_resources = _build_pdf_resource_details(items_by_id, combined_accessibility_report)
     docx_resources = _build_docx_resource_details(items_by_id, combined_accessibility_report)
@@ -1463,7 +1560,11 @@ def _build_report_payload(
         "videoAccessibilitySummary": video_summary,
         "notebookAccessibilitySummary": notebook_summary,
         "issueSummary": issue_summary,
+        "actionableIssueSummary": actionable_issue_summary,
+        "manualReviewIssueSummary": manual_review_issue_summary,
+        "platformObservationsSummary": platform_observations_summary,
         "keyIssues": key_issues,
+        "platformObservations": platform_observations,
         "htmlResources": html_resources,
         "pdfResources": pdf_resources,
         "wordResources": docx_resources,
@@ -1558,6 +1659,8 @@ def _auto_resource_type_label(value: Any) -> str:
 
 
 def _compact_detail_recommendation(check: dict[str, Any]) -> str:
+    if check.get("responsibility") in {MANUAL_REVIEW, PROVIDER_EXTERNAL}:
+        return "Requiere revisión manual; ver recomendación en el resumen de avisos."
     if check.get("status") in {"FAIL", "ERROR", "WARNING"}:
         return "Ver recomendación en el resumen agrupado."
     return str(check.get("recommendation") or "")
@@ -1569,7 +1672,20 @@ def _clip_text(value: Any, limit: int = 260) -> str:
 
 
 def _technical_checks(resource: dict[str, Any]) -> list[dict[str, Any]]:
-    return [check for check in resource.get("checks", []) if check.get("status") in REPORT_TECHNICAL_STATUSES]
+    return [
+        check
+        for check in resource.get("checks", [])
+        if check.get("status") in REPORT_TECHNICAL_STATUSES
+        and check.get("responsibility") in {PROFESSOR_ACTIONABLE, MANUAL_REVIEW, PROVIDER_EXTERNAL}
+    ]
+
+
+def _platform_observation_checks(resource: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        check
+        for check in resource.get("checks", [])
+        if check.get("status") in REPORT_TECHNICAL_STATUSES and check.get("responsibility") == PLATFORM_CONTROLLED
+    ]
 
 
 def _priority_label(value: Any) -> str:
@@ -1605,6 +1721,7 @@ def _append_docx_technical_resources(
 
     for resource in resources:
         checks = _technical_checks(resource)
+        observations = _platform_observation_checks(resource)
         document.add_heading(resource["title"], level=2)
         metadata = (
             f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
@@ -1616,20 +1733,35 @@ def _append_docx_technical_resources(
         document.add_paragraph(metadata)
         if not checks:
             document.add_paragraph("Sin incidencias FAIL/WARNING/ERROR. Los checks PASS y NOT_APPLICABLE se omiten para compactar.")
-            continue
-        _append_docx_table(
-            document,
-            ["Check", "Estado", "Evidencia", "Recomendación"],
-            [
+        else:
+            _append_docx_table(
+                document,
+                ["Check", "Estado", "Responsabilidad", "Evidencia", "Recomendación"],
                 [
-                    check["checkTitle"],
-                    check["status"],
-                    _clip_text(check["evidence"]),
-                    _compact_detail_recommendation(check),
-                ]
-                for check in checks
-            ],
-        )
+                    [
+                        check["checkTitle"],
+                        check["status"],
+                        check["responsibilityLabel"],
+                        _clip_text(check["evidence"]),
+                        _compact_detail_recommendation(check),
+                    ]
+                    for check in checks
+                ],
+            )
+        if observations:
+            document.add_heading("Observaciones no contabilizadas", level=3)
+            _append_docx_table(
+                document,
+                ["Check", "Estado", "Explicación"],
+                [
+                    [
+                        check["checkTitle"],
+                        check["status"],
+                        _clip_text(check["accountabilityNote"], 260),
+                    ]
+                    for check in observations
+                ],
+            )
 
 
 def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> None:
@@ -1685,6 +1817,10 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
     for recommendation in executive["priorityRecommendations"]:
         document.add_paragraph(recommendation, style="List Bullet")
 
+    document.add_heading("Metodología del análisis", level=1)
+    for paragraph in REPORT_METHODOLOGY_PARAGRAPHS:
+        document.add_paragraph(paragraph)
+
     document.add_heading("Resumen de acceso", level=1)
     _append_docx_summary_table(
         document,
@@ -1714,6 +1850,10 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
             ("Recursos Notebook detectados", str(report["automaticAccessibilitySummary"]["notebookResourcesDetected"])),
             ("Recursos Notebook analizados", str(report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"])),
             ("Incidencias (FAIL + ERROR)", str(report["automaticAccessibilitySummary"]["incidentCount"])),
+            ("Revisión manual", str(report["automaticAccessibilitySummary"]["manualReviewCount"])),
+            ("Aspectos de proveedor externo", str(report["automaticAccessibilitySummary"]["providerExternalCount"])),
+            ("Observaciones de plataforma no contabilizadas", str(report["automaticAccessibilitySummary"]["platformControlledCount"])),
+            ("Recursos/tipos no cubiertos", str(report["automaticAccessibilitySummary"]["notCoveredCount"])),
             ("Correctos (PASS)", str(report["automaticAccessibilitySummary"]["passCount"])),
             ("Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])),
             ("Avisos (WARNING)", str(report["automaticAccessibilitySummary"]["warningCount"])),
@@ -1762,8 +1902,9 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
         document.add_paragraph("No hay recursos analizados automáticamente para calcular score por recurso.")
 
     document.add_heading("Principales incidencias", level=1)
-    if not report["issueSummary"]:
-        document.add_paragraph("No se han detectado incidencias FAIL o WARNING en los checks automáticos.")
+    document.add_heading("Incidencias accionables", level=2)
+    if not report["actionableIssueSummary"]:
+        document.add_paragraph("No se han detectado incidencias FAIL/ERROR accionables por el profesorado.")
     else:
         _append_docx_table(
             document,
@@ -1776,7 +1917,45 @@ def _write_docx(destination: Path, report: dict[str, Any], brand_name: str) -> N
                     issue_group["resourceCount"],
                     _clip_text(issue_group["recommendation"], 220),
                 ]
-                for issue_group in report["issueSummary"]
+                for issue_group in report["actionableIssueSummary"]
+            ],
+        )
+    document.add_heading("Avisos / revisión manual", level=2)
+    if not report["manualReviewIssueSummary"]:
+        document.add_paragraph("No hay avisos accionables ni revisiones manuales destacadas.")
+    else:
+        _append_docx_table(
+            document,
+            ["Tipo", "Check", "Estado", "Recursos afectados", "Responsabilidad", "Recomendación"],
+            [
+                [
+                    _auto_resource_type_label(issue_group["resourceType"]),
+                    issue_group["checkTitle"],
+                    issue_group["status"],
+                    issue_group["resourceCount"],
+                    issue_group["responsibilityLabel"],
+                    _clip_text(issue_group["recommendation"], 180),
+                ]
+                for issue_group in report["manualReviewIssueSummary"]
+            ],
+        )
+    document.add_heading("Aspectos no contabilizados por depender de plataforma", level=2)
+    if not report["platformObservationsSummary"]:
+        document.add_paragraph("No hay observaciones de plataforma con estado FAIL/WARNING/ERROR.")
+    else:
+        document.add_paragraph("Estas observaciones se documentan, pero no se contabilizan como incidencias accionables.")
+        _append_docx_table(
+            document,
+            ["Tipo", "Check", "Estado", "Recursos afectados", "Explicación"],
+            [
+                [
+                    _auto_resource_type_label(issue_group["resourceType"]),
+                    issue_group["checkTitle"],
+                    issue_group["status"],
+                    issue_group["resourceCount"],
+                    _clip_text(issue_group["accountabilityNote"], 220),
+                ]
+                for issue_group in report["platformObservationsSummary"]
             ],
         )
 
@@ -1911,6 +2090,7 @@ def _append_pdf_technical_resources(
 
     for resource in resources:
         checks = _technical_checks(resource)
+        observations = _platform_observation_checks(resource)
         story.append(_pdf_paragraph(resource["title"], styles["Heading2"]))
         metadata = (
             f"Módulo/sección: {resource['moduleTitle'] or resource['coursePath']} | "
@@ -1927,18 +2107,25 @@ def _append_pdf_technical_resources(
                     styles["Normal"],
                 )
             )
-            continue
-        rows = [["Check", "Estado", "Evidencia", "Recomendación"]]
-        for check in checks:
-            rows.append(
-                [
-                    check["checkTitle"],
-                    check["status"],
-                    _clip_text(check["evidence"]),
-                    _compact_detail_recommendation(check),
-                ]
-            )
-        _append_pdf_table(story, rows, widths=[3.4 * cm, 2.4 * cm, 5.3 * cm, 4.2 * cm])
+        else:
+            rows = [["Check", "Estado", "Responsabilidad", "Evidencia", "Recomendación"]]
+            for check in checks:
+                rows.append(
+                    [
+                        check["checkTitle"],
+                        check["status"],
+                        check["responsibilityLabel"],
+                        _clip_text(check["evidence"]),
+                        _compact_detail_recommendation(check),
+                    ]
+                )
+            _append_pdf_table(story, rows, widths=[3 * cm, 1.7 * cm, 2.8 * cm, 4.2 * cm, 3.8 * cm])
+        if observations:
+            story.append(_pdf_paragraph("Observaciones no contabilizadas", styles["Heading2"]))
+            rows = [["Check", "Estado", "Explicación"]]
+            for check in observations:
+                rows.append([check["checkTitle"], check["status"], _clip_text(check["accountabilityNote"], 260)])
+            _append_pdf_table(story, rows, widths=[3.6 * cm, 2 * cm, 9.9 * cm])
 
 
 def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> None:
@@ -2021,6 +2208,10 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
     story.append(_pdf_paragraph("3 recomendaciones prioritarias", styles["Heading2"]))
     _append_pdf_bullets(story, executive["priorityRecommendations"], styles["Normal"])
 
+    story.append(_pdf_paragraph("Metodología del análisis", styles["Section"]))
+    for paragraph in REPORT_METHODOLOGY_PARAGRAPHS:
+        story.append(_pdf_paragraph(paragraph, styles["Normal"]))
+
     story.append(_pdf_paragraph("Resumen de acceso", styles["Section"]))
     _append_pdf_table(
         story,
@@ -2053,6 +2244,10 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
             ["Recursos Notebook detectados", str(report["automaticAccessibilitySummary"]["notebookResourcesDetected"])],
             ["Recursos Notebook analizados", str(report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"])],
             ["Incidencias (FAIL + ERROR)", str(report["automaticAccessibilitySummary"]["incidentCount"])],
+            ["Revisión manual", str(report["automaticAccessibilitySummary"]["manualReviewCount"])],
+            ["Aspectos de proveedor externo", str(report["automaticAccessibilitySummary"]["providerExternalCount"])],
+            ["Observaciones de plataforma no contabilizadas", str(report["automaticAccessibilitySummary"]["platformControlledCount"])],
+            ["Recursos/tipos no cubiertos", str(report["automaticAccessibilitySummary"]["notCoveredCount"])],
             ["Correctos (PASS)", str(report["automaticAccessibilitySummary"]["passCount"])],
             ["Total FAIL", str(report["automaticAccessibilitySummary"]["failCount"])],
             ["Avisos (WARNING)", str(report["automaticAccessibilitySummary"]["warningCount"])],
@@ -2098,11 +2293,12 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
         story.append(_pdf_paragraph("No hay recursos analizados automáticamente para calcular score por recurso.", styles["Normal"]))
 
     story.append(_pdf_paragraph("Principales incidencias", styles["Section"]))
-    if not report["issueSummary"]:
-        story.append(_pdf_paragraph("No se han detectado incidencias FAIL o WARNING en los checks automáticos.", styles["Normal"]))
+    story.append(_pdf_paragraph("Incidencias accionables", styles["Heading2"]))
+    if not report["actionableIssueSummary"]:
+        story.append(_pdf_paragraph("No se han detectado incidencias FAIL/ERROR accionables por el profesorado.", styles["Normal"]))
     else:
         rows = [["Tipo", "Check", "Estado", "Nº recursos", "Recomendación"]]
-        for issue_group in report["issueSummary"]:
+        for issue_group in report["actionableIssueSummary"]:
             rows.append(
                 [
                     _auto_resource_type_label(issue_group["resourceType"]),
@@ -2113,6 +2309,45 @@ def _write_pdf(destination: Path, report: dict[str, Any], brand_name: str) -> No
                 ]
             )
         _append_pdf_table(story, rows, widths=[1.8 * cm, 3.3 * cm, 2.2 * cm, 2 * cm, 6.2 * cm])
+    story.append(_pdf_paragraph("Avisos / revisión manual", styles["Heading2"]))
+    if not report["manualReviewIssueSummary"]:
+        story.append(_pdf_paragraph("No hay avisos accionables ni revisiones manuales destacadas.", styles["Normal"]))
+    else:
+        rows = [["Tipo", "Check", "Estado", "Nº recursos", "Responsabilidad", "Recomendación"]]
+        for issue_group in report["manualReviewIssueSummary"]:
+            rows.append(
+                [
+                    _auto_resource_type_label(issue_group["resourceType"]),
+                    issue_group["checkTitle"],
+                    issue_group["status"],
+                    str(issue_group["resourceCount"]),
+                    issue_group["responsibilityLabel"],
+                    _clip_text(issue_group["recommendation"], 160),
+                ]
+            )
+        _append_pdf_table(story, rows, widths=[1.6 * cm, 2.8 * cm, 1.8 * cm, 1.7 * cm, 2.9 * cm, 4.7 * cm])
+    story.append(_pdf_paragraph("Aspectos no contabilizados por depender de plataforma", styles["Heading2"]))
+    if not report["platformObservationsSummary"]:
+        story.append(_pdf_paragraph("No hay observaciones de plataforma con estado FAIL/WARNING/ERROR.", styles["Normal"]))
+    else:
+        story.append(
+            _pdf_paragraph(
+                "Estas observaciones se documentan, pero no se contabilizan como incidencias accionables.",
+                styles["Normal"],
+            )
+        )
+        rows = [["Tipo", "Check", "Estado", "Nº recursos", "Explicación"]]
+        for issue_group in report["platformObservationsSummary"]:
+            rows.append(
+                [
+                    _auto_resource_type_label(issue_group["resourceType"]),
+                    issue_group["checkTitle"],
+                    issue_group["status"],
+                    str(issue_group["resourceCount"]),
+                    _clip_text(issue_group["accountabilityNote"], 220),
+                ]
+            )
+        _append_pdf_table(story, rows, widths=[1.8 * cm, 3.1 * cm, 1.8 * cm, 1.8 * cm, 7 * cm])
 
     story.extend([PageBreak(), _pdf_paragraph("Detalle técnico", styles["Section"])])
     story.append(_pdf_paragraph("Los checks PASS se omiten en esta sección para mantener el informe accionable.", styles["Normal"]))
@@ -2313,6 +2548,13 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "incidentCount",
             int(automatic_summary.get("failCount", 0)) + int(automatic_summary.get("errorCount", 0)),
         )
+        automatic_summary.setdefault("actionableFailCount", int(automatic_summary.get("failCount", 0)))
+        automatic_summary.setdefault("actionableWarningCount", int(automatic_summary.get("warningCount", 0)))
+        automatic_summary.setdefault("manualReviewCount", 0)
+        automatic_summary.setdefault("platformControlledCount", 0)
+        automatic_summary.setdefault("providerExternalCount", 0)
+        automatic_summary.setdefault("notCoveredCount", 0)
+        automatic_summary.setdefault("responsibilityCounts", {})
         automatic_summary.setdefault("resourcesDetected", 0)
         automatic_summary.setdefault("resourcesAccessed", 0)
         automatic_summary.setdefault("resourcesAnalyzed", 0)
@@ -2365,6 +2607,19 @@ def _normalize_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
             normalized.get("notAutomaticallyAnalyzable", []),
         ),
     )
+    executive_summary = normalized.get("executiveSummary")
+    if isinstance(executive_summary, dict):
+        executive_summary.setdefault("actionableFailCount", int(executive_summary.get("incidentCount", 0)))
+        executive_summary.setdefault("actionableWarningCount", int(executive_summary.get("warningCount", 0)))
+        executive_summary.setdefault("manualReviewCount", 0)
+        executive_summary.setdefault("platformControlledCount", 0)
+        executive_summary.setdefault("providerExternalCount", 0)
+        executive_summary.setdefault("notCoveredCount", 0)
+        executive_summary.setdefault("responsibilityCounts", {})
+    normalized.setdefault("actionableIssueSummary", normalized.get("issueSummary", []))
+    normalized.setdefault("manualReviewIssueSummary", [])
+    normalized.setdefault("platformObservationsSummary", [])
+    normalized.setdefault("platformObservations", [])
 
     for collection_name in ("issueSummary", "keyIssues"):
         for item in normalized.get(collection_name, []):
@@ -2383,6 +2638,13 @@ def _empty_auto_summary() -> dict[str, int]:
         "notApplicableCount": 0,
         "errorCount": 0,
         "incidentCount": 0,
+        "actionableFailCount": 0,
+        "actionableWarningCount": 0,
+        "manualReviewCount": 0,
+        "platformControlledCount": 0,
+        "providerExternalCount": 0,
+        "notCoveredCount": 0,
+        "responsibilityCounts": {},
         "metricsSource": None,
         "metricsVersion": None,
     }

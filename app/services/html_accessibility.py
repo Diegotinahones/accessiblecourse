@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.services.accessibility_responsibility import CheckResponsibility, PLATFORM_CONTROLLED
 from app.core.config import Settings
 from app.services.resource_core import ResourceContentResult, get_resource_content, normalize_resource
 
@@ -63,6 +64,7 @@ class AccessibilityCheckResult(BaseModel):
     evidence: str
     recommendation: str
     wcagHint: str | None = None
+    responsibility: CheckResponsibility = "PROFESSOR_ACTIONABLE"
 
 
 class AccessibilityResourceResult(BaseModel):
@@ -547,74 +549,50 @@ def _increment_summary(
 
 def _check_language(parser: _HTMLAccessibilityParser) -> AccessibilityCheckResult:
     lang = (parser.html_lang or "").strip()
-    if lang:
-        return _result(
-            "html.lang",
-            "Idioma principal definido",
-            "PASS",
-            f"El documento declara lang=\"{lang}\".",
-            "Mantén el atributo lang actualizado con el idioma real del contenido.",
-            "WCAG 3.1.1",
-        )
     return _result(
         "html.lang",
         "Idioma principal definido",
-        "FAIL",
-        "No se ha encontrado un atributo lang no vacío en <html>.",
-        "Añade lang al elemento <html>, por ejemplo <html lang=\"es\">.",
+        "NOT_APPLICABLE",
+        (
+            f"Canvas/UOC controla el atributo lang de la página contenedora; el fragmento declara lang=\"{lang}\"."
+            if lang
+            else "Canvas/UOC controla el atributo lang de la página contenedora, no el fragmento editable."
+        ),
+        "No se penaliza al profesor por este criterio en páginas Canvas; valida idioma del texto editable si procede.",
         "WCAG 3.1.1",
+        responsibility=PLATFORM_CONTROLLED,
     )
 
 
 def _check_title(parser: _HTMLAccessibilityParser, resource_title: str) -> AccessibilityCheckResult:
     title = _normalize_text(parser.title or "")
+    evidence = "Canvas/UOC controla el <title> de la página contenedora."
     if title and not _is_generic_text(title, GENERIC_PAGE_TITLES):
-        return _result(
-            "html.title",
-            "Título de página",
-            "PASS",
-            f"El documento tiene un title descriptivo: \"{_shorten(title)}\".",
-            "Usa títulos únicos y descriptivos para cada página del curso.",
-            "WCAG 2.4.2",
-        )
-    if resource_title and not _is_generic_text(resource_title, GENERIC_PAGE_TITLES):
-        return _result(
-            "html.title",
-            "Título de página",
-            "PASS",
-            f"No hay title útil, pero el recurso tiene título: \"{_shorten(resource_title)}\".",
-            "Si puedes editar el HTML, replica este título en <title>.",
-            "WCAG 2.4.2",
-        )
+        evidence = f"El fragmento incluye title \"{_shorten(title)}\", pero Canvas/UOC controla el título de página."
+    elif resource_title and not _is_generic_text(resource_title, GENERIC_PAGE_TITLES):
+        evidence = f"El recurso tiene título \"{_shorten(resource_title)}\"; Canvas/UOC controla el <title> final."
     return _result(
         "html.title",
         "Título de página",
-        "WARNING",
-        "El <title> está vacío, ausente o parece genérico.",
-        "Define un <title> específico que identifique el recurso.",
+        "NOT_APPLICABLE",
+        evidence,
+        "No se penaliza al profesor por el <title> técnico en Canvas; usa títulos visibles descriptivos en el recurso.",
         "WCAG 2.4.2",
+        responsibility=PLATFORM_CONTROLLED,
     )
 
 
 def _check_main_heading(parser: _HTMLAccessibilityParser) -> AccessibilityCheckResult:
     h1_count = sum(1 for level, _ in parser.headings if level == 1)
-    if h1_count == 1:
-        return _result(
-            "html.h1",
-            "Encabezado principal",
-            "PASS",
-            "Se ha encontrado exactamente un encabezado h1.",
-            "Mantén un único h1 que describa el propósito principal de la página.",
-            "WCAG 2.4.6",
-        )
     evidence = "No se ha encontrado ningún h1." if h1_count == 0 else f"Se han encontrado {h1_count} elementos h1."
     return _result(
         "html.h1",
         "Encabezado principal",
-        "WARNING",
-        evidence,
-        "Usa exactamente un h1 como encabezado principal del recurso.",
+        "NOT_APPLICABLE",
+        f"{evidence} Canvas/UOC controla la estructura principal de página alrededor del fragmento editable.",
+        "No se penaliza al profesor por el h1 contenedor; revisa la jerarquía de encabezados dentro del contenido editable.",
         "WCAG 2.4.6",
+        responsibility=PLATFORM_CONTROLLED,
     )
 
 
@@ -623,8 +601,8 @@ def _check_heading_hierarchy(parser: _HTMLAccessibilityParser) -> AccessibilityC
         return _result(
             "html.heading_hierarchy",
             "Jerarquía de encabezados",
-            "PASS",
-            "No hay suficientes encabezados para detectar saltos de jerarquía.",
+            "NOT_APPLICABLE",
+            "No hay suficientes encabezados en el contenido editable para evaluar la jerarquía.",
             "Cuando añadas secciones, evita saltos como h2 a h4.",
             "WCAG 1.3.1",
         )
@@ -735,27 +713,30 @@ def _check_button_names(parser: _HTMLAccessibilityParser) -> AccessibilityCheckR
             "html.button_name",
             "Botones con nombre accesible",
             "NOT_APPLICABLE",
-            "No se han encontrado botones.",
-            "Cuando añadas botones, asegúrate de que tengan nombre visible o aria-label.",
+            "No se han encontrado botones en el fragmento editable; Canvas/UOC controla los botones de interfaz.",
+            "No se penaliza al profesor por controles propios de la plataforma.",
             "WCAG 4.1.2",
+            responsibility=PLATFORM_CONTROLLED,
         )
     unnamed = [(attrs, text) for attrs, text in parser.buttons if not _accessible_name(attrs, fallback=text)]
     if unnamed:
         return _result(
             "html.button_name",
             "Botones con nombre accesible",
-            "FAIL",
-            f"{len(unnamed)} botón(es) no tienen nombre accesible.",
-            "Añade texto visible, aria-label o title útil a cada botón.",
+            "NOT_APPLICABLE",
+            f"{len(unnamed)} botón(es) no tienen nombre accesible, pero este criterio depende de la estructura/plataforma Canvas.",
+            "No se penaliza al profesor salvo revisión manual de controles realmente editables.",
             "WCAG 4.1.2",
+            responsibility=PLATFORM_CONTROLLED,
         )
     return _result(
         "html.button_name",
         "Botones con nombre accesible",
-        "PASS",
-        "Todos los botones tienen nombre accesible.",
-        "Mantén nombres de botón claros y orientados a la acción.",
+        "NOT_APPLICABLE",
+        "Los botones detectados tienen nombre accesible, pero este criterio se clasifica como controlado por la plataforma.",
+        "No se incluye en el score del profesor para contenido Canvas.",
         "WCAG 4.1.2",
+        responsibility=PLATFORM_CONTROLLED,
     )
 
 
@@ -765,9 +746,10 @@ def _check_form_labels(parser: _HTMLAccessibilityParser) -> AccessibilityCheckRe
             "html.form_label",
             "Campos de formulario con etiqueta",
             "NOT_APPLICABLE",
-            "No se han encontrado campos de formulario.",
-            "Cuando añadas formularios, asocia cada campo a una etiqueta.",
+            "No se han encontrado campos de formulario en el contenido editable; Canvas/UOC controla sus formularios.",
+            "No se penaliza al profesor por formularios de la plataforma.",
             "WCAG 1.3.1",
+            responsibility=PLATFORM_CONTROLLED,
         )
     unlabeled = [
         (tag, attrs)
@@ -778,18 +760,20 @@ def _check_form_labels(parser: _HTMLAccessibilityParser) -> AccessibilityCheckRe
         return _result(
             "html.form_label",
             "Campos de formulario con etiqueta",
-            "FAIL",
-            f"{len(unlabeled)} campo(s) no tienen label, aria-label ni aria-labelledby.",
-            "Asocia cada campo con <label for>, label envolvente, aria-label o aria-labelledby.",
+            "NOT_APPLICABLE",
+            f"{len(unlabeled)} campo(s) no tienen etiqueta detectable, pero este criterio depende de controles/plataforma.",
+            "No se penaliza al profesor salvo revisión manual de formularios realmente editables.",
             "WCAG 1.3.1",
+            responsibility=PLATFORM_CONTROLLED,
         )
     return _result(
         "html.form_label",
         "Campos de formulario con etiqueta",
-        "PASS",
-        "Todos los campos de formulario tienen etiqueta accesible.",
-        "Mantén etiquetas persistentes y comprensibles para cada campo.",
+        "NOT_APPLICABLE",
+        "Los campos detectados tienen etiqueta, pero este criterio se clasifica como controlado por plataforma.",
+        "No se incluye en el score del profesor para contenido Canvas.",
         "WCAG 1.3.1",
+        responsibility=PLATFORM_CONTROLLED,
     )
 
 
@@ -799,27 +783,30 @@ def _check_iframe_titles(parser: _HTMLAccessibilityParser) -> AccessibilityCheck
             "html.iframe_title",
             "Iframes con título",
             "NOT_APPLICABLE",
-            "No se han encontrado iframes.",
-            "Cuando insertes iframes, añade title descriptivo.",
+            "No se han encontrado iframes; Canvas/UOC puede controlar embeds o wrappers técnicos.",
+            "No se penaliza al profesor por iframes de plataforma en el análisis HTML general.",
             "WCAG 4.1.2",
+            responsibility=PLATFORM_CONTROLLED,
         )
     missing = [iframe for iframe in parser.iframes if not iframe.get("title", "").strip()]
     if missing:
         return _result(
             "html.iframe_title",
             "Iframes con título",
-            "FAIL",
-            f"{len(missing)} iframe(s) no tienen title.",
-            "Añade un title que describa el contenido o función de cada iframe.",
+            "NOT_APPLICABLE",
+            f"{len(missing)} iframe(s) no tienen title, pero este criterio se evalúa en el análisis específico de vídeo/embed.",
+            "No se penaliza al profesor en HTML general; revisa el resultado del recurso de vídeo si aplica.",
             "WCAG 4.1.2",
+            responsibility=PLATFORM_CONTROLLED,
         )
     return _result(
         "html.iframe_title",
         "Iframes con título",
-        "PASS",
-        "Todos los iframes tienen title.",
-        "Mantén títulos de iframe específicos y no repetitivos.",
+        "NOT_APPLICABLE",
+        "Los iframes detectados tienen title, pero este criterio se clasifica como controlado/revisado fuera del HTML general.",
+        "No se incluye en el score del profesor para contenido Canvas.",
         "WCAG 4.1.2",
+        responsibility=PLATFORM_CONTROLLED,
     )
 
 
@@ -863,6 +850,8 @@ def _result(
     evidence: str,
     recommendation: str,
     wcag_hint: str | None = None,
+    *,
+    responsibility: CheckResponsibility = "PROFESSOR_ACTIONABLE",
 ) -> AccessibilityCheckResult:
     return AccessibilityCheckResult(
         checkId=check_id,
@@ -871,6 +860,7 @@ def _result(
         evidence=evidence,
         recommendation=recommendation,
         wcagHint=wcag_hint,
+        responsibility=responsibility,
     )
 
 

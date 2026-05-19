@@ -1106,7 +1106,11 @@ def test_offline_get_resource_content_returns_html_and_binary_path(client, test_
     check_statuses = {
         check["checkId"]: check["status"] for check in accessibility["modules"][0]["resources"][0]["checks"]
     }
-    assert check_statuses["html.lang"] == "FAIL"
+    check_responsibilities = {
+        check["checkId"]: check["responsibility"] for check in accessibility["modules"][0]["resources"][0]["checks"]
+    }
+    assert check_statuses["html.lang"] == "NOT_APPLICABLE"
+    assert check_responsibilities["html.lang"] == "PLATFORM_CONTROLLED"
 
     with Session(client.app.state.engine) as session:
         events = session.exec(select(JobEvent).where(JobEvent.job_id == job_id)).all()
@@ -1249,7 +1253,12 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
     assert report["automaticAccessibilitySummary"]["notebookResourcesAnalyzed"] == 1
     assert report["automaticAccessibilitySummary"]["failCount"] >= 1
     assert report["automaticAccessibilitySummary"]["warningCount"] >= 1
+    assert report["automaticAccessibilitySummary"]["manualReviewCount"] >= 1
+    assert report["automaticAccessibilitySummary"]["platformControlledCount"] >= 0
+    assert report["automaticAccessibilitySummary"]["notCoveredCount"] >= 0
     for metric_key in ("passCount", "failCount", "warningCount", "notApplicableCount", "errorCount", "incidentCount"):
+        assert report["automaticAccessibilitySummary"][metric_key] == accessibility["summary"][metric_key]
+    for metric_key in ("manualReviewCount", "providerExternalCount", "platformControlledCount", "notCoveredCount"):
         assert report["automaticAccessibilitySummary"][metric_key] == accessibility["summary"][metric_key]
     assert report["automaticAccessibilitySummary"]["incidentCount"] == (
         report["automaticAccessibilitySummary"]["failCount"] + report["automaticAccessibilitySummary"]["errorCount"]
@@ -1265,6 +1274,8 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
     assert report["executiveSummary"]["score"] == executive["accessibilityScore"]
     assert report["executiveSummary"]["incidentCount"] == executive["summary"]["incidentCount"]
     assert report["executiveSummary"]["warningCount"] == executive["summary"]["warningCount"]
+    for metric_key in ("manualReviewCount", "providerExternalCount", "platformControlledCount", "notCoveredCount"):
+        assert report["executiveSummary"][metric_key] == executive["summary"][metric_key]
     assert report["executiveSummary"]["metricsSource"] == executive["metricsSource"] == "centralized"
     assert report["executiveSummary"]["metricsVersion"] == executive["metricsVersion"] == "1.0"
     assert len(report["executiveSummary"]["priorityRecommendations"]) == 3
@@ -1275,8 +1286,7 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
     assert any(resource["type"] == "NOTEBOOK" for resource in report["resourceScores"])
     assert report["htmlAccessibilitySummary"]["resourcesDetected"] == 1
     assert report["htmlAccessibilitySummary"]["resourcesAnalyzed"] == 1
-    assert report["htmlAccessibilitySummary"]["failCount"] >= 1
-    assert report["htmlAccessibilitySummary"]["warningCount"] >= 1
+    assert report["htmlAccessibilitySummary"]["failCount"] == 0
     assert report["pdfAccessibilitySummary"]["resourcesDetected"] == 1
     assert report["pdfAccessibilitySummary"]["resourcesAnalyzed"] == 1
     assert report["pdfAccessibilitySummary"]["failCount"] >= 1
@@ -1293,16 +1303,28 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
     assert report["notebookAccessibilitySummary"]["failCount"] >= 1
     assert report["notebookAccessibilitySummary"]["warningCount"] >= 1
     assert report["issueSummary"]
+    assert report["actionableIssueSummary"]
+    assert report["manualReviewIssueSummary"]
     assert report["keyIssues"]
     assert report["keyIssues"][0]["status"] == "FAIL"
+    assert all(issue["checkId"] not in {"html.lang", "html.h1", "html.title"} for issue in report["keyIssues"])
+    assert all(
+        "Idioma principal definido" not in problem and "Encabezado principal" not in problem
+        for problem in report["executiveSummary"]["mainProblems"]
+    )
+    assert any(issue["checkId"] == "pdf.lang" for issue in report["actionableIssueSummary"])
+    assert any(
+        issue["resourceType"] == "VIDEO" and issue["responsibility"] == "MANUAL_REVIEW"
+        for issue in report["manualReviewIssueSummary"]
+    )
     assert any(issue["status"] == "WARNING" for issue in report["keyIssues"])
     assert any(issue["resourceType"] == "PDF" for issue in report["keyIssues"])
     assert any(issue["resourceType"] == "WORD" for issue in report["keyIssues"])
     assert any(issue["resourceType"] == "VIDEO" for issue in report["keyIssues"])
     assert any(issue["resourceType"] == "NOTEBOOK" for issue in report["keyIssues"])
     assert report["htmlResources"][0]["resourceId"] == "res-html"
-    assert report["htmlResources"][0]["overallStatus"] == "FAIL"
-    assert report["htmlResources"][0]["summarized"] is False
+    assert report["htmlResources"][0]["overallStatus"] == "PASS"
+    assert report["htmlResources"][0]["summarized"] is True
     assert report["pdfResources"][0]["title"] == "Brief de la PEC"
     assert report["pdfResources"][0]["overallStatus"] == "FAIL"
     assert report["pdfResources"][0]["summarized"] is False
@@ -1354,11 +1376,15 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
         if len(row.cells) >= 2
     }
     assert "Resumen ejecutivo" in paragraphs
+    assert "Metodología del análisis" in paragraphs
     assert "Resumen de acceso" in paragraphs
     assert "Resumen de accesibilidad automática" in paragraphs
     assert "Puntuación por módulo" in paragraphs
     assert "Puntuación por recurso" in paragraphs
     assert "Principales incidencias" in paragraphs
+    assert "Incidencias accionables" in paragraphs
+    assert "Avisos / revisión manual" in paragraphs
+    assert "Aspectos no contabilizados por depender de plataforma" in paragraphs
     assert "Detalle técnico" in paragraphs
     assert "Detalle por recurso HTML" in paragraphs
     assert "Detalle por recurso PDF" in paragraphs
@@ -1372,7 +1398,10 @@ def test_report_generation_includes_access_html_pdf_word_video_and_notebook_acce
     assert any("Vídeo de apoyo" in paragraph for paragraph in paragraphs)
     assert any("Notebook del laboratorio" in paragraph for paragraph in paragraphs)
     assert any("Los notebooks se analizan de forma estática" in paragraph for paragraph in paragraphs)
+    assert any("no se contabilizan como errores del profesorado" in paragraph for paragraph in paragraphs)
     assert ("Incidencias (FAIL + ERROR)", str(executive["summary"]["incidentCount"])) in table_pairs
+    assert ("Revisión manual", str(accessibility["summary"]["manualReviewCount"])) in table_pairs
+    assert ("Aspectos de proveedor externo", str(accessibility["summary"]["providerExternalCount"])) in table_pairs
     assert ("Correctos (PASS)", str(accessibility["summary"]["passCount"])) in table_pairs
 
     pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf_path)).pages)

@@ -73,7 +73,9 @@ def test_resource_with_all_pass_scores_100() -> None:
         mode="OFFLINE_IMSCC",
         course_title="Curso",
         inventory_items=[_resource("r1")],
-        accessibility_report=_report(_analyzed_resource("r1", [_check("html.lang", "PASS"), _check("html.h1", "PASS")])),
+        accessibility_report=_report(
+            _analyzed_resource("r1", [_check("html.img_alt", "PASS"), _check("html.link_text", "PASS")])
+        ),
     )
 
     resource = summary["modules"][0]["resources"][0]
@@ -92,7 +94,7 @@ def test_resource_with_fail_and_warning_scores_lower() -> None:
         accessibility_report=_report(
             _analyzed_resource(
                 "r1",
-                [_check("html.lang", "PASS"), _check("html.h1", "WARNING"), _check("html.images_alt", "FAIL")],
+                [_check("html.link_text", "PASS"), _check("html.heading_hierarchy", "WARNING"), _check("html.img_alt", "FAIL")],
             )
         ),
     )
@@ -110,7 +112,7 @@ def test_not_applicable_checks_do_not_penalize_score() -> None:
         course_title="Curso",
         inventory_items=[_resource("r1")],
         accessibility_report=_report(
-            _analyzed_resource("r1", [_check("html.lang", "PASS"), _check("html.table_headers", "NOT_APPLICABLE")])
+            _analyzed_resource("r1", [_check("html.link_text", "PASS"), _check("html.table_headers", "NOT_APPLICABLE")])
         ),
     )
 
@@ -125,8 +127,8 @@ def test_module_and_global_scores_average_scored_resources() -> None:
         course_title="Curso",
         inventory_items=[_resource("r1"), _resource("r2", resource_type="PDF")],
         accessibility_report=_report(
-            _analyzed_resource("r1", [_check("html.lang", "PASS"), _check("html.h1", "PASS")]),
-            _analyzed_resource("r2", [_check("pdf.text_extractable", "PASS"), _check("pdf.tagged", "FAIL")], resource_type="PDF"),
+            _analyzed_resource("r1", [_check("html.img_alt", "PASS"), _check("html.link_text", "PASS")]),
+            _analyzed_resource("r2", [_check("pdf.extractable_text", "PASS"), _check("pdf.tagged", "FAIL")], resource_type="PDF"),
         ),
     )
 

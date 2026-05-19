@@ -7,6 +7,18 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from app.services.access_analysis import build_access_summary
+from app.services.accessibility_responsibility import (
+    MANUAL_REVIEW,
+    NOT_COVERED,
+    PLATFORM_CONTROLLED,
+    PROFESSOR_ACTIONABLE,
+    PROVIDER_EXTERNAL,
+    RESPONSIBILITY_VALUES,
+    classify_check_responsibility,
+    is_reportable_issue,
+    is_scored_responsibility,
+    is_warning_or_manual_review,
+)
 from app.services.html_accessibility import AccessibilityCheckResult, AccessibilityReport
 from app.services.resource_core import normalize_resource
 
@@ -37,7 +49,7 @@ IMPORTANT_WARNING_CHECKS = {
     "html.heading_hierarchy",
     "pdf.title",
     "pdf.headings",
-    "pdf.images_alt",
+    "pdf.figure_alt",
     "docx.title",
     "docx.headings",
     "docx.heading_hierarchy",
@@ -53,15 +65,15 @@ IMPORTANT_WARNING_CHECKS = {
     "notebook.markdown_tables",
 }
 CRITICAL_FAIL_CHECKS = {
-    "html.lang",
+    "html.img_alt",
     "html.images_alt",
+    "html.link_text",
     "html.links_descriptive",
-    "html.form_labels",
     "pdf.readable",
-    "pdf.text_extractable",
+    "pdf.extractable_text",
     "pdf.tagged",
     "docx.readable",
-    "docx.text_extractable",
+    "docx.extractable_text",
     "video.accessible",
     "video.captions",
     "video.controls",
@@ -103,12 +115,12 @@ def calculate_accessibility_metrics(
     )
     detected_by_type = _detected_by_analysis_type(main_items)
     resources_by_type = Counter(normalize_resource(item).type for item in main_items)
-    unique_checks, checks_by_resource, report_resources = _unique_checks(accessibility_report)
+    inventory_by_id = {normalize_resource(item).id: item for item in scoped_items}
+    unique_checks, checks_by_resource, report_resources = _unique_checks(accessibility_report, inventory_by_id)
 
-    status_counts = Counter(entry["status"] for entry in unique_checks)
-    type_status_counts: dict[str, Counter[str]] = {analysis_type: Counter() for analysis_type in ANALYSIS_TYPES}
+    type_entries: dict[str, list[dict[str, Any]]] = {analysis_type: [] for analysis_type in ANALYSIS_TYPES}
     for entry in unique_checks:
-        type_status_counts[entry["analysisType"]][entry["status"]] += 1
+        type_entries[entry["analysisType"]].append(entry)
 
     score_by_resource_id = {
         resource_id: _score_resource(checks)
@@ -133,13 +145,14 @@ def calculate_accessibility_metrics(
     top_recommendations = _top_recommendations(top_issues)
     analyzed_ids = set(report_resources)
     not_analyzable_resources = _not_analyzable_resource_count(scoped_items, analyzed_ids)
+    not_covered_count = _not_covered_resource_count(scoped_items, analyzed_ids)
 
-    base_counts = _base_counts(status_counts)
+    base_counts = _base_counts(unique_checks)
     type_summaries = {
         analysis_type: {
             "resourcesTotal": detected_by_type[analysis_type],
             "resourcesAnalyzed": analyzed_by_type[analysis_type],
-            **_base_counts(type_status_counts[analysis_type]),
+            **_base_counts(type_entries[analysis_type]),
         }
         for analysis_type in ANALYSIS_TYPES
     }
@@ -155,6 +168,11 @@ def calculate_accessibility_metrics(
         "resourcesAnalyzed": len(report_resources),
         "analyzedResourceIds": sorted(analyzed_ids),
         "notAnalyzableResources": not_analyzable_resources,
+        "manualReviewCount": _responsibility_count(unique_checks, {MANUAL_REVIEW}),
+        "providerExternalCount": _responsibility_count(unique_checks, {PROVIDER_EXTERNAL}),
+        "platformControlledCount": _responsibility_count(unique_checks, {PLATFORM_CONTROLLED}),
+        "notCoveredCount": not_covered_count,
+        "responsibilityCounts": _responsibility_counts(unique_checks, not_covered_count=not_covered_count),
         "resourcesByType": dict(sorted(resources_by_type.items())),
         "analyzedByType": dict(sorted(analyzed_by_type.items())),
         "detectedByType": {analysis_type: detected_by_type[analysis_type] for analysis_type in ANALYSIS_TYPES},
@@ -210,6 +228,13 @@ def build_accessibility_summary_payload(metrics: dict[str, Any]) -> dict[str, An
         "resourcesAnalyzed": metrics["resourcesAnalyzed"],
         "downloadableResources": metrics["downloadableResources"],
         "notAnalyzableResources": metrics["notAnalyzableResources"],
+        "actionableFailCount": metrics["actionableFailCount"],
+        "actionableWarningCount": metrics["actionableWarningCount"],
+        "manualReviewCount": metrics["manualReviewCount"],
+        "platformControlledCount": metrics["platformControlledCount"],
+        "providerExternalCount": metrics["providerExternalCount"],
+        "notCoveredCount": metrics["notCoveredCount"],
+        "responsibilityCounts": metrics["responsibilityCounts"],
         "resourcesByType": metrics["resourcesByType"],
         "analyzedByType": metrics["analyzedByType"],
         "accessibilityScore": metrics["accessibilityScore"],
@@ -242,6 +267,13 @@ def build_automatic_summary_payload(metrics: dict[str, Any]) -> dict[str, Any]:
         "resourcesAccessed": metrics["resourcesAccessed"],
         "resourcesAnalyzed": metrics["resourcesAnalyzed"],
         "notAnalyzableResources": metrics["notAnalyzableResources"],
+        "actionableFailCount": metrics["actionableFailCount"],
+        "actionableWarningCount": metrics["actionableWarningCount"],
+        "manualReviewCount": metrics["manualReviewCount"],
+        "platformControlledCount": metrics["platformControlledCount"],
+        "providerExternalCount": metrics["providerExternalCount"],
+        "notCoveredCount": metrics["notCoveredCount"],
+        "responsibilityCounts": metrics["responsibilityCounts"],
         "resourcesByType": metrics["resourcesByType"],
         "analyzedByType": metrics["analyzedByType"],
         "accessibilityScore": metrics["accessibilityScore"],
@@ -264,6 +296,13 @@ def build_report_type_summaries(metrics: dict[str, Any]) -> dict[str, dict[str, 
             "incidentCount": summary["incidentCount"],
             "metricsSource": metrics["metricsSource"],
             "metricsVersion": metrics["metricsVersion"],
+            "actionableFailCount": summary["actionableFailCount"],
+            "actionableWarningCount": summary["actionableWarningCount"],
+            "manualReviewCount": summary["manualReviewCount"],
+            "platformControlledCount": summary["platformControlledCount"],
+            "providerExternalCount": summary["providerExternalCount"],
+            "notCoveredCount": summary["notCoveredCount"],
+            "responsibilityCounts": summary["responsibilityCounts"],
         }
         for analysis_type, summary in type_summaries.items()
     }
@@ -273,21 +312,38 @@ def report_priority(value: ExecutivePriority | str | None) -> str:
     return REPORT_PRIORITY_BY_EXECUTIVE.get(str(value or "NOT_SCORED"), "sin_puntuar")
 
 
-def _base_counts(counts: Counter[str]) -> dict[str, int]:
-    fail_count = int(counts["FAIL"])
-    error_count = int(counts["ERROR"])
+def _base_counts(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts = Counter(entry["status"] for entry in entries)
+    fail_count = _entry_status_count(entries, "FAIL", responsibilities={PROFESSOR_ACTIONABLE})
+    error_count = _entry_status_count(entries, "ERROR", responsibilities={PROFESSOR_ACTIONABLE})
+    actionable_warning_count = _entry_status_count(entries, "WARNING", responsibilities={PROFESSOR_ACTIONABLE})
+    manual_warning_count = sum(
+        1
+        for entry in entries
+        if entry["responsibility"] == MANUAL_REVIEW
+        and entry["status"] == "WARNING"
+        and is_warning_or_manual_review(entry["responsibility"], entry["status"])
+    )
     return {
-        "passCount": int(counts["PASS"]),
+        "passCount": _entry_status_count(entries, "PASS", responsibilities={PROFESSOR_ACTIONABLE}),
         "failCount": fail_count,
-        "warningCount": int(counts["WARNING"]),
-        "notApplicableCount": int(counts["NOT_APPLICABLE"]),
+        "warningCount": actionable_warning_count + manual_warning_count,
+        "notApplicableCount": int(status_counts["NOT_APPLICABLE"]),
         "errorCount": error_count,
         "incidentCount": fail_count + error_count,
+        "actionableFailCount": fail_count,
+        "actionableWarningCount": actionable_warning_count,
+        "manualReviewCount": _responsibility_count(entries, {MANUAL_REVIEW}),
+        "providerExternalCount": _responsibility_count(entries, {PROVIDER_EXTERNAL}),
+        "platformControlledCount": _responsibility_count(entries, {PLATFORM_CONTROLLED}),
+        "notCoveredCount": _responsibility_count(entries, {NOT_COVERED}),
+        "responsibilityCounts": _responsibility_counts(entries),
     }
 
 
 def _unique_checks(
     report: AccessibilityReport,
+    inventory_by_id: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, list[AccessibilityCheckResult]], dict[str, dict[str, Any]]]:
     seen: set[tuple[str, str, str]] = set()
     entries: list[dict[str, Any]] = []
@@ -308,6 +364,7 @@ def _unique_checks(
                     "accessStatus": resource.accessStatus,
                     "moduleTitle": module.title,
                     "checks": [],
+                    "scoredChecks": [],
                 },
             )
             for check in resource.checks:
@@ -317,14 +374,25 @@ def _unique_checks(
                 dedupe_key = (resource_id, str(check.checkId), status)
                 if dedupe_key in seen:
                     continue
+                responsibility = classify_check_responsibility(
+                    str(check.checkId),
+                    analysis_type=analysis_type,
+                    status=status,
+                    resource=resource,
+                    inventory_item=inventory_by_id.get(resource_id),
+                )
+                check.responsibility = responsibility
                 seen.add(dedupe_key)
-                checks_by_resource[resource_id].append(check)
+                if is_scored_responsibility(responsibility):
+                    checks_by_resource[resource_id].append(check)
+                    report_resources[resource_id]["scoredChecks"].append(check)
                 report_resources[resource_id]["checks"].append(check)
                 entries.append(
                     {
                         "resourceId": resource_id,
                         "analysisType": analysis_type,
                         "status": status,
+                        "responsibility": responsibility,
                         "check": check,
                     }
                 )
@@ -459,7 +527,7 @@ def _resource_score_rows(
 
 def _resource_status_count(resource_id: str, status: str, report_resources: dict[str, dict[str, Any]]) -> int:
     resource = report_resources.get(resource_id)
-    checks = resource.get("checks", []) if isinstance(resource, dict) else []
+    checks = resource.get("scoredChecks", []) if isinstance(resource, dict) else []
     return sum(1 for check in checks if getattr(check, "status", None) == status)
 
 
@@ -611,6 +679,8 @@ def _top_issues(entries: list[dict[str, Any]], *, limit: int = 5) -> list[dict[s
         status = entry["status"]
         if status not in {"FAIL", "ERROR", "WARNING"}:
             continue
+        if not is_reportable_issue(str(entry.get("responsibility")), status):
+            continue
         check = entry["check"]
         issue_type = str(entry["analysisType"])
         key = (issue_type, check.checkTitle, check.recommendation)
@@ -637,6 +707,22 @@ def _top_recommendations(top_issues: list[dict[str, Any]], *, limit: int = 5) ->
         if len(recommendations) >= limit:
             break
     return recommendations
+
+
+def _entry_status_count(entries: list[dict[str, Any]], status: str, *, responsibilities: set[str]) -> int:
+    return sum(
+        1 for entry in entries if entry["status"] == status and entry.get("responsibility") in responsibilities
+    )
+
+
+def _responsibility_count(entries: list[dict[str, Any]], responsibilities: set[str]) -> int:
+    return sum(1 for entry in entries if entry.get("responsibility") in responsibilities)
+
+
+def _responsibility_counts(entries: list[dict[str, Any]], *, not_covered_count: int = 0) -> dict[str, int]:
+    counts = Counter(str(entry.get("responsibility") or PROFESSOR_ACTIONABLE) for entry in entries)
+    counts[NOT_COVERED] += not_covered_count
+    return {responsibility: int(counts[responsibility]) for responsibility in sorted(RESPONSIBILITY_VALUES)}
 
 
 def _detected_by_analysis_type(main_items: list[dict[str, Any]]) -> Counter[str]:
@@ -698,6 +784,17 @@ def _not_analyzable_resource_count(scoped_items: list[dict[str, Any]], analyzed_
             or core.type not in {"WEB", "PDF", "DOCX", "VIDEO", "NOTEBOOK"}
             or _candidate_analysis_type(item) is None
         ):
+            count += 1
+    return count
+
+
+def _not_covered_resource_count(scoped_items: list[dict[str, Any]], analyzed_ids: set[str]) -> int:
+    count = 0
+    for item in scoped_items:
+        core = normalize_resource(item)
+        if core.id in analyzed_ids or _is_technical_ignored(item):
+            continue
+        if core.type not in {"WEB", "PDF", "DOCX", "VIDEO", "NOTEBOOK"}:
             count += 1
     return count
 

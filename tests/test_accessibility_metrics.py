@@ -60,13 +60,7 @@ def _fixture() -> tuple[list[dict[str, object]], AccessibilityReport]:
         _inventory_resource("html", "WEB", "html.html"),
         _inventory_resource("pdf", "PDF", "pdf.pdf"),
         _inventory_resource("docx", "DOCX", "docx.docx"),
-        {
-            **_inventory_resource("video", "VIDEO", "video.mp4"),
-            "origin": "EXTERNAL_URL",
-            "sourceUrl": "https://example.com/video",
-            "contentAvailable": False,
-            "canDownload": False,
-        },
+        _inventory_resource("video", "VIDEO", "video.mp4"),
         _inventory_resource("notebook", "NOTEBOOK", "notebook.ipynb"),
         {
             **_inventory_resource("sso", "WEB", "sso.html"),
@@ -88,8 +82,9 @@ def _fixture() -> tuple[list[dict[str, object]], AccessibilityReport]:
                         "html",
                         "HTML",
                         [
-                            _check("html.lang", "PASS"),
-                            _check("html.lang", "PASS"),
+                            _check("html.lang", "FAIL"),
+                            _check("html.h1", "FAIL"),
+                            _check("html.link_text", "PASS"),
                             _check("html.images_alt", "FAIL"),
                             _check("html.tables", "NOT_APPLICABLE"),
                         ],
@@ -152,6 +147,10 @@ def test_central_metrics_dedupe_and_count_incidents_consistently() -> None:
     assert metrics["notApplicableCount"] == 5
     assert metrics["errorCount"] == 1
     assert metrics["incidentCount"] == 3
+    assert metrics["manualReviewCount"] == 0
+    assert metrics["platformControlledCount"] == 2
+    assert metrics["providerExternalCount"] == 0
+    assert metrics["notCoveredCount"] == 0
     assert metrics["resourcesDetected"] == 6
     assert metrics["resourcesAnalyzed"] == 5
     assert set(metrics["analyzedResourceIds"]) == {"html", "pdf", "docx", "video", "notebook"}
@@ -182,7 +181,68 @@ def test_accessibility_executive_and_report_models_share_central_metrics() -> No
     assert accessibility_summary["incidentCount"] == automatic_summary["incidentCount"] == 3
     assert accessibility_summary["warningCount"] == automatic_summary["warningCount"] == 3
     assert executive["summary"]["incidentCount"] == report_executive["incidentCount"] == 3
+    assert executive["summary"]["platformControlledCount"] == report_executive["platformControlledCount"] == 2
     assert executive["summary"]["resourcesAnalyzed"] == report_executive["resourcesAnalyzed"] == 5
     assert executive["accessibilityScore"] == report_executive["score"]
     assert metrics["reportModuleScores"][0]["resourcesAnalyzed"] == 5
     assert len(metrics["reportResourceScores"]) == 5
+
+
+def test_julia_methodology_excludes_platform_and_external_provider_from_incidents() -> None:
+    inventory = [
+        _inventory_resource("html", "WEB", "html.html"),
+        {
+            **_inventory_resource("video", "VIDEO", "video.mp4"),
+            "origin": "EXTERNAL_URL",
+            "sourceUrl": "https://vimeo.com/12345",
+            "contentAvailable": False,
+            "canDownload": False,
+        },
+    ]
+    report = AccessibilityReport(
+        jobId="job-julia",
+        summary=AccessibilitySummary(),
+        modules=[
+            AccessibilityModuleResult(
+                title="Modulo comun",
+                resources=[
+                    _resource(
+                        "html",
+                        "HTML",
+                        [
+                            _check("html.lang", "FAIL"),
+                            _check("html.h1", "WARNING"),
+                            _check("html.link_text", "FAIL"),
+                        ],
+                    ),
+                    _resource(
+                        "video",
+                        "VIDEO",
+                        [
+                            _check("video.captions", "WARNING"),
+                            _check("video.provider", "WARNING"),
+                        ],
+                    ),
+                ],
+            )
+        ],
+    )
+
+    metrics = calculate_accessibility_metrics(
+        job_id="job-julia",
+        inventory_items=inventory,
+        accessibility_report=report,
+    )
+
+    assert metrics["incidentCount"] == 1
+    assert metrics["failCount"] == 1
+    assert metrics["warningCount"] == 1
+    assert metrics["platformControlledCount"] == 2
+    assert metrics["manualReviewCount"] == 1
+    assert metrics["providerExternalCount"] == 1
+    assert metrics["accessibilityScore"] == 0
+    top_issue_titles = {issue["checkTitle"] for issue in metrics["topIssues"]}
+    assert "Check html.lang" not in top_issue_titles
+    assert "Check html.h1" not in top_issue_titles
+    assert "Check html.link_text" in top_issue_titles
+    assert "Check video.captions" in top_issue_titles

@@ -8,8 +8,13 @@ def _status_by_check(resource: dict[str, object], context: str | None = None) ->
     return {check.checkId: check.status for check in checks}
 
 
+def _checks_by_id(resource: dict[str, object], context: str | None = None):
+    checks = analyze_video_accessibility(resource, context)
+    return {check.checkId: check for check in checks}
+
+
 def test_video_accessibility_identifies_provider_and_requires_manual_review() -> None:
-    statuses = _status_by_check(
+    checks = _checks_by_id(
         {
             "id": "video-1",
             "title": "Video de apoyo",
@@ -20,11 +25,14 @@ def test_video_accessibility_identifies_provider_and_requires_manual_review() ->
         }
     )
 
+    statuses = {check_id: check.status for check_id, check in checks.items()}
     assert statuses["video.provider"] == "PASS"
     assert statuses["video.captions"] == "WARNING"
     assert statuses["video.transcript"] == "WARNING"
     assert statuses["video.iframe_title"] == "WARNING"
     assert statuses["video.manual_review"] == "WARNING"
+    assert checks["video.captions"].responsibility == "MANUAL_REVIEW"
+    assert checks["video.provider"].responsibility == "PROVIDER_EXTERNAL"
 
 
 def test_video_accessibility_passes_detectable_signals() -> None:

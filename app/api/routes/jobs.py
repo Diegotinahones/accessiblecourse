@@ -225,13 +225,15 @@ def _accessibility_report_read(
     course_metadata: dict[str, str | None] | None = None,
     inventory_items: list[dict] | None = None,
 ) -> AccessibilityReportRead:
-    payload = report.model_dump(mode="python")
+    metrics = None
     if inventory_items is not None:
         metrics = calculate_accessibility_metrics(
             job_id=report.jobId,
             inventory_items=inventory_items,
             accessibility_report=report,
         )
+    payload = report.model_dump(mode="python")
+    if metrics is not None:
         payload["summary"] = metrics["accessibilitySummary"]
         payload["metricsSource"] = metrics["metricsSource"]
         payload["metricsVersion"] = metrics["metricsVersion"]

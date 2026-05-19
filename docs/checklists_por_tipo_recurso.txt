@@ -1,0 +1,183 @@
+CHECKS AUTOMATICOS POR TIPO DE RECURSO
+AccessibleCourse
+
+HTML / WEB
+==========
+
+- html.lang - Idioma principal definido
+  Comprueba si el HTML declara el idioma principal con el atributo lang.
+
+- html.title - Titulo de pagina
+  Comprueba si la pagina tiene un titulo util y no generico.
+
+- html.h1 - Encabezado principal
+  Comprueba si existe exactamente un h1.
+
+- html.heading_hierarchy - Jerarquia de encabezados
+  Comprueba si los encabezados h1-h6 mantienen una jerarquia sin saltos bruscos.
+
+- html.img_alt - Imagenes con texto alternativo
+  Comprueba si las imagenes tienen atributo alt y detecta alt vacio no decorativo.
+
+- html.link_text - Enlaces descriptivos
+  Comprueba si los enlaces tienen texto comprensible y evita textos genericos como "aqui" o URLs desnudas.
+
+- html.button_name - Botones con nombre accesible
+  Comprueba si los botones tienen texto, aria-label, title u otro nombre accesible.
+
+- html.form_label - Campos de formulario con etiqueta
+  Comprueba si los campos tienen etiqueta asociada o nombre accesible.
+
+- html.iframe_title - Iframes con titulo
+  Comprueba si los iframes tienen un title descriptivo.
+
+- html.table_headers - Tablas con encabezados
+  Comprueba si las tablas tienen th, caption o asociaciones de encabezado.
+
+
+PDF
+===
+
+- pdf.readable - PDF legible/no cifrado
+  Comprueba si el PDF se puede abrir sin contrasena.
+
+- pdf.extractable_text - Texto extraible
+  Comprueba si el PDF contiene texto real extraible.
+
+- pdf.lang - Idioma del documento
+  Comprueba si el PDF declara idioma en /Lang.
+
+- pdf.title - Titulo del documento
+  Comprueba si el PDF tiene un titulo util en los metadatos.
+
+- pdf.tagged - PDF etiquetado
+  Comprueba si el PDF tiene estructura etiquetada.
+
+- pdf.headings - Encabezados estructurados
+  Comprueba si el arbol de etiquetas incluye encabezados.
+
+- pdf.figure_alt - Imagenes con texto alternativo
+  Comprueba si las figuras etiquetadas tienen texto alternativo.
+
+- pdf.tables - Tablas estructuradas
+  Comprueba si las tablas tienen estructura semantica.
+
+- pdf.links - Enlaces detectables
+  Comprueba si los enlaces del PDF tienen destino.
+
+- pdf.bookmarks - Marcadores en documentos largos
+  Comprueba si los PDFs largos tienen marcadores de navegacion.
+
+
+WORD / DOCX
+===========
+
+- docx.readable - Documento legible
+  Comprueba si el DOCX se puede abrir y parsear.
+
+- docx.extractable_text - Texto extraible
+  Comprueba si el documento contiene texto util.
+
+- docx.lang - Idioma del documento
+  Comprueba si el DOCX declara idioma en estilos, configuracion o propiedades.
+
+- docx.title - Titulo del documento
+  Comprueba si el documento tiene un titulo util en propiedades.
+
+- docx.headings - Uso de estilos de encabezado
+  Comprueba si se usan estilos Heading 1, Heading 2, etc.
+
+- docx.heading_hierarchy - Jerarquia de encabezados
+  Comprueba si los encabezados mantienen una jerarquia sin saltos bruscos.
+
+- docx.image_alt - Imagenes con texto alternativo
+  Comprueba si las imagenes tienen texto alternativo en el XML del DOCX.
+
+- docx.tables - Tablas con estructura
+  Comprueba si las tablas tienen una fila de encabezado identificable.
+
+- docx.links - Enlaces descriptivos
+  Comprueba si los enlaces tienen texto descriptivo y no son URLs desnudas.
+
+- docx.lists - Listas estructuradas
+  Comprueba si se usan listas nativas de Word en lugar de listas manuales.
+
+
+VIDEO
+=====
+
+- video.accessible - Recurso de video accesible
+  Comprueba si el video responde o si requiere SSO, interaccion o revision manual.
+
+- video.title - Titulo descriptivo del video
+  Comprueba si el video tiene un titulo util y no generico.
+
+- video.provider - Proveedor/plataforma identificada
+  Comprueba si se puede identificar la plataforma del video.
+
+- video.manual_review - Revision manual del proveedor
+  Comprueba si el proveedor externo requiere revision humana.
+
+- video.iframe_title - Iframe con titulo accesible
+  Comprueba si el iframe del video tiene title descriptivo.
+
+- video.captions - Subtitulos detectables
+  Comprueba si hay pistas, enlaces o senales de subtitulos.
+
+- video.transcript - Transcripcion detectable
+  Comprueba si hay transcripcion o recursos relacionados detectables.
+
+- video.audio_description - Audio descripcion o alternativa equivalente
+  Comprueba si hay senales de audio descripcion o alternativa textual.
+
+- video.controls - Controles del reproductor
+  Comprueba si el reproductor tiene controles accesibles o controles nativos.
+
+- video.autoplay - Autoplay / reproduccion automatica
+  Comprueba si hay reproduccion automatica potencialmente problematica.
+
+- video.local_metadata - Fichero local con metadatos verificables
+  Comprueba metadatos basicos del fichero de video cuando esta disponible.
+
+
+JUPYTER NOTEBOOK
+================
+
+- notebook.readable - Notebook legible
+  Comprueba si el .ipynb se puede abrir y parsear como JSON.
+
+- notebook.intro_markdown - Texto explicativo inicial
+  Comprueba si el notebook empieza con una celda Markdown introductoria.
+
+- notebook.title - Titulo principal
+  Comprueba si existe un encabezado Markdown de nivel 1.
+
+- notebook.heading_hierarchy - Jerarquia de encabezados Markdown
+  Comprueba si los encabezados Markdown mantienen una jerarquia correcta.
+
+- notebook.markdown_explanation - Celdas Markdown descriptivas
+  Comprueba si hay suficiente explicacion textual junto al codigo.
+
+- notebook.image_alt - Imagenes con alternativa textual
+  Comprueba si las imagenes Markdown tienen alt descriptivo.
+
+- notebook.links - Enlaces descriptivos
+  Comprueba si los enlaces Markdown tienen texto util y no son URLs desnudas.
+
+- notebook.visual_outputs - Salidas visuales explicadas
+  Comprueba si los graficos u outputs visuales tienen explicacion cercana.
+
+- notebook.execution_errors - Errores de ejecucion guardados
+  Comprueba si el notebook contiene outputs de error.
+
+- notebook.execution_order - Orden y limpieza de ejecucion
+  Comprueba si los execution_count estan ordenados y sin duplicados incoherentes.
+
+- notebook.markdown_tables - Tablas Markdown estructuradas
+  Comprueba si las tablas Markdown tienen encabezados y separador.
+
+
+OTROS / FILE / IMAGE
+====================
+
+- No hay checks automaticos especificos para estos tipos de recurso.

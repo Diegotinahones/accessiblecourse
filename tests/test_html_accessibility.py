@@ -9,6 +9,11 @@ def _status_by_check(html: str) -> dict[str, str]:
     return {check.checkId: check.status for check in checks}
 
 
+def _checks_by_id(html: str):
+    checks = analyze_html_accessibility({"id": "html", "title": "Leccion accesible", "type": "WEB"}, html)
+    return {check.checkId: check for check in checks}
+
+
 def test_html_accessibility_passes_basic_accessible_html() -> None:
     statuses = _status_by_check(
         """
@@ -23,17 +28,20 @@ def test_html_accessibility_passes_basic_accessible_html() -> None:
         """
     )
 
-    assert statuses["html.lang"] == "PASS"
-    assert statuses["html.title"] == "PASS"
-    assert statuses["html.h1"] == "PASS"
+    assert statuses["html.lang"] == "NOT_APPLICABLE"
+    assert statuses["html.title"] == "NOT_APPLICABLE"
+    assert statuses["html.h1"] == "NOT_APPLICABLE"
     assert statuses["html.img_alt"] == "PASS"
     assert statuses["html.link_text"] == "PASS"
 
 
-def test_html_accessibility_fails_missing_language() -> None:
-    statuses = _status_by_check("<html><head><title>Unidad 1</title></head><body><h1>Unidad 1</h1></body></html>")
+def test_html_accessibility_marks_canvas_structure_as_platform_controlled() -> None:
+    checks = _checks_by_id("<html><head><title>Unidad 1</title></head><body><h1>Unidad 1</h1></body></html>")
 
-    assert statuses["html.lang"] == "FAIL"
+    assert checks["html.lang"].status == "NOT_APPLICABLE"
+    assert checks["html.lang"].responsibility == "PLATFORM_CONTROLLED"
+    assert checks["html.title"].responsibility == "PLATFORM_CONTROLLED"
+    assert checks["html.h1"].responsibility == "PLATFORM_CONTROLLED"
 
 
 def test_html_accessibility_fails_image_without_alt() -> None:

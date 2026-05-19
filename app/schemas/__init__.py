@@ -351,6 +351,15 @@ class JobAccessRead(StrictModel):
     nonAnalyzableExternalResources: list["AuxiliaryResourceRead"] = Field(default_factory=list)
 
 
+CheckResponsibilityRead = Literal[
+    "PROFESSOR_ACTIONABLE",
+    "PLATFORM_CONTROLLED",
+    "PROVIDER_EXTERNAL",
+    "MANUAL_REVIEW",
+    "NOT_COVERED",
+]
+
+
 class AccessibilityCheckRead(StrictModel):
     checkId: str
     checkTitle: str
@@ -358,6 +367,7 @@ class AccessibilityCheckRead(StrictModel):
     evidence: str
     recommendation: str
     wcagHint: str | None = None
+    responsibility: CheckResponsibilityRead = "PROFESSOR_ACTIONABLE"
 
 
 class AccessibilityResourceRead(StrictModel):
@@ -383,6 +393,13 @@ class AccessibilityTypeSummaryRead(StrictModel):
     notApplicableCount: int = 0
     errorCount: int = 0
     incidentCount: int = 0
+    actionableFailCount: int = 0
+    actionableWarningCount: int = 0
+    manualReviewCount: int = 0
+    platformControlledCount: int = 0
+    providerExternalCount: int = 0
+    notCoveredCount: int = 0
+    responsibilityCounts: dict[str, int] = Field(default_factory=dict)
 
 
 class AccessibilitySummaryRead(StrictModel):
@@ -402,6 +419,13 @@ class AccessibilitySummaryRead(StrictModel):
     notApplicableCount: int = 0
     errorCount: int = 0
     incidentCount: int = 0
+    actionableFailCount: int = 0
+    actionableWarningCount: int = 0
+    manualReviewCount: int = 0
+    platformControlledCount: int = 0
+    providerExternalCount: int = 0
+    notCoveredCount: int = 0
+    responsibilityCounts: dict[str, int] = Field(default_factory=dict)
     resourcesDetected: int = 0
     resourcesAccessed: int = 0
     resourcesAnalyzed: int = 0
@@ -451,6 +475,13 @@ class ExecutiveSummaryStatsRead(StrictModel):
     passCount: int = 0
     notApplicableCount: int = 0
     notAnalyzableResources: int = 0
+    actionableFailCount: int = 0
+    actionableWarningCount: int = 0
+    manualReviewCount: int = 0
+    platformControlledCount: int = 0
+    providerExternalCount: int = 0
+    notCoveredCount: int = 0
+    responsibilityCounts: dict[str, int] = Field(default_factory=dict)
     resourcesByType: dict[str, int] = Field(default_factory=dict)
     analyzedByType: dict[str, int] = Field(default_factory=dict)
     highPriorityResources: int = 0
@@ -714,6 +745,13 @@ class ReportHtmlAccessibilitySummaryRead(StrictModel):
     notApplicableCount: int
     errorCount: int
     incidentCount: int = 0
+    actionableFailCount: int = 0
+    actionableWarningCount: int = 0
+    manualReviewCount: int = 0
+    platformControlledCount: int = 0
+    providerExternalCount: int = 0
+    notCoveredCount: int = 0
+    responsibilityCounts: dict[str, int] = Field(default_factory=dict)
     metricsSource: str | None = None
     metricsVersion: str | None = None
 
@@ -743,6 +781,13 @@ class ReportAutomaticAccessibilitySummaryRead(StrictModel):
     notApplicableCount: int
     errorCount: int
     incidentCount: int = 0
+    actionableFailCount: int = 0
+    actionableWarningCount: int = 0
+    manualReviewCount: int = 0
+    platformControlledCount: int = 0
+    providerExternalCount: int = 0
+    notCoveredCount: int = 0
+    responsibilityCounts: dict[str, int] = Field(default_factory=dict)
     resourcesDetected: int = 0
     resourcesAccessed: int = 0
     resourcesAnalyzed: int = 0
@@ -762,6 +807,13 @@ class ReportExecutiveSummaryRead(StrictModel):
     notAutomaticallyAnalyzable: int
     incidentCount: int = 0
     warningCount: int = 0
+    actionableFailCount: int = 0
+    actionableWarningCount: int = 0
+    manualReviewCount: int = 0
+    platformControlledCount: int = 0
+    providerExternalCount: int = 0
+    notCoveredCount: int = 0
+    responsibilityCounts: dict[str, int] = Field(default_factory=dict)
     metricsSource: str | None = None
     metricsVersion: str | None = None
     mainProblems: list[str]
@@ -800,6 +852,9 @@ class ReportIssueSummaryRead(StrictModel):
     resourceCount: int
     resources: list[str]
     recommendation: str
+    responsibility: str = "PROFESSOR_ACTIONABLE"
+    responsibilityLabel: str = "Accionable por el profesorado"
+    accountabilityNote: str | None = None
 
 
 class ReportKeyIssueRead(StrictModel):
@@ -813,6 +868,9 @@ class ReportKeyIssueRead(StrictModel):
     status: Literal["FAIL", "WARNING", "ERROR"]
     evidence: str
     recommendation: str
+    responsibility: str = "PROFESSOR_ACTIONABLE"
+    responsibilityLabel: str = "Accionable por el profesorado"
+    accountabilityNote: str | None = None
 
 
 class ReportHtmlCheckRead(StrictModel):
@@ -821,6 +879,10 @@ class ReportHtmlCheckRead(StrictModel):
     status: Literal["PASS", "FAIL", "WARNING", "NOT_APPLICABLE", "ERROR"]
     evidence: str
     recommendation: str
+    responsibility: str = "PROFESSOR_ACTIONABLE"
+    responsibilityLabel: str = "Accionable por el profesorado"
+    accountabilityNote: str | None = None
+    countedInScore: bool = True
 
 
 class ReportHtmlResourceRead(StrictModel):
@@ -990,7 +1052,11 @@ class JobReportRead(StrictModel):
     videoAccessibilitySummary: ReportHtmlAccessibilitySummaryRead
     notebookAccessibilitySummary: ReportHtmlAccessibilitySummaryRead
     issueSummary: list[ReportIssueSummaryRead]
+    actionableIssueSummary: list[ReportIssueSummaryRead] = Field(default_factory=list)
+    manualReviewIssueSummary: list[ReportIssueSummaryRead] = Field(default_factory=list)
+    platformObservationsSummary: list[ReportIssueSummaryRead] = Field(default_factory=list)
     keyIssues: list[ReportKeyIssueRead]
+    platformObservations: list[ReportKeyIssueRead] = Field(default_factory=list)
     htmlResources: list[ReportHtmlResourceRead]
     pdfResources: list[ReportPdfResourceRead]
     wordResources: list[ReportWordResourceRead]

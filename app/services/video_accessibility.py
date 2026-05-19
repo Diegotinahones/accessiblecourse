@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
 from app.core.config import Settings
+from app.services.accessibility_responsibility import classify_check_responsibility
 from app.services.html_accessibility import (
     AccessibilityCheckResult,
     AccessibilityReport,
@@ -93,7 +94,7 @@ def analyze_video_accessibility(resource: Any, context: Any = None) -> list[Acce
     provider = _detect_provider(resource, video_context)
     metadata = _inspect_video_metadata(video_context.binary_path) if video_context.binary_path else None
 
-    return [
+    checks = [
         _check_accessible(core, video_context, provider),
         _check_title(core),
         _check_provider(provider),
@@ -106,6 +107,15 @@ def analyze_video_accessibility(resource: Any, context: Any = None) -> list[Acce
         _check_autoplay(video_context),
         _check_local_metadata(core, video_context, metadata),
     ]
+    for check in checks:
+        check.responsibility = classify_check_responsibility(
+            check.checkId,
+            analysis_type="VIDEO",
+            status=check.status,
+            resource=resource,
+            inventory_item=resource,
+        )
+    return checks
 
 
 def detect_video_provider(resource: Any) -> tuple[str | None, str | None]:

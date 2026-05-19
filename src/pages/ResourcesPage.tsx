@@ -1529,7 +1529,9 @@ export function ResourcesPage() {
               <button
                 className="button-primary w-full sm:w-auto"
                 onClick={() =>
-                  navigate(`/report/${jobId}${getModeSearch(appMode)}`)
+                  navigate(`/report/${jobId}${getModeSearch(appMode)}`, {
+                    state: { courseName: courseTitle },
+                  })
                 }
                 type="button"
               >

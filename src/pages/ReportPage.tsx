@@ -3,16 +3,26 @@ import { useLocation, useParams, useSearchParams } from 'react-router-dom';
 import { LayoutSimple } from '../components/LayoutSimple';
 import {
   ApiError,
+  api,
+  fetchAccessibility,
   fetchReport,
+  fetchResources,
+  fetchSummary,
   generateReport,
   getDirectReportDownloadUrls,
 } from '../lib/api';
-import type { AppMode, GeneratedReport } from '../lib/types';
+import type {
+  AccessibilityResponse,
+  AppMode,
+  GeneratedReport,
+  JobStatus,
+  ResourceListResponse,
+  ReviewSummary,
+} from '../lib/types';
 import {
   getModeSearch,
   isAppMode,
   loadRememberedAppMode,
-  loadRememberedCourseName,
   rememberAppMode,
 } from '../lib/utils';
 
@@ -28,6 +38,70 @@ function downloadFile(url: string) {
   window.location.assign(url);
 }
 
+function normalizeCourseTitleCandidate(value: string | null | undefined) {
+  const trimmedValue = value?.trim();
+  return trimmedValue || null;
+}
+
+function isLikelyCompleteCourseTitle(value: string) {
+  return (
+    value.length > 8 &&
+    (value.includes(' - ') ||
+      value.includes(' – ') ||
+      value.includes(' — ') ||
+      /\s/.test(value))
+  );
+}
+
+function isLikelyAbbreviatedCourseTitle(value: string) {
+  return value.length <= 8 && !/\s/.test(value);
+}
+
+function resolveReportCourseTitle({
+  access,
+  accessibility,
+  executiveSummary,
+  job,
+  navigationCourseName,
+}: {
+  access: ResourceListResponse | null;
+  accessibility: AccessibilityResponse | null;
+  executiveSummary: ReviewSummary | null;
+  job: JobStatus | null;
+  navigationCourseName: string | null | undefined;
+}) {
+  const candidates = [
+    executiveSummary?.courseTitle,
+    executiveSummary?.courseName,
+    access?.courseTitle,
+    access?.courseName,
+    accessibility?.courseTitle,
+    accessibility?.courseName,
+    job?.courseTitle,
+    navigationCourseName,
+  ]
+    .map(normalizeCourseTitleCandidate)
+    .filter((candidate): candidate is string => Boolean(candidate));
+  const completeCandidate = candidates.find(isLikelyCompleteCourseTitle);
+  const firstCandidate = candidates[0];
+
+  if (completeCandidate) {
+    return completeCandidate;
+  }
+
+  if (firstCandidate && isLikelyAbbreviatedCourseTitle(firstCandidate)) {
+    const longerCandidate = candidates.find(
+      (candidate) => candidate.length > firstCandidate.length,
+    );
+
+    if (longerCandidate) {
+      return longerCandidate;
+    }
+  }
+
+  return firstCandidate ?? 'Curso analizado';
+}
+
 export function ReportPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const location = useLocation();
@@ -38,6 +112,12 @@ export function ReportPage() {
   const [loading, setLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [access, setAccess] = useState<ResourceListResponse | null>(null);
+  const [accessibility, setAccessibility] =
+    useState<AccessibilityResponse | null>(null);
+  const [executiveSummary, setExecutiveSummary] =
+    useState<ReviewSummary | null>(null);
+  const [job, setJob] = useState<JobStatus | null>(null);
   const modeParam = searchParams.get('mode');
   const appMode: AppMode = isAppMode(modeParam)
     ? modeParam
@@ -116,11 +196,108 @@ export function ReportPage() {
     };
   }, [jobId]);
 
-  const courseName = jobId
-    ? (navigationState?.courseName ??
-      loadRememberedCourseName(jobId) ??
-      `Curso ${jobId}`)
-    : 'Curso';
+  useEffect(() => {
+    if (!jobId) {
+      return;
+    }
+
+    const resolvedJobId = jobId;
+    let cancelled = false;
+
+    async function loadCourseTitleSources() {
+      try {
+        const summaryPayload = await fetchSummary(resolvedJobId);
+        if (!cancelled) {
+          setExecutiveSummary(summaryPayload);
+        }
+      } catch {
+        if (!cancelled) {
+          setExecutiveSummary(null);
+        }
+      }
+
+      try {
+        const accessPayload = await fetchResources(resolvedJobId);
+        if (!cancelled) {
+          setAccess(accessPayload);
+        }
+      } catch {
+        if (!cancelled) {
+          setAccess(null);
+        }
+      }
+
+      try {
+        const accessibilityPayload = await fetchAccessibility(resolvedJobId);
+        if (!cancelled) {
+          setAccessibility(accessibilityPayload);
+        }
+      } catch {
+        if (!cancelled) {
+          setAccessibility(null);
+        }
+      }
+
+      try {
+        const jobPayload = await api.getJobStatus(resolvedJobId);
+        if (!cancelled) {
+          setJob(jobPayload);
+        }
+      } catch {
+        if (!cancelled) {
+          setJob(null);
+        }
+      }
+    }
+
+    void loadCourseTitleSources();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId]);
+
+  const courseName = resolveReportCourseTitle({
+    access,
+    accessibility,
+    executiveSummary,
+    job,
+    navigationCourseName: navigationState?.courseName,
+  });
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+
+    console.debug('[AccessibleCourse] report course title fields', {
+      access: {
+        courseName: access?.courseName,
+        courseTitle: access?.courseTitle,
+      },
+      accessibility: {
+        courseName: accessibility?.courseName,
+        courseTitle: accessibility?.courseTitle,
+      },
+      executiveSummary: {
+        courseName: executiveSummary?.courseName,
+        courseTitle: executiveSummary?.courseTitle,
+      },
+      job: {
+        courseName: job?.courseName,
+        courseTitle: job?.courseTitle,
+      },
+      navigationCourseName: navigationState?.courseName,
+      resolvedCourseTitle: courseName,
+    });
+  }, [
+    access,
+    accessibility,
+    courseName,
+    executiveSummary,
+    job,
+    navigationState?.courseName,
+  ]);
 
   const downloadUrls = jobId ? getDirectReportDownloadUrls(jobId) : null;
 

@@ -16,6 +16,8 @@ import type {
   AppMode,
   CourseStructure,
   CourseStructureNode,
+  ExecutiveModule,
+  ExecutiveResource,
   ExecutiveSummary,
   JobStatus,
   ResourceListItem,
@@ -36,6 +38,16 @@ interface ResourceGroup {
   section: string;
   isGlobalUnplaced: boolean;
   resources: ResourceListItem[];
+}
+
+interface ExecutiveResourceGroup {
+  id: string;
+  section: string;
+  score: number | null;
+  priority: PriorityLevel | null;
+  resourceCount: number;
+  analyzedCount: number;
+  resources: ExecutiveResource[];
 }
 
 interface ResourceFilters {
@@ -519,6 +531,43 @@ function getAccessLabel(resource: ResourceListItem) {
     : 'NO ACCEDE';
 }
 
+function normalizeAccessLabel(value: string | null | undefined) {
+  const normalizedValue = normalizeComparableText(value);
+
+  if (
+    normalizedValue === 'requiere_interaccion' ||
+    normalizedValue.includes('interaccion') ||
+    normalizedValue.includes('interaction')
+  ) {
+    return 'REQUIERE INTERACCIÓN';
+  }
+
+  if (
+    normalizedValue === 'requiere_sso' ||
+    normalizedValue.includes('sso') ||
+    normalizedValue.includes('auth')
+  ) {
+    return 'REQUIERE SSO';
+  }
+
+  if (
+    normalizedValue === 'no_analizable' ||
+    normalizedValue.includes('not_scored')
+  ) {
+    return 'NO ANALIZABLE';
+  }
+
+  if (
+    normalizedValue === 'ok' ||
+    normalizedValue === 'pass' ||
+    normalizedValue === 'accessible'
+  ) {
+    return 'OK';
+  }
+
+  return 'NO ACCEDE';
+}
+
 function isNoAccessResource(resource: ResourceListItem) {
   return getAccessLabel(resource) === 'NO ACCEDE';
 }
@@ -816,6 +865,31 @@ function getPriority(
   return 'high';
 }
 
+function getPriorityFromBackendOrScore(
+  rawPriority: string | null | undefined,
+  score: number | null,
+) {
+  const backendPriority = normalizeBackendPriority(rawPriority);
+
+  if (backendPriority) {
+    return backendPriority;
+  }
+
+  if (score === null) {
+    return 'notAnalyzable';
+  }
+
+  if (score >= 80) {
+    return 'low';
+  }
+
+  if (score >= 60) {
+    return 'medium';
+  }
+
+  return 'high';
+}
+
 function getPriorityLabel(priority: PriorityLevel) {
   if (priority === 'high') {
     return 'Prioridad alta';
@@ -1091,6 +1165,104 @@ function filterGroups(
     .filter((group) => group.resources.length > 0);
 }
 
+function getExecutiveResourceKind(resource: ExecutiveResource) {
+  return getKindFromValue(resource.type) ?? 'OTHER';
+}
+
+function executiveResourceHasFailure(resource: ExecutiveResource) {
+  const score = normalizeScore(resource.score);
+  const priority = normalizeBackendPriority(resource.priority);
+
+  return priority === 'high' || (score !== null && score < 60);
+}
+
+function executiveResourceHasWarning(resource: ExecutiveResource) {
+  const score = normalizeScore(resource.score);
+  const priority = normalizeBackendPriority(resource.priority);
+
+  return priority === 'medium' || (score !== null && score >= 60 && score < 80);
+}
+
+function executiveResourceMatchesFilters(
+  resource: ExecutiveResource,
+  filters: ResourceFilters,
+) {
+  if (
+    filters.onlyNoAccess &&
+    normalizeAccessLabel(resource.accessStatus) !== 'NO ACCEDE'
+  ) {
+    return false;
+  }
+
+  if (filters.onlyDownloadable && !resource.downloadable) {
+    return false;
+  }
+
+  const selectedTypeFilters = [
+    filters.onlyHtml,
+    filters.onlyPdf,
+    filters.onlyWord,
+    filters.onlyVideo,
+    filters.onlyNotebook,
+  ].some(Boolean);
+
+  if (selectedTypeFilters) {
+    const kind = getExecutiveResourceKind(resource);
+    const matchesKind =
+      (filters.onlyHtml && kind === 'HTML') ||
+      (filters.onlyPdf && kind === 'PDF') ||
+      (filters.onlyWord && kind === 'WORD') ||
+      (filters.onlyVideo && kind === 'VIDEO') ||
+      (filters.onlyNotebook && kind === 'NOTEBOOK');
+
+    if (!matchesKind) {
+      return false;
+    }
+  }
+
+  if (filters.onlyFailures && !executiveResourceHasFailure(resource)) {
+    return false;
+  }
+
+  if (filters.onlyWarnings && !executiveResourceHasWarning(resource)) {
+    return false;
+  }
+
+  return true;
+}
+
+function buildExecutiveGroups(
+  modules: ExecutiveModule[],
+): ExecutiveResourceGroup[] {
+  return modules.map((module, index) => {
+    const section = normalizeSectionName(module.title);
+
+    return {
+      id: `executive-${index}-${section}`,
+      section,
+      score: normalizeScore(module.score),
+      priority: normalizeBackendPriority(module.priority),
+      resourceCount: module.resourceCount || module.resources.length,
+      analyzedCount: module.analyzedCount,
+      resources: module.resources,
+    };
+  });
+}
+
+function filterExecutiveGroups(
+  groups: ExecutiveResourceGroup[],
+  filters: ResourceFilters,
+) {
+  return groups
+    .map((group) => ({
+      ...group,
+      resources: group.resources.filter((resource) =>
+        executiveResourceMatchesFilters(resource, filters),
+      ),
+    }))
+    .filter((group) => group.resources.length > 0);
+}
+
 function Badge({
   children,
   className,
@@ -1162,6 +1334,74 @@ function ResourceScoreRow({
     accessibilityResult,
     resourceKind,
   );
+
+  return (
+    <li className="rounded-2xl border border-line bg-white px-4 py-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <h4 className="break-words text-base font-semibold leading-6 text-ink">
+            {resource.title}
+          </h4>
+          <p className="mt-1 text-sm text-subtle">
+            Tipo: {getResourceTypeLabel(resourceKind)}
+          </p>
+          <p className="mt-2 text-sm leading-6 text-subtle">
+            <span className="font-semibold text-ink">
+              Incidencia principal:
+            </span>{' '}
+            {primaryIssue}
+          </p>
+        </div>
+
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:flex-wrap lg:justify-end">
+          <ScoreBadge className="self-start sm:self-center" score={score} />
+          <Badge className={getPriorityBadgeClasses(priority)}>
+            {getPriorityLabel(priority)}
+          </Badge>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function getExecutivePrimaryIssue(resource: ExecutiveResource) {
+  const kind = getExecutiveResourceKind(resource);
+
+  if (resource.mainIssue) {
+    return kind === 'NOTEBOOK'
+      ? getNotebookIssueLabel(resource.mainIssue)
+      : resource.mainIssue;
+  }
+
+  const accessLabel = normalizeAccessLabel(resource.accessStatus);
+
+  if (
+    accessLabel === 'REQUIERE SSO' ||
+    accessLabel === 'REQUIERE INTERACCIÓN'
+  ) {
+    return 'No analizable automáticamente porque requiere acceso externo, SSO o interacción.';
+  }
+
+  if (accessLabel === 'NO ACCEDE') {
+    return 'No accede.';
+  }
+
+  if (normalizeScore(resource.score) === null) {
+    return 'Sin análisis automático disponible todavía.';
+  }
+
+  return 'Sin incidencias principales.';
+}
+
+function ExecutiveResourceScoreRow({
+  resource,
+}: {
+  resource: ExecutiveResource;
+}) {
+  const score = normalizeScore(resource.score);
+  const priority = getPriorityFromBackendOrScore(resource.priority, score);
+  const resourceKind = getExecutiveResourceKind(resource);
+  const primaryIssue = getExecutivePrimaryIssue(resource);
 
   return (
     <li className="rounded-2xl border border-line bg-white px-4 py-4">
@@ -1328,6 +1568,15 @@ export function ResourcesPage() {
     () => filterGroups(groups, filters, accessibilityByResourceId),
     [accessibilityByResourceId, filters, groups],
   );
+  const executiveGroups = useMemo(
+    () => buildExecutiveGroups(executiveSummary?.modules ?? []),
+    [executiveSummary],
+  );
+  const filteredExecutiveGroups = useMemo(
+    () => filterExecutiveGroups(executiveGroups, filters),
+    [executiveGroups, filters],
+  );
+  const shouldUseExecutiveGroups = executiveGroups.length > 0;
   const globalScore = useMemo(
     () =>
       resolveBackendGlobalScore({
@@ -1667,7 +1916,71 @@ export function ResourcesPage() {
               Recursos
             </h2>
 
-            {filteredGroups.length === 0 ? (
+            {shouldUseExecutiveGroups &&
+            filteredExecutiveGroups.length === 0 ? (
+              <div className="card-panel p-6 text-sm text-subtle">
+                No hay recursos que coincidan con los filtros actuales.
+              </div>
+            ) : shouldUseExecutiveGroups ? (
+              <div className="space-y-3">
+                {filteredExecutiveGroups.map((group) => {
+                  const panelId = toPanelId('section', group.id);
+                  const isExpanded = expandedPanels[panelId] ?? false;
+
+                  return (
+                    <div
+                      className="overflow-hidden rounded-3xl border border-line bg-white shadow-card"
+                      key={group.id}
+                    >
+                      <h3>
+                        <button
+                          aria-controls={panelId}
+                          aria-expanded={isExpanded}
+                          className="flex w-full flex-col gap-3 px-5 py-4 text-left text-ink sm:px-6 lg:flex-row lg:items-center lg:justify-between"
+                          onClick={() => togglePanel(panelId)}
+                          type="button"
+                        >
+                          <span className="text-base font-semibold leading-6">
+                            {group.section}
+                          </span>
+                          <span className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                            <ScoreBadge score={group.score} />
+                            {group.priority ? (
+                              <Badge
+                                className={getPriorityBadgeClasses(
+                                  group.priority,
+                                )}
+                              >
+                                {getPriorityLabel(group.priority)}
+                              </Badge>
+                            ) : null}
+                            <span className="text-sm font-medium text-subtle">
+                              {isExpanded ? 'Cerrar' : 'Abrir'} ·{' '}
+                              {formatResourceCount(group.resources.length)}
+                            </span>
+                          </span>
+                        </button>
+                      </h3>
+
+                      <div
+                        className="border-t border-line bg-[var(--color-surface-soft)] p-4 sm:p-5"
+                        hidden={!isExpanded}
+                        id={panelId}
+                      >
+                        <ul className="space-y-3">
+                          {group.resources.map((resource) => (
+                            <ExecutiveResourceScoreRow
+                              key={resource.resourceId}
+                              resource={resource}
+                            />
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : filteredGroups.length === 0 ? (
               <div className="card-panel p-6 text-sm text-subtle">
                 No hay recursos que coincidan con los filtros actuales.
               </div>

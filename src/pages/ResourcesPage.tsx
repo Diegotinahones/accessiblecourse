@@ -60,6 +60,7 @@ interface ResourceFilters {
   onlyWord: boolean;
   onlyVideo: boolean;
   onlyNotebook: boolean;
+  showNotScored: boolean;
 }
 
 const GLOBAL_UNPLACED_SECTION_LABEL =
@@ -75,6 +76,7 @@ const EMPTY_FILTERS: ResourceFilters = {
   onlyWord: false,
   onlyVideo: false,
   onlyNotebook: false,
+  showNotScored: false,
 };
 
 const EMPTY_ACCESSIBILITY_SUMMARY: AccessibilitySummary = {
@@ -1105,6 +1107,13 @@ function resourceMatchesFilters(
   filters: ResourceFilters,
   accessibilityResult: AccessibilityResource | undefined,
 ) {
+  if (
+    !filters.showNotScored &&
+    getResourceScore(accessibilityResult) === null
+  ) {
+    return false;
+  }
+
   if (filters.onlyNoAccess && !isNoAccessResource(resource)) {
     return false;
   }
@@ -1187,6 +1196,10 @@ function executiveResourceMatchesFilters(
   resource: ExecutiveResource,
   filters: ResourceFilters,
 ) {
+  if (!filters.showNotScored && normalizeScore(resource.score) === null) {
+    return false;
+  }
+
   if (
     filters.onlyNoAccess &&
     normalizeAccessLabel(resource.accessStatus) !== 'NO ACCEDE'
@@ -1898,6 +1911,12 @@ export function ResourcesPage() {
                   onChange={(checked) => updateFilter('onlyNotebook', checked)}
                 >
                   Mostrar solo recursos Notebook
+                </FilterCheckbox>
+                <FilterCheckbox
+                  checked={filters.showNotScored}
+                  onChange={(checked) => updateFilter('showNotScored', checked)}
+                >
+                  Mostrar recursos sin puntuación / no analizables
                 </FilterCheckbox>
               </div>
               <button

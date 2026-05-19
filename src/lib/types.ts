@@ -50,6 +50,13 @@ export interface JobStatus {
   courseName?: string | null;
 }
 
+export interface CentralizedScoreSummary {
+  accessibilityScore?: number | null;
+  score?: number | null;
+  priority?: string | null;
+  globalPriority?: string | null;
+}
+
 export interface OnlineCourse {
   id: string;
   name: string;
@@ -249,6 +256,8 @@ export interface ResourceListResponse {
   jobId: string;
   courseTitle?: string | null;
   courseName?: string | null;
+  executiveSummary?: CentralizedScoreSummary | null;
+  summary?: CentralizedScoreSummary | null;
   resources: ResourceListItem[];
   totalAnalizables?: number;
   noAnalizablesExternos?: number;
@@ -295,6 +304,10 @@ export interface AccessibilityResource {
 }
 
 export interface AccessibilitySummary {
+  accessibilityScore?: number | null;
+  score?: number | null;
+  priority?: string | null;
+  globalPriority?: string | null;
   htmlResourcesAnalyzed: number;
   pdfResourcesAnalyzed: number;
   wordResourcesAnalyzed: number;
@@ -311,6 +324,10 @@ export interface AccessibilityResponse {
   jobId: string;
   courseTitle?: string | null;
   courseName?: string | null;
+  accessibilityScore?: number | null;
+  score?: number | null;
+  priority?: string | null;
+  globalPriority?: string | null;
   summary: AccessibilitySummary;
   resources: AccessibilityResource[];
 }
@@ -386,11 +403,48 @@ export interface ReviewSummary {
   jobId: string;
   courseTitle?: string | null;
   courseName?: string | null;
+  accessibilityScore?: number | null;
+  score?: number | null;
+  priority?: string | null;
+  globalPriority?: string | null;
+  summary?: CentralizedScoreSummary | null;
   totalResources: number;
   totalFailItems: number;
   lastUpdated: string;
   reviewSession: ReviewSession;
   resources: ReviewFailResource[];
+}
+
+export interface ExecutiveResource {
+  resourceId: string;
+  title: string;
+  type: string;
+  score: number | null;
+  priority: string | null;
+  accessStatus: string;
+  downloadable: boolean;
+  mainIssue: string | null;
+  reportAnchorId: string | null;
+}
+
+export interface ExecutiveModule {
+  title: string;
+  score: number | null;
+  priority: string | null;
+  resourceCount: number;
+  analyzedCount: number;
+  resources: ExecutiveResource[];
+}
+
+export interface ExecutiveSummary extends CentralizedScoreSummary {
+  jobId: string;
+  mode: string | null;
+  courseTitle?: string | null;
+  courseName?: string | null;
+  courseCode?: string | null;
+  courseId?: string | null;
+  summary?: CentralizedScoreSummary | null;
+  modules: ExecutiveModule[];
 }
 
 const reviewPriority: Record<ReviewState, number> = {

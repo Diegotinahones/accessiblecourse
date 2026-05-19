@@ -12,6 +12,10 @@ import type {
   AccessibilityResourceKind,
   AccessibilityResponse,
   AccessibilitySummary,
+  CentralizedScoreSummary,
+  ExecutiveModule,
+  ExecutiveResource,
+  ExecutiveSummary,
   JobStatus,
   OnlineCourse,
   ResourceCore,
@@ -1082,6 +1086,26 @@ function deriveReviewSession(
   };
 }
 
+function normalizeCentralizedScoreSummary(
+  value: unknown,
+): CentralizedScoreSummary | null {
+  const summary = readRecord(value);
+  const normalizedSummary: CentralizedScoreSummary = {
+    accessibilityScore:
+      readNumber(summary.accessibilityScore) ??
+      readNumber(summary.accessibility_score),
+    score: readNumber(summary.score),
+    priority: readString(summary.priority),
+    globalPriority:
+      readString(summary.globalPriority) ?? readString(summary.global_priority),
+  };
+  const hasScoreMetadata = Object.values(normalizedSummary).some(
+    (item) => item !== null && item !== undefined,
+  );
+
+  return hasScoreMetadata ? normalizedSummary : null;
+}
+
 function normalizeResourcesResponse(
   jobId: string,
   payload: RawResourcesResponse,
@@ -1122,6 +1146,10 @@ function normalizeResourcesResponse(
   const resources = payload.resources.map(normalizeResource);
   const payloadRecord = readRecord(payload);
   const accessRecord = readRecord(payloadRecord.access);
+  const executiveSummaryRecord =
+    Object.keys(readRecord(payloadRecord.executiveSummary)).length > 0
+      ? readRecord(payloadRecord.executiveSummary)
+      : readRecord(payloadRecord.executive_summary);
   const payloadWithLegacyStructure = payload as ResourceListResponse & {
     courseStructure?: CourseStructure | null;
   };
@@ -1142,6 +1170,8 @@ function normalizeResourcesResponse(
       readString(payloadRecord.course_name) ??
       readString(accessRecord.courseName) ??
       readString(accessRecord.course_name),
+    executiveSummary: normalizeCentralizedScoreSummary(executiveSummaryRecord),
+    summary: normalizeCentralizedScoreSummary(payloadRecord.summary),
     resources,
     totalAnalizables: payload.totalAnalizables ?? resources.length,
     noAnalizablesExternos: payload.noAnalizablesExternos ?? 0,
@@ -1474,6 +1504,13 @@ function normalizeAccessibilitySummary(
   const summary = readRecord(value);
 
   return {
+    accessibilityScore:
+      readNumber(summary.accessibilityScore) ??
+      readNumber(summary.accessibility_score),
+    score: readNumber(summary.score),
+    priority: readString(summary.priority),
+    globalPriority:
+      readString(summary.globalPriority) ?? readString(summary.global_priority),
     htmlResourcesAnalyzed:
       readNumber(summary.htmlResourcesAnalyzed) ??
       readNumber(summary.html_resources_analyzed) ??
@@ -1820,6 +1857,18 @@ function normalizeAccessibilityResponse(
       readString(response.course_name) ??
       readString(root.courseName) ??
       readString(root.course_name),
+    accessibilityScore:
+      readNumber(response.accessibilityScore) ??
+      readNumber(response.accessibility_score) ??
+      readNumber(root.accessibilityScore) ??
+      readNumber(root.accessibility_score),
+    score: readNumber(response.score) ?? readNumber(root.score),
+    priority: readString(response.priority) ?? readString(root.priority),
+    globalPriority:
+      readString(response.globalPriority) ??
+      readString(response.global_priority) ??
+      readString(root.globalPriority) ??
+      readString(root.global_priority),
     summary: normalizeAccessibilitySummary(
       root.summary ?? root,
       fallbackSummary,
@@ -1993,6 +2042,11 @@ function normalizeReviewSummary(
   const root = readRecord(payload);
   const executiveSummary = readRecord(root.executiveSummary);
   const executiveSummarySnake = readRecord(root.executive_summary);
+  const normalizedExecutiveSummary =
+    Object.keys(executiveSummary).length > 0
+      ? executiveSummary
+      : executiveSummarySnake;
+  const nestedSummary = readRecord(root.summary);
   const reviewSession = readRecord(root.reviewSession);
   const reviewSessionSnake = readRecord(root.review_session);
   const normalizedReviewSession =
@@ -2015,6 +2069,22 @@ function normalizeReviewSummary(
       readString(executiveSummarySnake.course_name) ??
       readString(root.courseName) ??
       readString(root.course_name),
+    accessibilityScore:
+      readNumber(normalizedExecutiveSummary.accessibilityScore) ??
+      readNumber(normalizedExecutiveSummary.accessibility_score) ??
+      readNumber(root.accessibilityScore) ??
+      readNumber(root.accessibility_score),
+    score:
+      readNumber(normalizedExecutiveSummary.score) ?? readNumber(root.score),
+    priority:
+      readString(normalizedExecutiveSummary.priority) ??
+      readString(root.priority),
+    globalPriority:
+      readString(normalizedExecutiveSummary.globalPriority) ??
+      readString(normalizedExecutiveSummary.global_priority) ??
+      readString(root.globalPriority) ??
+      readString(root.global_priority),
+    summary: normalizeCentralizedScoreSummary(nestedSummary),
     totalResources:
       readNumber(root.totalResources) ?? readNumber(root.total_resources) ?? 0,
     totalFailItems:
@@ -2043,6 +2113,94 @@ function normalizeReviewSummary(
       ? (root.resources as ReviewSummary['resources'])
       : [],
   };
+}
+
+function normalizeExecutiveResource(value: unknown): ExecutiveResource {
+  const resource = readRecord(value);
+
+  return {
+    resourceId:
+      readString(resource.resourceId) ??
+      readString(resource.resource_id) ??
+      readString(resource.id) ??
+      '',
+    title: readString(resource.title) ?? 'Recurso sin título',
+    type: readString(resource.type) ?? readString(resource.resourceType) ?? '',
+    score:
+      readNumber(resource.score) ??
+      readNumber(resource.accessibilityScore) ??
+      readNumber(resource.accessibility_score),
+    priority: readString(resource.priority),
+    accessStatus:
+      readString(resource.accessStatus) ??
+      readString(resource.access_status) ??
+      '',
+    downloadable:
+      readBoolean(resource.downloadable) ??
+      readBoolean(resource.canDownload) ??
+      readBoolean(resource.can_download) ??
+      false,
+    mainIssue:
+      readString(resource.mainIssue) ?? readString(resource.main_issue),
+    reportAnchorId:
+      readString(resource.reportAnchorId) ??
+      readString(resource.report_anchor_id),
+  };
+}
+
+function normalizeExecutiveModule(value: unknown): ExecutiveModule {
+  const module = readRecord(value);
+
+  return {
+    title: readString(module.title) ?? 'Módulo sin título',
+    score:
+      readNumber(module.score) ??
+      readNumber(module.accessibilityScore) ??
+      readNumber(module.accessibility_score),
+    priority: readString(module.priority),
+    resourceCount:
+      readNumber(module.resourceCount) ??
+      readNumber(module.resource_count) ??
+      0,
+    analyzedCount:
+      readNumber(module.analyzedCount) ??
+      readNumber(module.analyzed_count) ??
+      0,
+    resources: readArray(module.resources).map(normalizeExecutiveResource),
+  };
+}
+
+function normalizeExecutiveSummary(
+  jobId: string,
+  payload: unknown,
+): ExecutiveSummary {
+  const root = readRecord(payload);
+  const summary = readRecord(root.summary);
+
+  return {
+    jobId: readString(root.jobId) ?? readString(root.job_id) ?? jobId,
+    mode: readString(root.mode),
+    courseTitle: readString(root.courseTitle) ?? readString(root.course_title),
+    courseName: readString(root.courseName) ?? readString(root.course_name),
+    courseCode: readString(root.courseCode) ?? readString(root.course_code),
+    courseId: readString(root.courseId) ?? readString(root.course_id),
+    accessibilityScore:
+      readNumber(root.accessibilityScore) ??
+      readNumber(root.accessibility_score),
+    score: readNumber(root.score),
+    priority: readString(root.priority),
+    globalPriority:
+      readString(root.globalPriority) ?? readString(root.global_priority),
+    summary: normalizeCentralizedScoreSummary(summary),
+    modules: readArray(root.modules).map(normalizeExecutiveModule),
+  };
+}
+
+export async function fetchExecutiveSummary(
+  jobId: string,
+): Promise<ExecutiveSummary> {
+  const payload = await request<unknown>(`/jobs/${jobId}/executive-summary`);
+  return normalizeExecutiveSummary(jobId, payload);
 }
 
 export async function fetchSummary(jobId: string): Promise<ReviewSummary> {

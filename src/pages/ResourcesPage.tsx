@@ -4,8 +4,8 @@ import { LayoutSimple } from '../components/LayoutSimple';
 import {
   api,
   fetchAccessibility,
+  fetchExecutiveSummary,
   fetchResources,
-  fetchSummary,
 } from '../lib/api';
 import type {
   AccessibilityCheckStatus,
@@ -16,10 +16,10 @@ import type {
   AppMode,
   CourseStructure,
   CourseStructureNode,
+  ExecutiveSummary,
   JobStatus,
   ResourceListItem,
   ResourceListResponse,
-  ReviewSummary,
 } from '../lib/types';
 import {
   classNames,
@@ -120,7 +120,7 @@ function resolveCourseTitle({
 }: {
   access: ResourceListResponse | null;
   accessibility: AccessibilityResponse | null;
-  executiveSummary: ReviewSummary | null;
+  executiveSummary: ExecutiveSummary | null;
   job: JobStatus | null;
 }) {
   const candidates = [
@@ -582,8 +582,158 @@ function averageScores(scores: Array<number | null>) {
   );
 }
 
+type GlobalScoreResolution = {
+  value: number | null;
+  source: string | null;
+};
+
+type GlobalPriorityResolution = {
+  value: PriorityLevel | null;
+  rawValue: string | null;
+  source: string | null;
+};
+
+function resolveBackendGlobalScore({
+  access,
+  accessibility,
+  executiveSummary,
+}: {
+  access: ResourceListResponse | null;
+  accessibility: AccessibilityResponse | null;
+  executiveSummary: ExecutiveSummary | null;
+}): GlobalScoreResolution {
+  const candidates = [
+    {
+      source: '/api/jobs/{job_id}/executive-summary accessibilityScore',
+      value: executiveSummary?.accessibilityScore,
+    },
+    {
+      source: '/api/jobs/{job_id}/executive-summary score',
+      value: executiveSummary?.score,
+    },
+    {
+      source: '/api/jobs/{job_id}/executive-summary summary.accessibilityScore',
+      value: executiveSummary?.summary?.accessibilityScore,
+    },
+    {
+      source: '/api/jobs/{job_id}/executive-summary summary.score',
+      value: executiveSummary?.summary?.score,
+    },
+    {
+      source: '/api/jobs/{job_id}/accessibility accessibilityScore',
+      value: accessibility?.accessibilityScore,
+    },
+    {
+      source: '/api/jobs/{job_id}/accessibility summary.accessibilityScore',
+      value: accessibility?.summary.accessibilityScore,
+    },
+    {
+      source:
+        '/api/jobs/{job_id}/resources access.executiveSummary.accessibilityScore',
+      value: access?.executiveSummary?.accessibilityScore,
+    },
+    {
+      source: '/api/jobs/{job_id}/resources access.summary.accessibilityScore',
+      value: access?.summary?.accessibilityScore,
+    },
+  ];
+
+  for (const candidate of candidates) {
+    const score = normalizeScore(candidate.value);
+
+    if (score !== null) {
+      return { value: score, source: candidate.source };
+    }
+  }
+
+  return { value: null, source: null };
+}
+
+function normalizeBackendPriority(value: string | null | undefined) {
+  const normalizedValue = normalizeComparableText(value);
+
+  if (
+    normalizedValue.includes('alta') ||
+    normalizedValue.includes('high') ||
+    normalizedValue.includes('critical') ||
+    normalizedValue.includes('critica')
+  ) {
+    return 'high';
+  }
+
+  if (
+    normalizedValue.includes('media') ||
+    normalizedValue.includes('medium') ||
+    normalizedValue.includes('warning')
+  ) {
+    return 'medium';
+  }
+
+  if (
+    normalizedValue.includes('baja') ||
+    normalizedValue.includes('low') ||
+    normalizedValue.includes('ok')
+  ) {
+    return 'low';
+  }
+
+  if (
+    normalizedValue.includes('not_scored') ||
+    normalizedValue.includes('sin puntuacion')
+  ) {
+    return 'notAnalyzable';
+  }
+
+  return null;
+}
+
+function resolveBackendGlobalPriority({
+  accessibility,
+  executiveSummary,
+}: {
+  accessibility: AccessibilityResponse | null;
+  executiveSummary: ExecutiveSummary | null;
+}): GlobalPriorityResolution {
+  const candidates = [
+    {
+      source: '/api/jobs/{job_id}/executive-summary priority',
+      value: executiveSummary?.priority,
+    },
+    {
+      source: '/api/jobs/{job_id}/executive-summary globalPriority',
+      value: executiveSummary?.globalPriority,
+    },
+    {
+      source: '/api/jobs/{job_id}/executive-summary summary.priority',
+      value: executiveSummary?.summary?.priority,
+    },
+    {
+      source: '/api/jobs/{job_id}/accessibility priority',
+      value: accessibility?.priority,
+    },
+    {
+      source: '/api/jobs/{job_id}/accessibility summary.priority',
+      value: accessibility?.summary.priority,
+    },
+  ];
+
+  for (const candidate of candidates) {
+    const priority = normalizeBackendPriority(candidate.value);
+
+    if (priority) {
+      return {
+        value: priority,
+        rawValue: candidate.value ?? null,
+        source: candidate.source,
+      };
+    }
+  }
+
+  return { value: null, rawValue: null, source: null };
+}
+
 function getScoreText(score: number | null) {
-  return score === null ? 'Sin score' : `${score}/100`;
+  return score === null ? 'Sin puntuación' : `${score}/100`;
 }
 
 function getScoreTextClass(score: number | null) {
@@ -680,6 +830,32 @@ function getPriorityLabel(priority: PriorityLevel) {
   }
 
   return 'No analizable';
+}
+
+function getGlobalPriorityText(priority: PriorityLevel | null) {
+  if (priority === 'high') {
+    return 'Prioridad global: Alta';
+  }
+
+  if (priority === 'medium') {
+    return 'Prioridad global: Media';
+  }
+
+  if (priority === 'low') {
+    return 'Prioridad global: Baja';
+  }
+
+  if (priority === 'notAnalyzable') {
+    return 'Prioridad global: Sin puntuación';
+  }
+
+  return 'Prioridad global: No disponible';
+}
+
+function getGlobalPriorityBadgeClasses(priority: PriorityLevel | null) {
+  return priority
+    ? getPriorityBadgeClasses(priority)
+    : 'border-slate-200 bg-slate-50 text-slate-700';
 }
 
 function getPriorityBadgeClasses(priority: PriorityLevel) {
@@ -1026,7 +1202,7 @@ export function ResourcesPage() {
   const [accessibility, setAccessibility] =
     useState<AccessibilityResponse | null>(null);
   const [executiveSummary, setExecutiveSummary] =
-    useState<ReviewSummary | null>(null);
+    useState<ExecutiveSummary | null>(null);
   const [job, setJob] = useState<JobStatus | null>(null);
   const [expandedPanels, setExpandedPanels] = useState<Record<string, boolean>>(
     {},
@@ -1089,7 +1265,7 @@ export function ResourcesPage() {
         }
 
         try {
-          const summaryPayload = await fetchSummary(resolvedJobId);
+          const summaryPayload = await fetchExecutiveSummary(resolvedJobId);
           if (!cancelled) {
             setExecutiveSummary(summaryPayload);
           }
@@ -1152,16 +1328,22 @@ export function ResourcesPage() {
     () => filterGroups(groups, filters, accessibilityByResourceId),
     [accessibilityByResourceId, filters, groups],
   );
-  const resourceScores = useMemo(
-    () =>
-      resources.map((resource) =>
-        getResourceScore(accessibilityByResourceId.get(resource.id)),
-      ),
-    [accessibilityByResourceId, resources],
-  );
   const globalScore = useMemo(
-    () => averageScores(resourceScores),
-    [resourceScores],
+    () =>
+      resolveBackendGlobalScore({
+        access,
+        accessibility,
+        executiveSummary,
+      }),
+    [access, accessibility, executiveSummary],
+  );
+  const globalPriority = useMemo(
+    () =>
+      resolveBackendGlobalPriority({
+        accessibility,
+        executiveSummary,
+      }),
+    [accessibility, executiveSummary],
   );
   const accessibilitySummary =
     accessibility?.summary ?? EMPTY_ACCESSIBILITY_SUMMARY;
@@ -1238,6 +1420,26 @@ export function ResourcesPage() {
     });
   }, [access, accessibility, courseTitle, executiveSummary, job]);
 
+  useEffect(() => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+
+    console.debug('[AccessibleCourse] executive global score fields', {
+      endpointUsed: globalScore.source,
+      endpointsConsumed: [
+        '/api/jobs/{job_id}/executive-summary',
+        '/api/jobs/{job_id}/accessibility',
+        '/api/jobs/{job_id}/resources',
+      ],
+      globalPriorityFromBackend: globalPriority.rawValue,
+      globalPrioritySource: globalPriority.source,
+      globalScoreFromBackend: globalScore.value,
+      displayedGlobalPriority: globalPriority.value,
+      displayedGlobalScore: globalScore.value,
+    });
+  }, [globalPriority, globalScore]);
+
   const togglePanel = (panelId: string) => {
     setExpandedPanels((current) => ({
       ...current,
@@ -1313,10 +1515,18 @@ export function ResourcesPage() {
               <span
                 className={classNames(
                   'text-4xl font-semibold tracking-[-0.05em]',
-                  getScoreTextClass(globalScore),
+                  getScoreTextClass(globalScore.value),
                 )}
               >
-                {getScoreText(globalScore)}
+                {getScoreText(globalScore.value)}
+              </span>
+              <span
+                className={classNames(
+                  'inline-flex w-fit rounded-full border px-3 py-1 text-sm font-semibold tracking-normal',
+                  getGlobalPriorityBadgeClasses(globalPriority.value),
+                )}
+              >
+                {getGlobalPriorityText(globalPriority.value)}
               </span>
             </p>
             {accessibilityError ? (
